@@ -9,9 +9,12 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 - Local web UI with video preview, seekable timeline, filmstrip, waveform, section list, search, and cut-preview playback.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload. Caption text and timestamps appear in the section list.
-- Selects sections by checkbox, timeline click/drag, type, search, or bulk-select controls.
+- Selects sections by checkbox, click-and-drag down the checkbox column to paint
+  a range, timeline click/drag, type, search, or bulk-select controls.
+- Press **Space** to play/pause the video preview (except while typing or when a
+  checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
-- **Frame-accurate re-encode** is the default. A stream-copy option is available for speed, but cuts can snap to keyframes.
+- **Frame-accurate re-encode** is the default. Stream copy stays fast for a single end-trim; cuts that need a seek or segment join automatically re-encode to prevent audio/video timestamp drift.
 - GPU encoder is preferred if the local FFmpeg build exposes it; otherwise it uses a CPU encoder. If hardware decoding fails, it retries with CPU decoding; if the hardware encoder itself fails, it retries with a matching CPU encoder when available.
 - No account, cloud API, or network service required. Your media stays on your PC when you run it locally.
 
@@ -77,7 +80,7 @@ A clean edit changes timestamps and requires the kept sections to be joined. In 
 
 This preserves the *format settings* as closely as possible; it cannot preserve the original encoded video bit-for-bit. The chosen bitrate is a target, so the output's measured average may differ. A short audio fade is added at cuts to avoid clicks.
 
-**Stream copy** is lossless and quick, but the edit points are approximate because an encoded stream can only be cut cleanly at keyframes. For precise cuts, use the default re-encode mode.
+**Stream copy** is lossless and quick only when the kept footage is one continuous range starting at the beginning and the source timestamps also start at zero (for example, trimming off the end). A start seek, non-zero source timestamps, or joining multiple kept sections can make FFmpeg's concat demuxer overlap packet timestamps—especially with long-GOP/B-frame video—and shift audio against video. Those edits automatically fall back to the selected re-encode profile for synchronized output; the job details explain when this happens. For that fallback, any source rotation/flip display tag is cleared so re-encoding does not unexpectedly change the orientation shown by the previous copy export. Re-encoding is slower and is not bit-for-bit lossless.
 
 The source's original stream/container may contain features that need manual adjustment (for example unusual codecs or HDR metadata). Always play and inspect the exported file before deleting the original.
 
@@ -105,20 +108,26 @@ FLV, MPEG-PS, DivX/Xvid video and AC3/DTS audio all download correctly over
 HTTP yet still render as a black box, because the *browser* refuses to demux or
 decode them — nothing is wrong with the file or the server.
 
-So when you open a file the browser cannot play, the server transcodes a small
-H.264/AAC MP4 **preview proxy** (max 1280 px wide, CRF 26) into `work/preview/`
-and the player uses that. The UI shows the build progress; once it finishes the
-player loads automatically and seeking works normally.
+So when you open a file the browser cannot play, the server builds a small
+H.264/AAC MP4 **preview proxy** (max 1280 px wide) in `work/preview/` and the
+player uses that. It prefers a supported hardware H.264 encoder (AMD AMF,
+NVIDIA NVENC, Intel QSV, or macOS VideoToolbox), falling back to the fast
+`libx264` CPU preset if hardware encoding is missing or cannot initialize. The
+progress message also reports encoder speed and a rough remaining-time estimate
+when FFmpeg provides them. Waveform and filmstrip generation wait until a
+required proxy is ready, avoiding several simultaneous full-file scans.
 
 - The proxy is only for on-screen scrubbing. **Detection and export always use
-  your original file**, so output quality is unaffected.
+  your original file**, so preview speed/quality settings do not affect export.
 - It is cached per file (keyed by size and modification time), so reopening the
   same video is instant.
 - HEVC/AV1 usually *can* play natively when your OS has a hardware decoder, so
   those are served directly first; if the browser still produces no frames the
   proxy is built automatically.
-- Building the proxy needs `libx264` in your FFmpeg build (the Windows Gyan
-  build and `apt install ffmpeg` both include it).
+- A CPU-only build needs `libx264`; the Windows Gyan build and `apt install
+  ffmpeg` normally include it. A hardware encoder also needs a compatible
+  FFmpeg build and working driver. If it fails to initialize, the app tries
+  `libx264` instead.
 
 ## Linux / macOS
 
@@ -135,7 +144,7 @@ Open <http://127.0.0.1:8765>. AMD AMF is primarily available with an appropriate
 
 ## Tests
 
-The included tests cover SRT/VTT parsing, silence detection, timeline labels, export planning, source-profile arguments, real FFmpeg re-encoding/stream-copy, HTTP endpoints, media seeking, waveform and thumbnails.
+The included tests cover SRT/VTT parsing, silence detection, timeline labels, export planning, source-profile arguments, real FFmpeg re-encoding/stream-copy, A/V timestamp and sync-safe fallback regressions, HTTP endpoints, media seeking, waveform and thumbnails.
 
 ```bash
 python -m pip install -r requirements-dev.txt

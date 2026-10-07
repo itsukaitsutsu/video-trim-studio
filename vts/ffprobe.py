@@ -100,7 +100,10 @@ def probe(path: str) -> dict:
 
     side_data = (vstream or {}).get("side_data_list") or []
     rotation = 0
+    has_display_matrix = False
     for sd in side_data:
+        if sd.get("side_data_type") == "Display Matrix":
+            has_display_matrix = True
         if "rotation" in sd:
             rotation = int(sd["rotation"])
 
@@ -111,9 +114,11 @@ def probe(path: str) -> dict:
         "container": (fmt.get("format_name") or "").split(",")[0],
         "ext": os.path.splitext(path)[1].lower(),
         "duration": duration,
+        "start_time": _float_or_none(fmt.get("start_time")),
         "bitrate_bps": fmt_bitrate or 0,
         "video": {
             "codec": (vstream or {}).get("codec_name"),
+            "start_time": _float_or_none((vstream or {}).get("start_time")),
             "profile": (vstream or {}).get("profile"),
             "width": _int_or_none((vstream or {}).get("width")),
             "height": _int_or_none((vstream or {}).get("height")),
@@ -128,10 +133,12 @@ def probe(path: str) -> dict:
             "color_primaries": (vstream or {}).get("color_primaries"),
             "color_transfer": (vstream or {}).get("color_transfer"),
             "rotation": rotation,
+            "has_display_matrix": has_display_matrix,
             "nb_frames": _int_or_none((vstream or {}).get("nb_frames")),
         } if vstream else None,
         "audio": {
             "codec": (astream or {}).get("codec_name"),
+            "start_time": _float_or_none((astream or {}).get("start_time")),
             "sample_rate": _int_or_none((astream or {}).get("sample_rate")),
             "channels": _int_or_none((astream or {}).get("channels")),
             "channel_layout": (astream or {}).get("channel_layout"),
@@ -143,6 +150,13 @@ def probe(path: str) -> dict:
 def _int_or_none(value):
     try:
         return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value):
+    try:
+        return float(value)
     except (TypeError, ValueError):
         return None
 

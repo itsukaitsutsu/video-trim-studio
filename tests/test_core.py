@@ -84,6 +84,15 @@ def test_complement_and_kept_segments():
     assert export.removed_total([(4.0, 6.5), (9.0, 12.0)], 20.0) == 5.5
 
 
+def test_stream_copy_is_limited_to_one_range_from_source_start():
+    assert export.stream_copy_fallback_reason([(0.0, 8.0)]) is None
+    assert "starts partway" in export.stream_copy_fallback_reason([(2.0, 10.0)])
+    assert "must be joined" in export.stream_copy_fallback_reason(
+        [(0.0, 2.0), (4.0, 10.0)])
+    assert "non-zero stream start" in export.stream_copy_fallback_reason(
+        [(0.0, 10.0)], {"start_time": 5.0})
+
+
 def test_overlapping_deletions_merge():
     kept = export.kept_segments(10.0, [(1.0, 3.0), (2.0, 5.0)])
     assert kept == [(0.0, 1.0), (5.0, 10.0)]

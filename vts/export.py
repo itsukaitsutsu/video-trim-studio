@@ -5,8 +5,10 @@ Two modes:
   reencode  - frame-accurate. trim/atrim per kept segment, concat, short audio
               fades at every cut, then re-encode with the source-matched
               profile (codec, bitrate, fps, pix_fmt, colour, audio params).
-  copy      - stream copy through the concat demuxer. Fast and lossless, but
-              every cut snaps to the nearest keyframe.
+  copy      - fast, lossless stream copy for a single kept range from t=0
+              when source timestamps also start at zero. Start seeks, non-zero
+              timestamps or multiple ranges fall back to re-encode to avoid
+              concat-demuxer overlap and A/V desynchronization.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import lru_cache
 import tempfile
 import threading
 import time
@@ -159,12 +162,32 @@ def build_encoder_args(opts: dict) -> list[str]:
     return args
 
 
+@lru_cache(maxsize=1)
+def _supports_display_rotation_override() -> bool:
+    """FFmpeg 7+ can clear a source display matrix before decoding it."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "full"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "-display_rotation" in (result.stdout or "") + (result.stderr or "")
+
+
 def build_command(source: str, output: str, segments: list[tuple[float, float]],
                   opts: dict, filter_script: str, has_audio: bool,
                   hwaccel: str = "auto") -> list[str]:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats"]
-    if opts.get("no_autorotate"):
+    if opts.get("clear_display_transform"):
+        # A stream-copy request that falls back to re-encoding must not acquire
+        # a new visible rotation/flip just because the decoder preserved the
+        # source display matrix. Zero the matrix before decoding, retaining the
+        # same stored pixel orientation as the original stream-copy result.
+        cmd += ["-display_rotation", "0", "-noautorotate"]
+    elif opts.get("no_autorotate"):
         cmd += ["-noautorotate"]
     if hwaccel and hwaccel != "none":
         cmd += ["-hwaccel", hwaccel]
@@ -185,12 +208,45 @@ def build_copy_command(source: str, concat_list: str, output: str,
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats",
            "-f", "concat", "-safe", "0", "-i", concat_list,
-           "-c", "copy"]
+           "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy"]
     if opts.get("copy_metadata"):
         cmd += ["-map_metadata", "0"]
     cmd += list(opts.get("mux_flags") or [])
     cmd += [output]
     return cmd
+
+
+def stream_copy_fallback_reason(
+    segments: list[tuple[float, float]], info: dict | None = None,
+) -> str | None:
+    """Stream-copy only cuts a single range safely in this editor.
+
+    The concat demuxer can emit pre-roll packets around arbitrary inpoints.
+    Joining those packets as-is may make DTS go backward and shift audio from
+    video. A start trim also seeks to a keyframe and can give the streams
+    different initial offsets. Non-zero source timestamps also make concat
+    in/out points ambiguous relative to the UI's zero-based timeline. Prefer a
+    slower, synchronized re-encode for any of these cases; a single range
+    starting at source time zero needs no join or input seek and remains a true
+    fast stream copy.
+    """
+    if len(segments) > 1:
+        return ("Several kept sections must be joined. Stream-copy joins can "
+                "desynchronize audio and video, so this export is being "
+                "re-encoded to keep them in sync.")
+    if segments and segments[0][0] > 1e-3:
+        return ("This cut starts partway through the source. Stream-copy seeking "
+                "can shift audio and video, so this export is being re-encoded "
+                "to keep them in sync.")
+    if info:
+        starts = [info.get("start_time")]
+        starts.extend((info.get(track) or {}).get("start_time")
+                      for track in ("video", "audio"))
+        if any(value is not None and abs(float(value)) > 0.05 for value in starts):
+            return ("The source has non-zero stream start timestamps. Stream-copy "
+                    "timing may not match the edit points, so this export is "
+                    "being re-encoded to keep sync.")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +342,9 @@ def _watch(job: dict, cmd: list[str], total_s: float, hwaccel_fallback: bool) ->
         # Remove the complete `-hwaccel VALUE` pair; retaining VALUE as a bare
         # positional input would make FFmpeg parse the fallback command wrong.
         retry = _without_hwaccel(cmd)
-        job["note"] = "GPU decode failed, retried with CPU decode"
+        retry_note = "GPU decode failed, retried with CPU decode"
+        previous_note = job.get("note")
+        job["note"] = f"{previous_note} · {retry_note}" if previous_note else retry_note
         job["progress"] = 0.0
         job["eta"] = None
         job["state"] = "running"
@@ -323,7 +381,33 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
     has_audio = bool(info.get("audio"))
 
     if mode == "copy":
-        # Keyframe-snapped: write a concat list of inpoint/outpoint entries.
+        fallback_note = stream_copy_fallback_reason(segments, info)
+        if fallback_note:
+            # Do not hand concat-demuxer timestamp overlap to the muxer. Reuse
+            # the normal frame-accurate path and make the mode change explicit
+            # in the job details shown to the user. The old copy path could
+            # drop a source display matrix in some FFmpeg/container combos, so
+            # clear it during this fallback to avoid changing the picture's
+            # visible rotation/flip as a side effect of fixing A/V timestamps.
+            fallback_opts = {**opts, "mode": "reencode"}
+            video = info.get("video") or {}
+            has_display_transform = bool(
+                video.get("has_display_matrix") or video.get("rotation"))
+            if has_display_transform:
+                if not _supports_display_rotation_override():
+                    raise JobError(
+                        "This clip has rotation/flip metadata, but this FFmpeg "
+                        "build cannot clear it for a sync-safe re-encode. "
+                        "Update FFmpeg and retry.")
+                fallback_opts["clear_display_transform"] = True
+                fallback_note += (
+                    " Its rotation/flip tag is cleared to preserve the orientation "
+                    "shown by the previous stream-copy export.")
+            fallback_opts["_mode_note"] = fallback_note
+            return export(source, info, merged, fallback_opts, output)
+
+        # A single kept range beginning at source time zero requires no seek or
+        # concat join, so stream copy is safe and remains genuinely fast.
         fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="vts_concat_")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             quoted = source.replace("'", "'\\''")
@@ -348,6 +432,8 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
 
     total = sum(e - s for s, e in segments)
     job = _new_job("reencode", output, total)
+    if opts.get("_mode_note"):
+        job["note"] = opts["_mode_note"]
     job["filter_script"] = script_path
     hwaccel = opts.get("hwaccel") or "auto"
     cmd = build_command(source, output, segments, opts, script_path, has_audio, hwaccel)
@@ -383,9 +469,11 @@ def _watch_and_cleanup(job, cmd, total, fallback, script_path,
     try:
         _watch(job, cmd, total, fallback)
         if job.get("state") == "error" and encoder_fallback_cmd:
+            retry_note = f"Hardware encoder failed; retrying with {fallback_codec}"
+            previous_note = job.get("note")
             job.update(
                 state="running", progress=0.0, eta=None, error=None,
-                note=f"Hardware encoder failed; retrying with {fallback_codec}",
+                note=f"{previous_note} · {retry_note}" if previous_note else retry_note,
             )
             _watch(job, encoder_fallback_cmd, total, False)
     finally:

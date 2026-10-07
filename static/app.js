@@ -147,14 +147,20 @@ function onProjectOpen(data) {
   updateTally();
   $("detectInfo").textContent = "";
   $("exportBtn").disabled = true;
-  loadWaveform();
-  loadThumbs();
+  // These FFmpeg scans compete for CPU and disk with a required proxy build.
+  // Defer cosmetic timeline assets until the browser-friendly copy is ready.
+  timelineAssetsPending = S.preview.mode === "proxy" && !S.preview.ready;
+  if (!timelineAssetsPending) loadTimelineAssets();
 }
 
 /* --------------------------------------------- browser preview (playability) */
 
 let previewTimer = null;
 let previewFallbackTried = false;
+let timelineAssetsPending = false;
+let checklistDrag = null;
+let suppressChecklistClick = false;
+let suppressChecklistSelection = false;
 
 function setPreviewInfo(text) {
   const el = $("previewInfo");
@@ -163,6 +169,29 @@ function setPreviewInfo(text) {
 }
 
 function hidePreviewInfo() { $("previewInfo").hidden = true; }
+
+function previewProgressMessage(st) {
+  const pct = Math.round((st.progress || 0) * 100);
+  const labels = {
+    h264_amf: "AMD AMF",
+    h264_nvenc: "NVIDIA NVENC",
+    h264_qsv: "Intel Quick Sync",
+    h264_videotoolbox: "VideoToolbox",
+    libx264: "CPU x264",
+  };
+  const details = [];
+  if (st.encoder) details.push(labels[st.encoder] || st.encoder);
+  const speed = Number(st.speed);
+  if (Number.isFinite(speed) && speed > 0) {
+    details.push(`${speed.toFixed(1)}× real time`);
+    if (S.duration > 0 && pct < 100) {
+      const secondsLeft = S.duration * (1 - (st.progress || 0)) / speed;
+      details.push(`about ${fmtTime(secondsLeft, false)} left`);
+    }
+  }
+  return `Building a browser-friendly preview… ${pct}%` +
+    (details.length ? ` · ${details.join(" · ")}` : "");
+}
 
 /**
  * Point the <video> element at /api/media, waiting for a preview proxy when the
@@ -204,12 +233,13 @@ function pollPreview() {
       clearInterval(previewTimer); previewTimer = null;
       hidePreviewInfo();
       loadPlayer();
+      if (timelineAssetsPending) loadTimelineAssets();
     } else if (st.state === "error") {
       clearInterval(previewTimer); previewTimer = null;
       setPreviewInfo(`Preview could not be built: ${st.error || "ffmpeg failed"}`);
+      if (timelineAssetsPending) loadTimelineAssets();
     } else {
-      const pct = Math.round((st.progress || 0) * 100);
-      setPreviewInfo("Building a browser-friendly preview… " + pct + "%");
+      setPreviewInfo(previewProgressMessage(st));
     }
   }, 700);
 }
@@ -386,7 +416,7 @@ function renderList() {
     tr.dataset.id = s.id;
     if (S.selected.has(s.id)) tr.className = "sel";
     tr.innerHTML =
-      `<td><input type="checkbox" ${S.selected.has(s.id) ? "checked" : ""}></td>` +
+      `<td class="check-cell" title="Hold and drag to select or clear several sections"><input type="checkbox" ${S.selected.has(s.id) ? "checked" : ""}></td>` +
       `<td class="tc">${fmtTime(s.start)}</td>` +
       `<td class="tc">${fmtTime(s.end)}</td>` +
       `<td class="tc">${s.dur.toFixed(2)}s</td>` +
@@ -396,7 +426,12 @@ function renderList() {
       ev.stopPropagation();
       toggleSection(s.id, ev.target.checked);
     };
-    tr.onclick = () => { $("player").currentTime = Math.max(0, s.start - 0.1); draw(); };
+    tr.onclick = () => {
+      const player = $("player");
+      player.currentTime = Math.max(0, s.start - 0.1);
+      player.focus();
+      draw();
+    };
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
@@ -427,6 +462,74 @@ function toggleSection(id, on) {
 function setSelection(ids, on) {
   for (const id of ids) { if (on) S.selected.add(id); else S.selected.delete(id); }
   renderList(); updateTally(); draw();
+}
+
+function setChecklistRow(tr, on) {
+  const id = Number(tr.dataset.id);
+  if (!Number.isInteger(id)) return false;
+  const changed = S.selected.has(id) !== on;
+  if (on) S.selected.add(id); else S.selected.delete(id);
+  tr.classList.toggle("sel", on);
+  const checkbox = tr.querySelector('input[type="checkbox"]');
+  if (checkbox) checkbox.checked = on;
+  return changed;
+}
+
+function bindChecklistDrag() {
+  const tbody = $("secTable").querySelector("tbody");
+
+  tbody.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0 || ev.isPrimary === false) return;
+    const input = ev.target.closest('input[type="checkbox"]');
+    const cell = ev.target.closest("td");
+    if (!input && (!cell || cell.cellIndex !== 0)) return;
+    const tr = (input || cell).closest("tr[data-id]");
+    if (!tr) return;
+
+    // We paint the checkbox states ourselves; prevent native text selection and
+    // a second toggle when the browser emits click on pointer-up.
+    ev.preventDefault();
+    ev.stopPropagation();
+    const id = Number(tr.dataset.id);
+    const on = !S.selected.has(id);
+    checklistDrag = { pointerId: ev.pointerId, on, lastId: id };
+    suppressChecklistClick = true;
+    suppressChecklistSelection = on;
+    if (setChecklistRow(tr, on)) { updateTally(); draw(); }
+  });
+
+  window.addEventListener("pointermove", (ev) => {
+    const drag = checklistDrag;
+    if (!drag || ev.pointerId !== drag.pointerId) return;
+    const target = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tr = target && target.closest("#secTable tbody tr[data-id]");
+    if (!tr || !tbody.contains(tr)) return;
+    const id = Number(tr.dataset.id);
+    if (id === drag.lastId) return;
+    drag.lastId = id;
+    if (setChecklistRow(tr, drag.on)) { updateTally(); draw(); }
+  });
+
+  const finishDrag = (ev) => {
+    if (!checklistDrag || ev.pointerId !== checklistDrag.pointerId) return;
+    checklistDrag = null;
+    // A click (if any) follows pointerup in the same event cycle. If the user
+    // dragged off the list and no click follows, clear suppression next turn.
+    setTimeout(() => { suppressChecklistClick = false; }, 0);
+  };
+  window.addEventListener("pointerup", finishDrag);
+  window.addEventListener("pointercancel", finishDrag);
+
+  document.addEventListener("click", (ev) => {
+    if (!suppressChecklistClick) return;
+    const tr = ev.target.closest?.("#secTable tbody tr[data-id]");
+    if (!tr) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    ev.stopImmediatePropagation();
+    if (setChecklistRow(tr, suppressChecklistSelection)) { updateTally(); draw(); }
+    suppressChecklistClick = false;
+  }, true);
 }
 
 /* ------------------------------------------------------------- timeline UI */
@@ -653,6 +756,27 @@ function zoomBy(factor) {
 
 function bindPlayer() {
   const p = $("player");
+  document.addEventListener("keydown", (ev) => {
+    if (ev.code !== "Space" || ev.repeat || ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const target = ev.target;
+    const tag = target && target.tagName;
+    const type = target && target.type;
+    // Leave Space available for typing, native checkbox/radio toggles, and
+    // focused buttons. Everywhere else it acts like a video player shortcut.
+    if (target && (target.isContentEditable || tag === "TEXTAREA" || tag === "SELECT" ||
+        (tag === "INPUT" && !["checkbox", "radio", "button", "submit", "reset"].includes(type)) ||
+        target.matches?.("input[type=checkbox], input[type=radio]") ||
+        target.closest?.("button, [role=button]"))) return;
+    if (!p.hasAttribute("src")) return;
+    ev.preventDefault();
+    if (p.paused) {
+      const playPromise = p.play();
+      if (playPromise && typeof playPromise.catch === "function") playPromise.catch(() => {});
+    } else {
+      p.pause();
+    }
+  });
+
   p.addEventListener("timeupdate", () => {
     if ($("cutPreview").checked && !p.paused) {
       const t = p.currentTime;
@@ -700,6 +824,12 @@ async function loadThumbs() {
   } catch (e) { /* filmstrip is cosmetic */ }
 }
 
+function loadTimelineAssets() {
+  timelineAssetsPending = false;
+  loadWaveform();
+  loadThumbs();
+}
+
 /* ----------------------------------------------------------------- export */
 
 function updateTally() {
@@ -733,6 +863,7 @@ async function doExport() {
     S.job = job;
     $("progWrap").hidden = false;
     $("exportInfo").textContent =
+      (job.note ? `⚠ ${job.note} ` : "") +
       `Job ${job.id} · ${job.kind} · ${job.segments} kept segments → ${job.output}`;
     pollJob(job.id);
   } catch (e) {
@@ -761,6 +892,7 @@ function pollJob(id) {
       $("exportBtn").disabled = false;
       $("exportBtn").textContent = "Export clean cut";
       $("exportInfo").innerHTML =
+        (job.note ? `⚠ ${escapeHtml(job.note)}<br>` : "") +
         `✅ Done in ${fmtTime(job.elapsed, false)} → <b>${escapeHtml(job.output)}</b> (${fmtBytes(job.size)})`;
     } else if (job.state === "error") {
       clearInterval(S.jobTimer);
@@ -860,6 +992,7 @@ function bindUI() {
   $("exportBtn").onclick = doExport;
 
   window.addEventListener("resize", draw);
+  bindChecklistDrag();
   bindTimeline();
   bindPlayer();
 }

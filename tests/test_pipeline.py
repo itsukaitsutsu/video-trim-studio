@@ -3,6 +3,7 @@
 Skipped automatically when ffmpeg is not installed.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -48,12 +49,36 @@ def source(tmp_path_factory):
         "-f", "lavfi", "-i", f"testsrc=size=320x240:rate=30:duration={DUR}",
         "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={DUR}",
         "-af", af,
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p",
+        "-g", "250", "-keyint_min", "250", "-sc_threshold", "0",
         "-b:v", "1500k", "-maxrate", "2250k",
         "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
         "-movflags", "+faststart", path,
     ], check=True, capture_output=True)
     return path
+
+
+def _stream_timing(path):
+    data = json.loads(subprocess.check_output([
+        "ffprobe", "-v", "error", "-show_entries",
+        "stream=codec_type,start_time,duration", "-of", "json", path,
+    ], text=True))
+    return {
+        stream["codec_type"]: {
+            "start": float(stream.get("start_time", 0.0)),
+            "duration": float(stream.get("duration", 0.0)),
+        }
+        for stream in data["streams"]
+    }
+
+
+def _packet_dts(path, selector):
+    data = json.loads(subprocess.check_output([
+        "ffprobe", "-v", "error", "-select_streams", selector,
+        "-show_packets", "-show_entries", "packet=dts_time", "-of", "json", path,
+    ], text=True))
+    return [float(packet["dts_time"]) for packet in data["packets"]
+            if packet.get("dts_time") not in (None, "N/A")]
 
 
 def test_probe_reads_source(source):
@@ -65,6 +90,8 @@ def test_probe_reads_source(source):
     assert info["audio"]["sample_rate"] == 48000
     assert info["audio"]["channels"] == 2
     assert abs(info["duration"] - DUR) < 0.5
+    assert abs(info["video"]["start_time"]) < 0.05
+    assert abs(info["audio"]["start_time"]) < 0.05
 
 
 def test_silence_detection_finds_the_gaps(source):
@@ -153,11 +180,91 @@ def test_hardware_encoder_failure_falls_back_to_cpu(source, tmp_path):
     assert probe(out)["video"]["codec"] == "h264"
 
 
-def test_stream_copy_mode_produces_a_playable_file(source, tmp_path):
+def test_stream_copy_multicut_falls_back_and_preserves_av_sync(source, tmp_path):
+    """Multi-range concat can overlap DTS; copy mode must re-encode instead."""
     info = probe(source)
     prof = source_match_profile(info)
-    out = str(tmp_path / "copy.mp4")
-    job = export.export(source, info, [list(SILENCES[0])], {**prof, "mode": "copy"}, out)
+    prof.update(codec="libx264", preset="ultrafast", hwaccel="none")
+    out = str(tmp_path / "copy-request-multicut.mp4")
+
+    job = export.export(
+        source, info, [list(SILENCES[0])], {**prof, "mode": "copy"}, out)
+    assert job["kind"] == "reencode"
+    assert "desynchronize" in job.get("note", "")
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = export.get_job(job["id"])
+        if state["state"] in ("done", "error"):
+            break
+        time.sleep(0.2)
+    state = export.get_job(job["id"])
+    assert state["state"] == "done", f"sync-safe fallback failed: {state.get('error')}"
+
+    result = probe(out)
+    assert result["video"]["codec"] == info["video"]["codec"]
+    assert result["duration"] < info["duration"]
+    timing = _stream_timing(out)
+    assert "video" in timing and "audio" in timing
+    assert abs(timing["video"]["start"] - timing["audio"]["start"]) < 0.05
+    assert abs(timing["video"]["duration"] - timing["audio"]["duration"]) < 0.12
+
+    # The original failure included timestamp overlap across segments. A good
+    # synchronized result must have monotonic DTS in both output streams.
+    for selector in ("v:0", "a:0"):
+        dts = _packet_dts(out, selector)
+        assert dts
+        assert all(current >= previous for previous, current in zip(dts, dts[1:]))
+
+
+def test_copy_fallback_preserves_pixel_orientation(source, tmp_path):
+    help_text = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-h", "full"], capture_output=True,
+        text=True, check=False,
+    )
+    if "-display_rotation" not in (help_text.stdout + help_text.stderr):
+        pytest.skip("installed FFmpeg cannot override display rotation")
+
+    rotated = str(tmp_path / "rotated-source.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-display_rotation", "270", "-i", source, "-map", "0", "-c", "copy", rotated,
+    ], check=True, capture_output=True)
+    info = probe(rotated)
+    assert info["video"]["has_display_matrix"]
+    assert info["video"]["rotation"] != 0
+
+    prof = source_match_profile(info)
+    prof.update(codec="libx264", preset="ultrafast", hwaccel="none")
+    out = str(tmp_path / "rotated-copy-fallback.mp4")
+    job = export.export(
+        rotated, info, [list(SILENCES[0])], {**prof, "mode": "copy"}, out)
+    assert job["kind"] == "reencode"
+    assert "previous stream-copy export" in job.get("note", "")
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = export.get_job(job["id"])
+        if state["state"] in ("done", "error"):
+            break
+        time.sleep(0.2)
+    state = export.get_job(job["id"])
+    assert state["state"] == "done", f"orientation-preserving fallback failed: {state.get('error')}"
+    result = probe(out)
+    assert (result["video"]["width"], result["video"]["height"]) == (
+        info["video"]["width"], info["video"]["height"])
+    assert not result["video"]["has_display_matrix"]
+
+
+def test_stream_copy_tail_trim_remains_fast(source, tmp_path):
+    """A range from t=0 has no concat join or seek, so it can stay bit-copy."""
+    info = probe(source)
+    prof = source_match_profile(info)
+    out = str(tmp_path / "copy-tail-trim.mp4")
+    job = export.export(
+        source, info, [[DUR - 3.0, DUR]], {**prof, "mode": "copy"}, out)
+    assert job["kind"] == "copy"
+
     deadline = time.time() + 120
     while time.time() < deadline:
         state = export.get_job(job["id"])
@@ -165,8 +272,39 @@ def test_stream_copy_mode_produces_a_playable_file(source, tmp_path):
             break
         time.sleep(0.2)
     state = export.get_job(job["id"])
-    assert state["state"] == "done", f"copy failed: {state.get('error')}"
+    assert state["state"] == "done", f"safe stream copy failed: {state.get('error')}"
     result = probe(out)
     assert result["video"]["codec"] == info["video"]["codec"]
-    # keyframe snapping means the cut is approximate, but it must be shorter
     assert result["duration"] < info["duration"]
+
+
+def test_stream_copy_nonzero_start_falls_back_and_keeps_timing(source, tmp_path):
+    offset = str(tmp_path / "offset-source.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-itsoffset", "5", "-i", source, "-map", "0", "-c", "copy", offset,
+    ], check=True, capture_output=True)
+    info = probe(offset)
+    assert info["start_time"] > 4.9
+
+    prof = source_match_profile(info)
+    prof.update(codec="libx264", preset="ultrafast", hwaccel="none")
+    out = str(tmp_path / "offset-sync-safe.mp4")
+    job = export.export(
+        offset, info, [[info["duration"] - 3.0, info["duration"]]],
+        {**prof, "mode": "copy"}, out)
+    assert job["kind"] == "reencode"
+    assert "non-zero stream start" in job.get("note", "")
+
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = export.get_job(job["id"])
+        if state["state"] in ("done", "error"):
+            break
+        time.sleep(0.2)
+    state = export.get_job(job["id"])
+    assert state["state"] == "done", f"offset fallback failed: {state.get('error')}"
+    result = probe(out)
+    assert abs(result["duration"] - (info["duration"] - 3.0)) < 0.3
+    timing = _stream_timing(out)
+    assert abs(timing["video"]["start"] - timing["audio"]["start"]) < 0.05

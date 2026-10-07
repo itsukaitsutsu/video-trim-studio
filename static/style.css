@@ -73,6 +73,9 @@ video { width: 100%; max-height: 46vh; background: #000; border-radius: 4px; dis
 .sw.deleted { background: var(--cut); }
 
 .list-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.selection-hint { margin: -3px 0 7px; }
+.check-cell { cursor: crosshair; user-select: none; touch-action: none; }
+.check-cell input { cursor: crosshair; }
 .mini-label { color: var(--dim); font-size: 12px; display: flex; align-items: center; gap: 4px; }
 .list-scroll { max-height: 34vh; overflow: auto; border-top: 1px solid var(--line); }
 table { width: 100%; border-collapse: collapse; font-size: 12.5px; }

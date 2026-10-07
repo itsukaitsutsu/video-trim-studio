@@ -34,6 +34,7 @@
       <div id="previewInfo" class="dim small" hidden></div>
       <div class="player-tools">
         <label class="chk"><input type="checkbox" id="cutPreview" checked> Skip deleted parts while playing (cut preview)</label>
+        <span class="dim small" title="Press Space to play or pause when focus is not in a form control">Space: play/pause</span>
         <span id="playInfo" class="dim"></span>
       </div>
     </div>
@@ -72,6 +73,7 @@
         <button class="mini" id="selAllSilence">all silence</button>
         <button class="mini" id="selAllCaptions">all captions</button>
       </div>
+      <div class="dim small selection-hint">Tip: hold and drag down the checkbox column to select or clear a run of sections.</div>
       <div class="list-scroll">
         <table id="secTable">
           <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>caption text</th></tr></thead>
@@ -108,7 +110,7 @@
       <div class="row"><label>Mode</label>
         <select id="xMode">
           <option value="reencode">Re-encode (frame accurate)</option>
-          <option value="copy">Stream copy (fast, keyframe snapped)</option>
+          <option value="copy">Stream copy (fast for end-trims; other cuts re-encode for sync)</option>
         </select>
       </div>
       <div class="row"><label>Output file</label><span class="grow"><input id="xOutput" type="text" spellcheck="false"></span></div>

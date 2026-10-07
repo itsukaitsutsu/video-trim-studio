@@ -85,6 +85,29 @@ def test_mime_never_lies_about_the_container():
     assert preview.mime_for("clip.webm") != "video/mp4"
 
 
+def test_preview_encoder_prefers_available_hardware_then_cpu():
+    assert preview.preview_encoder_candidates({"libx264", "h264_amf"}) == [
+        "h264_amf", "libx264",
+    ]
+    assert preview.preview_encoder_candidates({"libx264", "h264_nvenc"}) == [
+        "h264_nvenc", "libx264",
+    ]
+
+
+def test_preview_encoder_falls_back_to_software_when_no_hardware_exists():
+    assert preview.preview_encoder_candidates({"libx264", "aac"}) == ["libx264"]
+    assert preview.preview_encoder_candidates({"aac"}) == []
+
+
+def test_preview_encoder_profiles_use_speed_or_preview_quality_settings():
+    amf = preview.preview_encoder_args("h264_amf")
+    assert "-quality" in amf and "speed" in amf
+    assert "-rc" in amf and "cqp" in amf
+    x264 = preview.preview_encoder_args("libx264")
+    assert "ultrafast" in x264
+    assert "-crf" in x264
+
+
 # --- HTTP Range parsing ---------------------------------------------------
 
 @pytest.mark.parametrize("header,size,want", [
