@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Trim Studio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">&#9986;</span>
+    <div>
+      <h1>Video Trim Studio</h1>
+      <p class="sub">Detect caption &amp; silence sections &rarr; tick what to remove &rarr; export matching the source</p>
+    </div>
+  </div>
+  <div class="env" id="env">checking ffmpeg&hellip;</div>
+</header>
+
+<section class="openbar">
+  <input id="pathInput" type="text" placeholder="Path to video, e.g. C:\Videos\clip.mp4  (or browse)" spellcheck="false">
+  <button id="browseBtn" class="ghost">Browse&hellip;</button>
+  <button id="openBtn" class="primary">Open</button>
+  <button id="demoBtn" class="ghost">Open demo</button>
+  <label class="ghost filebtn">Upload<input id="uploadInput" type="file" accept="video/*"></label>
+  <span id="fileMeta" class="filemeta"></span>
+</section>
+
+<main>
+  <div class="col-main">
+    <div class="player-wrap">
+      <video id="player" controls preload="metadata"></video>
+      <div class="player-tools">
+        <label class="chk"><input type="checkbox" id="cutPreview" checked> Skip deleted parts while playing (cut preview)</label>
+        <span id="playInfo" class="dim"></span>
+      </div>
+    </div>
+
+    <div class="timeline-card">
+      <div class="tl-head">
+        <strong>Timeline</strong>
+        <span class="dim" id="tlHint">click a block to select &middot; drag to select a range &middot; Alt+drag to deselect &middot; Ctrl+wheel to zoom</span>
+        <span class="spacer"></span>
+        <button class="mini" id="zoomOut">&minus;</button>
+        <button class="mini" id="zoomIn">+</button>
+        <button class="mini" id="zoomFit">fit</button>
+      </div>
+      <canvas id="timeline" height="132"></canvas>
+      <div class="legend">
+        <span><i class="sw caption"></i>caption</span>
+        <span><i class="sw silence"></i>silence</span>
+        <span><i class="sw other"></i>other audio</span>
+        <span><i class="sw deleted"></i>selected for deletion</span>
+      </div>
+    </div>
+
+    <div class="list-card">
+      <div class="list-tools">
+        <button class="chip on" data-kind="caption">caption</button>
+        <button class="chip on" data-kind="silence">silence</button>
+        <button class="chip on" data-kind="other">other</button>
+        <label class="mini-label">min duration
+          <input id="minDur" type="number" value="0.4" min="0" step="0.1" style="width:64px"> s
+        </label>
+        <input id="searchBox" type="search" placeholder="search caption text&hellip;">
+        <span class="spacer"></span>
+        <button class="mini" id="selVisible">select visible</button>
+        <button class="mini" id="selNone">clear</button>
+        <button class="mini" id="selInvert">invert</button>
+        <button class="mini" id="selAllSilence">all silence</button>
+        <button class="mini" id="selAllCaptions">all captions</button>
+      </div>
+      <div class="list-scroll">
+        <table id="secTable">
+          <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>caption text</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="listEmpty" class="empty">No sections yet &mdash; open a video and run detection.</div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="col-side">
+    <div class="card">
+      <h2>1 &middot; Detect sections</h2>
+      <label class="chk"><input type="checkbox" id="dSilence" checked> Detect silence (ffmpeg silencedetect)</label>
+      <div class="row"><label>Threshold (dB)</label><input id="dThresh" type="number" value="-45" step="1"></div>
+      <div class="row"><label>Min silence (ms)</label><input id="dMinSilence" type="number" value="800" step="50"></div>
+      <label class="chk"><input type="checkbox" id="dCues" checked> Use captions (.srt / .vtt)</label>
+      <div class="row"><label>Subtitle file</label>
+        <span class="grow"><input id="dSubPath" type="text" placeholder="path to .srt / .vtt (optional)"></span>
+      </div>
+      <div class="row"><label></label>
+        <span class="grow">
+          <label class="ghost filebtn sm">Upload .srt/.vtt<input id="dSubFile" type="file" accept=".srt,.vtt"></label>
+          <span id="subInfo" class="dim"></span>
+        </span>
+      </div>
+      <div class="row"><label>Min section (ms)</label><input id="dMinSection" type="number" value="120" step="10"></div>
+      <button id="detectBtn" class="primary block">Detect sections</button>
+      <div id="detectInfo" class="dim small"></div>
+    </div>
+
+    <div class="card">
+      <h2>2 &middot; Export settings</h2>
+      <div class="row"><label>Mode</label>
+        <select id="xMode">
+          <option value="reencode">Re-encode (frame accurate)</option>
+          <option value="copy">Stream copy (fast, keyframe snapped)</option>
+        </select>
+      </div>
+      <div class="row"><label>Output file</label><span class="grow"><input id="xOutput" type="text" spellcheck="false"></span></div>
+      <div id="reencodeOpts">
+        <div class="row"><label>Video codec</label><select id="xCodec"></select></div>
+        <div class="row"><label>Quality</label>
+          <select id="xQuality">
+            <option value="bitrate">Match source bitrate</option>
+            <option value="crf">Constant quality (CRF / encoder equivalent)</option>
+          </select>
+        </div>
+        <div class="row" id="rowBitrate"><label>Video bitrate (kbps)</label><input id="xBitrate" type="number" step="100"></div>
+        <div class="row" id="rowCrf"><label>CRF</label><input id="xCrf" type="number" value="18" min="0" max="51"></div>
+        <div class="row"><label>Preset</label>
+          <select id="xPreset">
+            <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+            <option>faster</option><option>fast</option><option selected>medium</option>
+            <option>slow</option><option>slower</option><option>veryslow</option>
+          </select>
+        </div>
+        <div class="row"><label>Pixel format</label><input id="xPixFmt" type="text"></div>
+        <div class="row"><label>Decode (hwaccel)</label><select id="xHwaccel"></select></div>
+        <div class="row"><label>Audio</label>
+          <span class="grow">
+            <input id="xAudioCodec" type="text" style="width:78px">
+            <input id="xAudioBitrate" type="number" style="width:66px" title="kbps"> kbps
+            <input id="xAudioRate" type="number" style="width:70px" title="sample rate"> Hz
+          </span>
+        </div>
+        <div class="row"><label>Audio fade (ms)</label><input id="xFade" type="number" value="30" min="0" step="5"></div>
+        <div class="checks">
+          <label class="chk"><input type="checkbox" id="xMatchFps"> match frame rate</label>
+          <label class="chk"><input type="checkbox" id="xMatchColor" checked> match colour tags</label>
+          <label class="chk"><input type="checkbox" id="xMeta" checked> copy metadata</label>
+          <label class="chk"><input type="checkbox" id="xNoRotate"> keep rotation tag</label>
+        </div>
+      </div>
+      <button id="resetOpts" class="ghost block small">Reset everything to source values</button>
+    </div>
+
+    <div class="card">
+      <h2>3 &middot; Export</h2>
+      <div class="tally">
+        <div><span class="dim">source</span><b id="tSrc">--:--</b></div>
+        <div><span class="dim">removing</span><b id="tCut" class="cut">--:--</b></div>
+        <div><span class="dim">result</span><b id="tOut">--:--</b></div>
+      </div>
+      <div id="planWarn" class="warn"></div>
+      <button id="exportBtn" class="primary block big" disabled>Export clean cut</button>
+      <div class="progress" id="progWrap" hidden>
+        <div class="bar"><div id="progBar"></div></div>
+        <div class="progtext"><span id="progPct">0%</span><span id="progMeta" class="dim"></span></div>
+      </div>
+      <div id="exportInfo" class="dim small"></div>
+      <pre id="jobError" class="error" hidden></pre>
+    </div>
+  </aside>
+</main>
+
+<script src="/static/app.js"></script>
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v31edd6df95cf4e85bb4c19e7a9bdbcba1788362987495" integrity="sha512-iIg7k2xntmwu6/uSb5tpc/hySgZc4eoL31yB29W6tJFo2akwjPWcEqnCEdJvGexCL0KEQwVYv5BlowfhVz26hg==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f","spa":2}' crossorigin="anonymous"></script>
+</body>
+</html>
