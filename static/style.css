@@ -15,6 +15,7 @@
 
 /* Author styles such as .modal { display:flex } otherwise override the
    browser's default styling for the HTML `hidden` attribute. */
+[hidden] { display: none !important; }
 
 body {
   margin: 0;

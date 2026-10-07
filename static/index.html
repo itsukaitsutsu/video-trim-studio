@@ -31,6 +31,7 @@
   <div class="col-main">
     <div class="player-wrap">
       <video id="player" controls preload="metadata"></video>
+      <div id="previewInfo" class="dim small" hidden></div>
       <div class="player-tools">
         <label class="chk"><input type="checkbox" id="cutPreview" checked> Skip deleted parts while playing (cut preview)</label>
         <span id="playInfo" class="dim"></span>
@@ -167,7 +168,17 @@
   </aside>
 </main>
 
+<div class="modal" id="browserModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <strong>Choose a file</strong>
+      <button id="browserClose" class="mini">Close</button>
+    </div>
+    <div class="crumbs" id="browserCwd"></div>
+    <div class="browser-list" id="browserList"></div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
-<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v31edd6df95cf4e85bb4c19e7a9bdbcba1788362987495" integrity="sha512-iIg7k2xntmwu6/uSb5tpc/hySgZc4eoL31yB29W6tJFo2akwjPWcEqnCEdJvGexCL0KEQwVYv5BlowfhVz26hg==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f","spa":2}' crossorigin="anonymous"></script>
 </body>
 </html>

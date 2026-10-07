@@ -1,6 +1,0 @@
-# Video Trim Studio - Python dependencies
-# ffmpeg / ffprobe must be installed separately and on PATH.
-fastapi>=0.110
-uvicorn[standard]>=0.27
-python-multipart>=0.0.9
-numpy>=1.24

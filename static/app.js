@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const S = {
   env: null,
   project: null,
+  preview: null,
   sections: [],
   selected: new Set(),
   peaks: [],
@@ -127,8 +128,8 @@ function onProjectOpen(data) {
   $("subInfo").textContent = data.demo_subtitles ? "Bundled demo subtitles ready" : "";
   $("dSubPath").value = data.demo_subtitles || "";
   $("pathInput").value = data.info.path;
-  $("player").src = "/api/media";
-  $("player").load();
+  S.preview = data.preview || { mode: "direct", ready: false, state: "none" };
+  setupPreview(S.preview);
   S.view = { start: 0, span: S.duration };
 
   const v = data.info.video || {};
@@ -148,6 +149,88 @@ function onProjectOpen(data) {
   $("exportBtn").disabled = true;
   loadWaveform();
   loadThumbs();
+}
+
+/* --------------------------------------------- browser preview (playability) */
+
+let previewTimer = null;
+let previewFallbackTried = false;
+
+function setPreviewInfo(text) {
+  const el = $("previewInfo");
+  el.hidden = false;
+  el.textContent = text;
+}
+
+function hidePreviewInfo() { $("previewInfo").hidden = true; }
+
+/**
+ * Point the <video> element at /api/media, waiting for a preview proxy when the
+ * source is something browsers cannot play (AVI, MPEG-TS, WMV, DivX, AC3…).
+ */
+function setupPreview(preview) {
+  if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
+  previewFallbackTried = false;
+  const p = $("player");
+  const mode = (preview && preview.mode) || "direct";
+
+  if (mode === "proxy" && !(preview && preview.ready)) {
+    p.removeAttribute("src");
+    p.load();
+    setPreviewInfo(`${preview.reason || "This format is not playable in a browser."} ` +
+                   "Building a browser-friendly preview… 0%");
+    pollPreview();
+    return;
+  }
+  hidePreviewInfo();
+  loadPlayer();
+}
+
+function loadPlayer() {
+  const p = $("player");
+  // Cache-bust: /api/media may now serve a freshly built proxy, and the browser
+  // would otherwise replay the cached (unplayable) response.
+  p.src = `/api/media?t=${Date.now()}`;
+  p.load();
+}
+
+function pollPreview() {
+  if (previewTimer) clearInterval(previewTimer);
+  previewTimer = setInterval(async () => {
+    let st;
+    try { st = await api("/api/preview-status"); } catch (_) { return; }
+    S.preview = st;
+    if (st.ready) {
+      clearInterval(previewTimer); previewTimer = null;
+      hidePreviewInfo();
+      loadPlayer();
+    } else if (st.state === "error") {
+      clearInterval(previewTimer); previewTimer = null;
+      setPreviewInfo(`Preview could not be built: ${st.error || "ffmpeg failed"}`);
+    } else {
+      const pct = Math.round((st.progress || 0) * 100);
+      setPreviewInfo("Building a browser-friendly preview… " + pct + "%");
+    }
+  }, 700);
+}
+
+/**
+ * Fallback for sources the server believed were playable (HEVC/AV1) but that
+ * this browser has no decoder for: they load, report a duration, and still
+ * produce no frames, so ask the server for a proxy.
+ */
+async function maybeRequestProxy() {
+  if (previewFallbackTried || !S.project) return;
+  if (S.preview && (S.preview.ready || S.preview.serving_proxy)) return;
+  previewFallbackTried = true;
+  setPreviewInfo("This browser cannot decode that file. Building a preview…");
+  try {
+    await api("/api/preview-proxy", { method: "POST", body: "{}" });
+    pollPreview();
+  } catch (e) {
+    previewFallbackTried = false;
+    setPreviewInfo(`Could not build a preview: ${e.message}`);
+  }
 }
 
 function defaultOutput() {
@@ -214,14 +297,22 @@ async function browseTo(path) {
   list.innerHTML = "";
   const add = (label, onClick, size) => {
     const row = document.createElement("div");
-    row.innerHTML = `<span>${label}</span><span class="size">${size || ""}</span>`;
+    row.innerHTML = `<span>${escapeHtml(label)}</span><span class="size">${escapeHtml(size || "")}</span>`;
     row.onclick = onClick;
     list.appendChild(row);
   };
   if (data.parent) add("⬆ ..", () => browseTo(data.parent));
+  // Windows: every drive is its own tree, so list them here. This is both the
+  // quick jump from any folder and the contents of the "This PC" level.
+  const here = (data.cwd || "").replace(/\\+$/, "").toLowerCase();
+  for (const drv of data.drives || []) {
+    const label = drv.replace(/\\+$/, "");
+    if (label.toLowerCase() === here) continue;   // don't list the drive we're in
+    add(`💽 ${label}`, () => browseTo(drv));
+  }
   for (const d of data.dirs) add(`📁 ${d.name}`, () => browseTo(d.path));
   for (const f of data.files) {
-    const isVideo = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|mpg|mpeg|flv|wmv)$/i.test(f.name);
+    const isVideo = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob)$/i.test(f.name);
     add(`${isVideo ? "🎬" : "📄"} ${f.name}`, () => {
       if (isVideo) { $("pathInput").value = f.path; $("browserModal").hidden = true; openPath(f.path); }
       else if (/\.(srt|vtt)$/i.test(f.name)) {
@@ -576,7 +667,11 @@ function bindPlayer() {
   p.addEventListener("seeked", draw);
   p.addEventListener("loadedmetadata", () => {
     if (!S.duration && p.duration) { S.duration = p.duration; S.view.span = S.duration; draw(); }
+    // A container can demux while the video track stays undecodable (HEVC
+    // without a hardware decoder). Give it a moment, then check for frames.
+    setTimeout(() => { if (!p.videoWidth && !p.error) maybeRequestProxy(); }, 1500);
   });
+  p.addEventListener("error", () => maybeRequestProxy());
   setInterval(() => { if (!p.paused) draw(); }, 250);
 }
 
@@ -687,12 +782,20 @@ function bindUI() {
     catch (e) { $("fileMeta").textContent = ""; alert(e.message); }
   };
   $("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") openPath(e.target.value.trim()); });
-  $("browseBtn").onclick = async () => {
-    $("browserModal").hidden = false;
-    try { await browseTo(""); } catch (e) { alert(e.message); }
-  };
-  $("browserClose").onclick = () => { $("browserModal").hidden = true; };
-  $("browserModal").onclick = (e) => { if (e.target.id === "browserModal") $("browserModal").hidden = true; };
+  // The file-browser modal is optional markup: if it is absent, only browsing
+  // breaks. Never let a missing element abort the rest of the wiring.
+  const modal = $("browserModal");
+  if (modal) {
+    $("browseBtn").onclick = async () => {
+      modal.hidden = false;
+      try { await browseTo(""); } catch (e) { alert(e.message); }
+    };
+    const close = $("browserClose");
+    if (close) close.onclick = () => { modal.hidden = true; };
+    modal.onclick = (e) => { if (e.target.id === "browserModal") modal.hidden = true; };
+  } else {
+    $("browseBtn").onclick = () => alert("The file browser is unavailable in this build.");
+  }
 
   $("uploadInput").onchange = async (e) => {
     const f = e.target.files[0];

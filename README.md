@@ -85,6 +85,41 @@ The source's original stream/container may contain features that need manual adj
 
 This version **imports** SRT/VTT. Use your existing `auto_caption.py` to create one, then select its `.srt` in the UI. The app does not currently run faster-whisper or generate new transcripts. Word-level SRT cues can yield very small sections; the minimum-duration and minimum-section controls help keep the timeline manageable.
 
+## Browsing for a file
+
+The **Browse…** dialog walks your filesystem, and on Windows it can reach every
+drive — not just `C:`. Because Windows has no single root (`C:\` is its own
+top), the dialog adds a virtual **This PC** level above the drive roots: from
+`C:\` the Up row goes there, and `💽 D:`, `💽 E:`, USB sticks and mapped network
+drives are also listed as a quick jump from *any* folder, so you never have to
+walk up to switch drives.
+
+Hidden entries and the Windows system folders at a drive root
+(`$Recycle.Bin`, `System Volume Information`, …) are skipped, and an entry that
+refuses to be read is passed over instead of blanking the whole listing.
+
+## Preview playback
+
+Browsers can only play a few container/codec combinations. AVI, MPEG-TS, WMV,
+FLV, MPEG-PS, DivX/Xvid video and AC3/DTS audio all download correctly over
+HTTP yet still render as a black box, because the *browser* refuses to demux or
+decode them — nothing is wrong with the file or the server.
+
+So when you open a file the browser cannot play, the server transcodes a small
+H.264/AAC MP4 **preview proxy** (max 1280 px wide, CRF 26) into `work/preview/`
+and the player uses that. The UI shows the build progress; once it finishes the
+player loads automatically and seeking works normally.
+
+- The proxy is only for on-screen scrubbing. **Detection and export always use
+  your original file**, so output quality is unaffected.
+- It is cached per file (keyed by size and modification time), so reopening the
+  same video is instant.
+- HEVC/AV1 usually *can* play natively when your OS has a hardware decoder, so
+  those are served directly first; if the browser still produces no frames the
+  proxy is built automatically.
+- Building the proxy needs `libx264` in your FFmpeg build (the Windows Gyan
+  build and `apt install ffmpeg` both include it).
+
 ## Linux / macOS
 
 Install Python 3.10+, FFmpeg and FFprobe using your package manager, then from the project directory:
@@ -113,7 +148,7 @@ The tests require FFmpeg and FFprobe on `PATH` for the integration cases.
 
 ```text
 server.py             FastAPI local server
-vts/                  FFprobe, detection, timeline assets, FFmpeg export
+vts/                  FFprobe, detection, timeline assets, preview proxy, FFmpeg export
 static/               Browser UI (plain HTML/CSS/JS; no build step)
 demo/                 18-second sample video + sample captions
 setup.bat, run.bat    Windows install/run helpers

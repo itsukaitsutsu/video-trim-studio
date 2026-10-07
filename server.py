@@ -17,12 +17,13 @@ import argparse
 import os
 import re
 import shutil
+import string
 import sys
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -31,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from vts import detect as detect_mod          # noqa: E402
 from vts import export as export_mod         # noqa: E402
 from vts import media as media_mod           # noqa: E402
+from vts import preview as preview_mod       # noqa: E402
 from vts.ffprobe import (                    # noqa: E402
     VIDEO_EXTS, available_encoders, encoder_candidates, hwaccel_options,
     probe, require_ffmpeg, source_match_profile, FFmpegMissing,
@@ -60,15 +62,38 @@ class Project:
         self.thumbs: dict = {}
         self.uploaded = False
         self.demo_subtitles: str | None = None
+        # "direct" (play the source), "proxy" (must transcode) or "uncertain".
+        self.preview_mode, self.preview_reason = preview_mod.browser_support(info)
+        self.proxy = preview_mod.PreviewProxy(
+            self.path, str(WORK_DIR), float(info.get("duration") or 0.0))
 
     @property
     def path(self) -> str:
         return self.info["path"]
 
+    def start_preview(self, reason: str | None = None) -> None:
+        """Kick off the preview transcode for sources browsers cannot play."""
+        self.proxy.start(reason or self.preview_reason)
+
+    def preview_file(self) -> str:
+        """What `<video>` should be served: the proxy when there is one."""
+        return self.proxy.serve_path() or self.path
+
+    def preview_state(self) -> dict:
+        state = self.proxy.to_dict()
+        state["mode"] = self.preview_mode
+        # Once a proxy is ready we serve it, whatever the original mode was.
+        if state["ready"]:
+            state["mode"] = "proxy"
+        state["reason"] = self.preview_reason
+        state["serving_proxy"] = bool(self.proxy.serve_path())
+        return state
+
     def to_dict(self) -> dict:
         return {
             "info": self.info,
             "profile": self.profile,
+            "preview": self.preview_state(),
             "demo_subtitles": self.demo_subtitles,
             "sections": self.sections,
             "summary": detect_mod.summary(
@@ -148,32 +173,85 @@ def env():
     }
 
 
+# Sentinel `path` value that asks /api/browse for the Windows drive list.
+DRIVES_VIEW = "drives:"
+
+
+def _windows_drives() -> list[str]:
+    """Root paths of the drives Windows reports, e.g. ['C:\\\\', 'D:\\\\'].
+
+    Uses the same call Explorer does (GetLogicalDriveStrings), so removable and
+    network drives show up when they are ready. Falls back to probing A-Z if
+    ctypes is unavailable, and returns [] on POSIX (single root, no drives).
+    """
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        size = 512
+        buf = ctypes.create_unicode_buffer(size)
+        written = ctypes.windll.kernel32.GetLogicalDriveStringsW(size - 1, buf)
+        if written:
+            raw = ctypes.wstring_at(ctypes.addressof(buf), written)
+            found = [d for d in raw.split("\x00") if d]
+            if found:
+                return found
+    except Exception:                       # noqa: BLE001 - fall back to probing
+        pass
+    return [f"{c}:\\" for c in string.ascii_uppercase if os.path.exists(f"{c}:\\")]
+
+
 @app.get("/api/browse")
 def browse(path: str | None = None, exts_only: bool = False):
     """Tiny local directory browser so the user can pick a file by clicking."""
+    drives = _windows_drives()
+
+    # Windows has no single root - every drive is its own tree, and
+    # Path("C:\\").parent is C:\\ itself. Without a virtual level above the
+    # drive roots the browser can never leave C:, so offer one.
+    if path == DRIVES_VIEW:
+        if not drives:
+            raise HTTPException(404, "This platform has a single root, "
+                                     "so there is no drive list.")
+        return {"cwd": "This PC", "parent": None, "drives": drives,
+                "dirs": [], "files": []}
+
     target = Path(path).expanduser() if path else Path.home()
     if not target.exists():
         raise HTTPException(404, f"Not found: {target}")
     if target.is_file():
         target = target.parent
-    dirs, files = [], []
+
     try:
-        for entry in sorted(target.iterdir(), key=lambda p: p.name.lower()):
-            if entry.name.startswith("."):
-                continue
-            if entry.is_dir():
-                dirs.append({"name": entry.name, "path": str(entry)})
-            elif not exts_only or entry.suffix.lower() in VIDEO_EXTS:
-                files.append({"name": entry.name, "path": str(entry),
-                              "size": entry.stat().st_size})
+        entries = sorted(target.iterdir(), key=lambda p: p.name.lower())
     except PermissionError:
         raise HTTPException(403, f"Permission denied: {target}")
-    return {
-        "cwd": str(target),
-        "parent": str(target.parent) if target.parent != target else None,
-        "dirs": dirs,
-        "files": files,
-    }
+
+    dirs, files = [], []
+    for entry in entries:
+        # Hidden files, plus the Windows system folders that sit at a drive
+        # root and are pure noise (and often refuse to be stat'd).
+        if entry.name.startswith((".", "$")) or entry.name == "System Volume Information":
+            continue
+        try:
+            is_dir = entry.is_dir()
+            size = 0 if is_dir else entry.stat().st_size
+        except OSError:
+            continue        # locked / reparse point: skip, don't fail the listing
+        if is_dir:
+            dirs.append({"name": entry.name, "path": str(entry)})
+        elif not exts_only or entry.suffix.lower() in VIDEO_EXTS:
+            files.append({"name": entry.name, "path": str(entry), "size": size})
+
+    if target.parent != target:
+        parent = str(target.parent)
+    elif drives:
+        parent = DRIVES_VIEW        # at a drive root: "up" means the drive list
+    else:
+        parent = None               # POSIX: / is genuinely the top
+
+    return {"cwd": str(target), "parent": parent, "drives": drives,
+            "dirs": dirs, "files": files}
 
 
 @app.post("/api/demo")
@@ -190,9 +268,20 @@ def open_demo():
     return result
 
 
+def open_project(info: dict, uploaded: bool = False) -> Project:
+    """Install `info` as the active project and start any preview transcode."""
+    global PROJECT
+    with PROJECT_LOCK:
+        proj = Project(info["path"], info, source_match_profile(info))
+        proj.uploaded = uploaded
+        PROJECT = proj
+    if proj.preview_mode == "proxy":
+        proj.start_preview()
+    return proj
+
+
 @app.post("/api/open")
 def open_video(req: OpenRequest):
-    global PROJECT
     path = os.path.abspath(os.path.expanduser(req.path.strip().strip('"')))
     if not os.path.isfile(path):
         raise HTTPException(404, f"File not found: {path}")
@@ -203,15 +292,12 @@ def open_video(req: OpenRequest):
         raise HTTPException(400, str(exc))
     if not info.get("video"):
         raise HTTPException(400, "That file has no video stream.")
-    with PROJECT_LOCK:
-        PROJECT = Project(path, info, source_match_profile(info))
-    return PROJECT.to_dict()
+    return open_project(info).to_dict()
 
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     """Drag-and-drop fallback: copy the file into ./work and open it."""
-    global PROJECT
     safe = re.sub(r"[^\w.\- ]+", "_", file.filename or "video.mp4")
     dest = WORK_DIR / safe
     with open(dest, "wb") as fh:
@@ -224,10 +310,7 @@ async def upload_video(file: UploadFile = File(...)):
         raise HTTPException(400, str(exc))
     if not info.get("video"):
         raise HTTPException(400, "That file has no video stream.")
-    with PROJECT_LOCK:
-        PROJECT = Project(str(dest), info, source_match_profile(info))
-        PROJECT.uploaded = True
-    return PROJECT.to_dict()
+    return open_project(info, uploaded=True).to_dict()
 
 
 # ---------------------------------------------------------------------------
@@ -318,25 +401,59 @@ def thumbnail(name: str):
     return FileResponse(str(path), media_type="image/jpeg")
 
 
+def _parse_byte_range(header: str, size: int) -> tuple[int, int] | None:
+    """Parse a single byte-range spec against a file of `size` bytes.
+
+    Returns inclusive (start, end), or None when the header is unusable or
+    unsatisfiable. Handles the forms browsers actually send: ``bytes=0-``,
+    ``bytes=100-200`` and the suffix form ``bytes=-500`` (the last 500 bytes).
+    The range unit is case-insensitive per RFC 9110, and a multi-range list is
+    reduced to its first range, which is all a media element needs.
+    """
+    if not header or size is None or size <= 0:
+        return None
+    m = re.match(r"\s*bytes\s*=\s*([^,]+)", header, re.IGNORECASE)
+    if not m:
+        return None
+    spec = m.group(1).strip()
+    try:
+        if spec.startswith("-"):                      # suffix range
+            last = int(spec[1:].strip())
+            if last <= 0:
+                return None
+            return (max(0, size - last), size - 1)
+        first, _, rest = spec.partition("-")
+        start = int(first.strip())
+        end = size - 1 if not rest.strip() else min(int(rest.strip()), size - 1)
+    except ValueError:
+        return None
+    if start >= size or start > end:
+        return None
+    return (start, end)
+
+
 @app.get("/api/media")
 def media(request: Request):
-    """The source file, with HTTP Range support so <video> can seek."""
+    """The playable source, with HTTP Range support so <video> can seek.
+
+    Serves the browser-friendly preview proxy when the source cannot be played
+    natively, and always reports the real container's MIME type.
+    """
     proj = need_project()
-    path = proj.path
+    path = proj.preview_file()
+    if not os.path.isfile(path):
+        raise HTTPException(404, f"File not found: {path}")
     size = os.path.getsize(path)
-    range_header = request.headers.get("range")
+    mime = preview_mod.mime_for(path)
 
-    if not range_header:
-        return FileResponse(path, media_type="video/mp4")
+    span = _parse_byte_range(request.headers.get("range"), size)
+    if span is None:
+        if request.headers.get("range"):
+            return Response(status_code=416,
+                            headers={"Content-Range": f"bytes */{size}"})
+        return FileResponse(path, media_type=mime)
 
-    m = re.match(r"bytes=(\d*)-(\d*)", range_header)
-    if not m:
-        raise HTTPException(416, "Bad range")
-    start = int(m.group(1)) if m.group(1) else 0
-    end = int(m.group(2)) if m.group(2) else size - 1
-    end = min(end, size - 1)
-    if start > end:
-        raise HTTPException(416, "Range not satisfiable")
+    start, end = span
     length = end - start + 1
 
     def iter_chunks():
@@ -350,13 +467,6 @@ def media(request: Request):
                 remaining -= len(chunk)
                 yield chunk
 
-    mime = {
-        ".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/mp4",
-        ".mkv": "video/x-matroska", ".webm": "video/webm", ".avi": "video/x-msvideo",
-        ".ts": "video/mp2t", ".mts": "video/mp2t", ".mpg": "video/mpeg",
-        ".mpeg": "video/mpeg", ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv",
-    }.get(proj.info["ext"], "video/mp4")
-
     return StreamingResponse(
         iter_chunks(),
         status_code=206,
@@ -367,6 +477,27 @@ def media(request: Request):
             "Content-Length": str(length),
         },
     )
+
+
+@app.get("/api/preview-status")
+def preview_status():
+    """Where the browser-preview transcode has got to."""
+    return need_project().preview_state()
+
+
+@app.post("/api/preview-proxy")
+def request_preview_proxy():
+    """Build the preview proxy on demand.
+
+    The frontend calls this when a source the server believed was playable
+    (HEVC/AV1 on a machine without the matching hardware decoder) still fails
+    in the <video> element.
+    """
+    proj = need_project()
+    reason = ("the browser could not decode this file, so a compatible "
+              "preview is being generated")
+    proj.start_preview(reason)
+    return proj.preview_state()
 
 
 # ---------------------------------------------------------------------------
