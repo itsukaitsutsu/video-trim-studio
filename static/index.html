@@ -23,6 +23,7 @@
   <button id="browseBtn" class="ghost">Browse&hellip;</button>
   <button id="openBtn" class="primary">Open</button>
   <button id="demoBtn" class="ghost">Open demo</button>
+  <button id="speechDemoBtn" class="ghost" title="Short spoken clip - the one to try Auto-caption on">Speech demo</button>
   <label class="ghost filebtn">Upload<input id="uploadInput" type="file" accept="video/*"></label>
   <span id="fileMeta" class="filemeta"></span>
 </section>
@@ -106,7 +107,51 @@
     </div>
 
     <div class="card">
-      <h2>2 &middot; Export settings</h2>
+      <h2>2 &middot; Auto-caption</h2>
+      <div class="dim small caption-lead">
+        Transcribe this video with faster-whisper, then feed the captions straight into detection.
+      </div>
+      <div id="capUnavailable" class="warn" hidden></div>
+      <button id="capRecheck" class="ghost block small" hidden>Re-check for faster-whisper</button>
+      <div id="capSetup">
+        <div class="row"><label>Model</label><select id="cModel"></select></div>
+        <div class="row"><label>Language</label><select id="cLang"></select></div>
+        <div class="row"><label>Device</label><select id="cDevice"></select></div>
+        <label class="chk"><input type="checkbox" id="cTranslate"> translate to English (any language &rarr; English)</label>
+        <details class="adv">
+          <summary>Advanced options</summary>
+          <div class="row"><label>Compute type</label><select id="cCompute"></select></div>
+          <div class="row"><label>Beam size</label><input id="cBeam" type="number" value="1" min="1" max="10" step="1"
+              title="1 = greedy and fastest; 5 = slower, can hallucinate more"></div>
+          <div class="row"><label>Hint / prompt</label><input id="cPrompt" type="text" placeholder="names, jargon (optional)"></div>
+          <div class="row"><label>Output folder</label><input id="cOutDir" type="text" placeholder="next to the video" spellcheck="false"></div>
+          <div class="checks">
+            <label class="chk"><input type="checkbox" id="cVad" checked> VAD (skip silence)</label>
+            <label class="chk"><input type="checkbox" id="cWords" checked> word timestamps (JSON)</label>
+            <label class="chk"><input type="checkbox" id="cTemp" title="retry hard segments at higher temperature"> temperature fallback</label>
+            <label class="chk"><input type="checkbox" id="cNorm" title="loudnorm for quiet or uneven recordings"> normalize audio</label>
+            <label class="chk"><input type="checkbox" id="cKeep"> keep 16 kHz wav</label>
+            <label class="chk"><input type="checkbox" id="cBurn"> burn into a copy</label>
+          </div>
+        </details>
+        <button id="capBtn" class="primary block" disabled>Transcribe to captions</button>
+        <div id="capNote" class="dim small"></div>
+        <div class="progress" id="capProgWrap" hidden>
+          <div class="bar"><div id="capBar"></div></div>
+          <div class="progtext"><span id="capPct">0%</span><span id="capMeta" class="dim"></span></div>
+        </div>
+        <pre id="capTail" class="caption-tail" hidden></pre>
+        <button id="capCancel" class="ghost block small" hidden>Cancel transcription</button>
+        <div id="capResult" hidden>
+          <div id="capOut" class="dim small"></div>
+          <button id="capUse" class="primary block">Use these captions &rarr; Detect sections</button>
+        </div>
+        <pre id="capError" class="error" hidden></pre>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3 &middot; Export settings</h2>
       <div class="row"><label>Mode</label>
         <select id="xMode">
           <option value="reencode">Re-encode (frame accurate)</option>
@@ -145,14 +190,13 @@
           <label class="chk"><input type="checkbox" id="xMatchFps"> match frame rate</label>
           <label class="chk"><input type="checkbox" id="xMatchColor" checked> match colour tags</label>
           <label class="chk"><input type="checkbox" id="xMeta" checked> copy metadata</label>
-          <label class="chk"><input type="checkbox" id="xNoRotate"> keep rotation tag</label>
         </div>
       </div>
       <button id="resetOpts" class="ghost block small">Reset everything to source values</button>
     </div>
 
     <div class="card">
-      <h2>3 &middot; Export</h2>
+      <h2>4 &middot; Export</h2>
       <div class="tally">
         <div><span class="dim">source</span><b id="tSrc">--:--</b></div>
         <div><span class="dim">removing</span><b id="tCut" class="cut">--:--</b></div>

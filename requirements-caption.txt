@@ -1,0 +1,11 @@
+# Video Trim Studio - optional auto-caption engine
+#
+# Only needed for the "Auto-caption" card in the UI (and for auto_caption.py).
+# Without it the rest of the app works normally; the caption card shows this
+# install command instead.
+#
+#   python -m pip install -r requirements-caption.txt
+#
+# First use also downloads a Whisper model (75 MB for `tiny`, ~1.5 GB for
+# `medium`) into the HuggingFace cache and reuses it afterwards.
+faster-whisper>=1.0

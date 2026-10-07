@@ -92,6 +92,7 @@ async function loadEnv() {
     el.textContent = `ffmpeg missing: ${S.env.error}`;
   }
   fillSelect($("xHwaccel"), S.env.hwaccels, "auto");
+  fillCaptionCard(S.env.caption);
 }
 
 function fillSelect(sel, items, value) {
@@ -145,6 +146,7 @@ function onProjectOpen(data) {
   renderList();
   draw();
   updateTally();
+  resetCaptionCard();
   $("detectInfo").textContent = "";
   $("exportBtn").disabled = true;
   // These FFmpeg scans compete for CPU and disk with a required proxy build.
@@ -283,7 +285,6 @@ function applyProfile(pr) {
   $("xMatchFps").checked = !!pr.match_fps;
   $("xMatchColor").checked = !!pr.match_color;
   $("xMeta").checked = pr.copy_metadata !== false;
-  $("xNoRotate").checked = !!pr.no_autorotate;
   if (S.env && S.env.hwaccels.includes(pr.hwaccel)) $("xHwaccel").value = pr.hwaccel;
   syncQualityRows();
 }
@@ -302,7 +303,6 @@ function collectOpts() {
     fps: S.project?.profile?.fps || 0,
     match_color: $("xMatchColor").checked,
     copy_metadata: $("xMeta").checked,
-    no_autorotate: $("xNoRotate").checked,
     audio_codec: $("xAudioCodec").value.trim() || "none",
     audio_bitrate_kbps: Number($("xAudioBitrate").value) || 0,
     audio_sample_rate: Number($("xAudioRate").value) || 0,
@@ -353,7 +353,210 @@ async function browseTo(path) {
   }
 }
 
+/* ------------------------------------------------------------ auto-caption */
+
+const CAP = { job: null, timer: null, poll: 700 };
+
+function fillCaptionCard(caption) {
+  if (!caption) return;
+  const model = $("cModel"), lang = $("cLang"), dev = $("cDevice"), comp = $("cCompute");
+  fillSelect(model, caption.models.map((m) => m.name), "medium");
+  // Annotate the model list with size + note for the tooltip.
+  caption.models.forEach((m, i) => {
+    if (model.options[i]) model.options[i].title = `${m.size} — ${m.note}`;
+  });
+  fillSelect(lang, caption.languages.map((l) => l.code), "auto");
+  caption.languages.forEach((l, i) => {
+    if (lang.options[i]) lang.options[i].textContent = `${l.code} — ${l.name}`;
+  });
+  fillSelect(dev, caption.devices, caption.status.default_device || "cpu");
+  fillSelect(comp, caption.compute_types, "auto");
+
+  const st = caption.status;
+  if (!st.available) {
+    // Spell out *which* interpreter needs the package: installing it with a
+    // different Python (system pip vs the app's .venv) is the usual reason this
+    // card still shows the warning.
+    $("capUnavailable").hidden = false;
+    $("capUnavailable").innerHTML =
+      "Auto-caption needs the optional <b>faster-whisper</b> package.<br>" +
+      "Install it into the Python this app is running on:" +
+      `<br><code class="cmd">${escapeHtml(st.install || "python -m pip install faster-whisper")}</code>` +
+      (st.executable ? `<br><span class="small">app interpreter: ${escapeHtml(st.executable)}</span>` : "") +
+      "<br>Then press <b>Re-check</b> below (a restart is only needed if the command " +
+      "above failed).";
+    $("capRecheck").hidden = false;
+  } else {
+    $("capUnavailable").hidden = true;
+    $("capRecheck").hidden = true;
+  }
+  $("capBtn").disabled = !st.available;
+  $("capBtn").textContent = st.available
+    ? "Transcribe to captions" : "Auto-caption unavailable";
+  if (st.available) {
+    $("capNote").textContent =
+      `faster-whisper ${st.version}` +
+      (st.cuda_devices ? ` · ${st.cuda_devices} CUDA device(s) detected` : " · CPU only (no CUDA device)");
+  }
+}
+
+function stopCaptionPolling() {
+  if (CAP.timer) { clearInterval(CAP.timer); CAP.timer = null; }
+}
+
+function captionOptions() {
+  return {
+    model: $("cModel").value,
+    language: $("cLang").value,
+    device: $("cDevice").value,
+    compute_type: $("cCompute").value,
+    translate_to_english: $("cTranslate").checked,
+    vad: $("cVad").checked,
+    word_timestamps: $("cWords").checked,
+    temperature_fallback: $("cTemp").checked,
+    normalize_audio: $("cNorm").checked,
+    keep_audio: $("cKeep").checked,
+    burn: $("cBurn").checked,
+    beam_size: Number($("cBeam").value) || 1,
+    initial_prompt: $("cPrompt").value.trim() || null,
+    output_dir: $("cOutDir").value.trim() || null,
+  };
+}
+
+function resetCaptionCard() {
+  // A new video means the old transcript no longer describes this file.
+  stopCaptionPolling();
+  CAP.job = null;
+  S.subsText = null;
+  $("capProgWrap").hidden = true;
+  $("capTail").hidden = true;
+  $("capTail").textContent = "";
+  $("capCancel").hidden = true;
+  $("capResult").hidden = true;
+  $("capError").hidden = true;
+  $("capError").textContent = "";
+  const available = !!(S.env && S.env.caption && S.env.caption.status.available);
+  $("capNote").textContent = available
+    ? "ready — transcription runs locally, nothing is uploaded"
+    : "";
+  $("capBtn").disabled = !available;
+  $("capBtn").textContent = available ? "Transcribe to captions" : "Auto-caption unavailable";
+  $("cOutDir").value = "";
+}
+
+async function startCaption() {
+  if (!S.project) return alert("Open a video first.");
+  const btn = $("capBtn");
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  $("capError").hidden = true;
+  $("capResult").hidden = true;
+  $("capTail").hidden = false;
+  $("capTail").textContent = "";
+  $("capProgWrap").hidden = false;
+  $("capCancel").hidden = false;
+  $("capNote").textContent = "preparing…";
+  try {
+    const job = await api("/api/caption", {
+      method: "POST", body: JSON.stringify(captionOptions()),
+    });
+    renderCaptionJob(job);
+    stopCaptionPolling();
+    CAP.timer = setInterval(pollCaption, CAP.poll);
+  } catch (e) {
+    captionFailed(e.message);
+  }
+}
+
+async function pollCaption() {
+  if (!CAP.job) return;
+  try {
+    renderCaptionJob(await api(`/api/caption/${CAP.job.id}`));
+  } catch (e) {
+    stopCaptionPolling();
+    captionFailed(e.message);
+  }
+}
+
+function renderCaptionJob(job) {
+  CAP.job = job;
+  const active = job.state === "running";
+  const pct = Math.max(0, Math.min(100, Number(job.progress) || 0));
+  $("capBar").style.width = `${pct}%`;
+  $("capPct").textContent = `${pct.toFixed(0)}%`;
+  const bits = [];
+  if (job.stage) bits.push(job.stage);
+  if (job.speed) bits.push(`${job.speed.toFixed(1)}x realtime`);
+  if (job.eta) bits.push(`ETA ${fmtTime(job.eta, false)}`);
+  if (job.elapsed) bits.push(`${fmtTime(job.elapsed, false)} elapsed`);
+  $("capMeta").textContent = bits.join(" · ");
+  $("capNote").textContent = job.note || "";
+
+  if (job.tail && job.tail.length) {
+    $("capTail").innerHTML = job.tail.map((t) =>
+      `<span class="line"><b>${escapeHtml(t.t)}</b> ${escapeHtml(t.text)}</span>`).join("");
+    $("capTail").scrollTop = $("capTail").scrollHeight;
+  }
+
+  if (active) {
+    $("capBtn").textContent = "Transcribing…";
+    return;
+  }
+
+  stopCaptionPolling();
+  $("capCancel").hidden = true;
+  $("capBtn").disabled = false;
+  $("capBtn").textContent = "Transcribe again";
+  $("capProgWrap").hidden = job.state !== "done";
+  if (job.state === "done") captionDone(job);
+  else if (job.state === "cancelled") $("capNote").textContent = "Cancelled.";
+  else captionFailed(job.error || "transcription failed");
+}
+
+function captionDone(job) {
+  const out = job.outputs || {};
+  const files = ["srt", "vtt", "json"].filter((k) => out[k]).map((k) => out[k]);
+  $("capOut").innerHTML = files.map((p) => escapeHtml(p)).join("<br>") +
+    (out.video ? `<br>burned copy: ${escapeHtml(out.video)}` : "");
+  $("capResult").hidden = false;
+  // Pre-fill the subtitle path either way, so the plain Detect button works too.
+  if (out.srt) {
+    S.subsText = job.cues_text || null;
+    $("dSubPath").value = out.srt;
+    $("dCues").checked = true;
+    $("subInfo").textContent = `${job.segment_count || 0} cues from transcription`;
+  }
+}
+
+function captionFailed(message) {
+  stopCaptionPolling();
+  $("capBtn").disabled = false;
+  $("capBtn").textContent = "Transcribe to captions";
+  $("capProgWrap").hidden = true;
+  $("capCancel").hidden = true;
+  $("capError").hidden = false;
+  $("capError").textContent = message;
+  $("capNote").textContent = "";
+}
+
+async function cancelCaption() {
+  if (!CAP.job) return;
+  try { renderCaptionJob(await api(`/api/caption/${CAP.job.id}/cancel`, { method: "POST" })); }
+  catch (e) { captionFailed(e.message); }
+}
+
+async function useCaptions() {
+  if (!CAP.job) return;
+  const out = CAP.job.outputs || {};
+  S.subsText = CAP.job.cues_text || null;
+  if (out.srt) $("dSubPath").value = out.srt;
+  $("dCues").checked = true;
+  $("subInfo").textContent = `${CAP.job.segment_count || 0} cues from transcription`;
+  await runDetect();
+}
+
 /* --------------------------------------------------------------- detection */
+
 
 async function runDetect() {
   if (!S.project) return alert("Open a video first.");
@@ -913,6 +1116,11 @@ function bindUI() {
     try { onProjectOpen(await api("/api/demo", { method: "POST", body: "{}" })); }
     catch (e) { $("fileMeta").textContent = ""; alert(e.message); }
   };
+  $("speechDemoBtn").onclick = async () => {
+    $("fileMeta").textContent = "opening speech demo…";
+    try { onProjectOpen(await api("/api/demo/speech", { method: "POST", body: "{}" })); }
+    catch (e) { $("fileMeta").textContent = ""; alert(e.message); }
+  };
   $("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") openPath(e.target.value.trim()); });
   // The file-browser modal is optional markup: if it is absent, only browsing
   // breaks. Never let a missing element abort the rest of the wiring.
@@ -956,6 +1164,20 @@ function bindUI() {
   };
 
   $("detectBtn").onclick = runDetect;
+
+  $("capBtn").onclick = startCaption;
+  $("capCancel").onclick = cancelCaption;
+  $("capUse").onclick = useCaptions;
+  $("capRecheck").onclick = async () => {
+    // faster-whisper is imported lazily when a job starts, so a package
+    // installed in another terminal is picked up without restarting the app.
+    const btn = $("capRecheck");
+    btn.disabled = true;
+    btn.textContent = "Checking…";
+    await loadEnv();
+    btn.disabled = false;
+    btn.textContent = "Re-check for faster-whisper";
+  };
 
   document.querySelectorAll(".chip").forEach((chip) => {
     chip.onclick = () => {

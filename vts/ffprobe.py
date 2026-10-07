@@ -310,7 +310,6 @@ def source_match_profile(info: dict, out_ext: str | None = None) -> dict:
         "color_primaries": v.get("color_primaries"),
         "color_transfer": v.get("color_transfer"),
         "color_range": v.get("color_range"),
-        "no_autorotate": bool(v.get("rotation")),
         "audio_codec": a_codec if a else "none",
         "audio_bitrate_kbps": round((a.get("bitrate_bps") or 192_000) / 1000),
         "audio_sample_rate": a.get("sample_rate") or 0,

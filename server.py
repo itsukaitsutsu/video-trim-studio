@@ -33,6 +33,7 @@ from vts import detect as detect_mod          # noqa: E402
 from vts import export as export_mod         # noqa: E402
 from vts import media as media_mod           # noqa: E402
 from vts import preview as preview_mod       # noqa: E402
+from vts import transcribe as caption_mod    # noqa: E402
 from vts.ffprobe import (                    # noqa: E402
     VIDEO_EXTS, available_encoders, encoder_candidates, hwaccel_options,
     probe, require_ffmpeg, source_match_profile, FFmpegMissing,
@@ -141,6 +142,24 @@ class ExportRequest(BaseModel):
     opts: dict = {}
 
 
+class CaptionRequest(BaseModel):
+    """Auto-caption options; every field has a working default."""
+    language: str = "auto"
+    model: str = "medium"
+    translate_to_english: bool = False
+    device: str = "auto"
+    compute_type: str = "auto"
+    vad: bool = True
+    word_timestamps: bool = True
+    beam_size: int = 1
+    temperature_fallback: bool = False
+    normalize_audio: bool = False
+    initial_prompt: str | None = None
+    keep_audio: bool = False
+    burn: bool = False
+    output_dir: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Routes: environment + open
 # ---------------------------------------------------------------------------
@@ -170,6 +189,7 @@ def env():
         "gpu_encoders": [e for e in encoders
                          if e.endswith(("_amf", "_nvenc", "_qsv", "_videotoolbox"))],
         "work_dir": str(WORK_DIR),
+        "caption": caption_mod.format_for_ui(),
     }
 
 
@@ -266,6 +286,19 @@ def open_demo():
     PROJECT.demo_subtitles = str(subs)
     result["demo_subtitles"] = str(subs)
     return result
+
+
+@app.post("/api/demo/speech")
+def open_speech_demo():
+    """The bundled clip that actually contains speech.
+
+    The main demo has only tones and silences, so it is the wrong file to try
+    auto-captioning on; this one is made for that (and has no captions yet).
+    """
+    sample = BASE_DIR / "demo" / "sample-speech.mp4"
+    if not sample.is_file():
+        raise HTTPException(404, "Bundled speech clip is missing.")
+    return open_video(OpenRequest(path=str(sample)))
 
 
 def open_project(info: dict, uploaded: bool = False) -> Project:
@@ -556,6 +589,52 @@ def export(req: ExportRequest):
     except (RuntimeError, OSError) as exc:
         raise HTTPException(500, str(exc))
     return job
+
+
+# ---------------------------------------------------------------------------
+# Routes: auto-caption (faster-whisper)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/caption")
+def caption(req: CaptionRequest):
+    """Transcribe the open video to .srt/.vtt/.json in the background."""
+    proj = need_project()
+    if not proj.info.get("audio"):
+        raise HTTPException(400, "This video has no audio track to transcribe.")
+    opts = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    if opts.get("output_dir"):
+        opts["output_dir"] = os.path.abspath(
+            os.path.expanduser(str(opts["output_dir"]).strip().strip('"')))
+    # Device/compute 'auto' is resolved here so the choices are validated once.
+    device, compute = caption_mod.pick_device_and_compute(
+        opts.get("device", "auto"), opts.get("compute_type", "auto"))
+    opts["device"], opts["compute_type"] = device, compute
+    try:
+        return caption_mod.start_caption(proj.path, opts)
+    except caption_mod.CaptionError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/caption/{job_id}")
+def caption_job(job_id: str):
+    state = caption_mod.get_job(job_id)
+    if state is None:
+        raise HTTPException(404, "Unknown caption job")
+    return state
+
+
+@app.post("/api/caption/{job_id}/cancel")
+def caption_cancel(job_id: str):
+    state = caption_mod.cancel_job(job_id)
+    if state is None:
+        raise HTTPException(404, "Unknown caption job")
+    return state
+
+
+@app.get("/api/caption")
+def caption_help():
+    """Language/model catalog and whether faster-whisper is installed."""
+    return caption_mod.format_for_ui()
 
 
 @app.get("/api/job/{job_id}")

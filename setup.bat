@@ -45,6 +45,10 @@ if errorlevel 1 goto :failed
 
 echo.
 echo Setup complete. Double-click run.bat to start the app.
+echo.
+echo Optional: auto-captioning (transcribe video to .srt/.vtt/.json in the UI).
+echo It is a large download and is not installed by default. To enable it:
+echo   .venv\Scripts\python.exe -m pip install -r requirements-caption.txt
 pause
 exit /b 0
 

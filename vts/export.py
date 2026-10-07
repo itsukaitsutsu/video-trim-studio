@@ -8,7 +8,13 @@ Two modes:
   copy      - fast, lossless stream copy for a single kept range from t=0
               when source timestamps also start at zero. Start seeks, non-zero
               timestamps or multiple ranges fall back to re-encode to avoid
-              concat-demuxer overlap and A/V desynchronization.
+              concat-demuxer overlap and A/V desynchronization. Sources that
+              carry a rotation/flip display tag fall back too, because a stream
+              copy cannot bake that transform into the pixels.
+
+Orientation: every export bakes the source rotation/flip into the picture and
+writes no display-matrix tag, so the result looks identical in players and
+editors that ignore rotation tags.
 """
 
 from __future__ import annotations
@@ -17,7 +23,6 @@ import os
 import re
 import shutil
 import subprocess
-from functools import lru_cache
 import tempfile
 import threading
 import time
@@ -162,18 +167,14 @@ def build_encoder_args(opts: dict) -> list[str]:
     return args
 
 
-@lru_cache(maxsize=1)
-def _supports_display_rotation_override() -> bool:
-    """FFmpeg 7+ can clear a source display matrix before decoding it."""
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-h", "full"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=20, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return "-display_rotation" in (result.stdout or "") + (result.stderr or "")
+def has_display_transform(info: dict | None) -> bool:
+    """True when the source carries a display matrix (rotation and/or flip).
+
+    Both fields are checked because a flip-only matrix reports rotation 0 but
+    must still be baked to keep the picture correct.
+    """
+    video = (info or {}).get("video") or {}
+    return bool(video.get("has_display_matrix") or video.get("rotation"))
 
 
 def build_command(source: str, output: str, segments: list[tuple[float, float]],
@@ -181,14 +182,11 @@ def build_command(source: str, output: str, segments: list[tuple[float, float]],
                   hwaccel: str = "auto") -> list[str]:
     cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
            "-progress", "pipe:1", "-nostats"]
-    if opts.get("clear_display_transform"):
-        # A stream-copy request that falls back to re-encoding must not acquire
-        # a new visible rotation/flip just because the decoder preserved the
-        # source display matrix. Zero the matrix before decoding, retaining the
-        # same stored pixel orientation as the original stream-copy result.
-        cmd += ["-display_rotation", "0", "-noautorotate"]
-    elif opts.get("no_autorotate"):
-        cmd += ["-noautorotate"]
+    # No -noautorotate / -display_rotation here on purpose. FFmpeg's default
+    # autorotate applies the source display matrix - rotation *and* flips -
+    # while decoding, so the export gets the visible orientation baked into its
+    # pixels and is written without a display-matrix tag. Players that ignore
+    # rotation tags therefore still show the exported picture the right way up.
     if hwaccel and hwaccel != "none":
         cmd += ["-hwaccel", hwaccel]
     cmd += ["-i", source, "-filter_complex_script", filter_script,
@@ -216,7 +214,7 @@ def build_copy_command(source: str, concat_list: str, output: str,
     return cmd
 
 
-def stream_copy_fallback_reason(
+def _sync_copy_reason(
     segments: list[tuple[float, float]], info: dict | None = None,
 ) -> str | None:
     """Stream-copy only cuts a single range safely in this editor.
@@ -247,6 +245,26 @@ def stream_copy_fallback_reason(
                     "timing may not match the edit points, so this export is "
                     "being re-encoded to keep sync.")
     return None
+
+
+def stream_copy_fallback_reason(
+    segments: list[tuple[float, float]], info: dict | None = None,
+) -> str | None:
+    """Why a stream copy cannot be used, or None when it is safe.
+
+    Besides the timestamp/join cases, a source with a rotation or flip display
+    matrix cannot be stream-copied: the copy would keep the matrix as a *tag*
+    and leave the orientation up to the player instead of baking it into the
+    picture the way every other export does.
+    """
+    sync_reason = _sync_copy_reason(segments, info)
+    if not has_display_transform(info):
+        return sync_reason
+    transform_reason = (
+        "The source has a rotation/flip display tag, which a stream copy cannot "
+        "apply to the pixels. This export is being re-encoded so the rotation is "
+        "baked into the picture and the result looks the same in every player.")
+    return f"{sync_reason} {transform_reason}" if sync_reason else transform_reason
 
 
 # ---------------------------------------------------------------------------
@@ -383,27 +401,11 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
     if mode == "copy":
         fallback_note = stream_copy_fallback_reason(segments, info)
         if fallback_note:
-            # Do not hand concat-demuxer timestamp overlap to the muxer. Reuse
-            # the normal frame-accurate path and make the mode change explicit
-            # in the job details shown to the user. The old copy path could
-            # drop a source display matrix in some FFmpeg/container combos, so
-            # clear it during this fallback to avoid changing the picture's
-            # visible rotation/flip as a side effect of fixing A/V timestamps.
-            fallback_opts = {**opts, "mode": "reencode"}
-            video = info.get("video") or {}
-            has_display_transform = bool(
-                video.get("has_display_matrix") or video.get("rotation"))
-            if has_display_transform:
-                if not _supports_display_rotation_override():
-                    raise JobError(
-                        "This clip has rotation/flip metadata, but this FFmpeg "
-                        "build cannot clear it for a sync-safe re-encode. "
-                        "Update FFmpeg and retry.")
-                fallback_opts["clear_display_transform"] = True
-                fallback_note += (
-                    " Its rotation/flip tag is cleared to preserve the orientation "
-                    "shown by the previous stream-copy export.")
-            fallback_opts["_mode_note"] = fallback_note
+            # Do not hand concat-demuxer timestamp overlap to the muxer, and do
+            # not emit a copy that depends on a rotation tag. Reuse the normal
+            # frame-accurate path (which bakes orientation) and make the mode
+            # change explicit in the job details shown to the user.
+            fallback_opts = {**opts, "mode": "reencode", "_mode_note": fallback_note}
             return export(source, info, merged, fallback_opts, output)
 
         # A single kept range beginning at source time zero requires no seek or
@@ -433,7 +435,11 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
     total = sum(e - s for s, e in segments)
     job = _new_job("reencode", output, total)
     if opts.get("_mode_note"):
+        # A copy fallback note already explains itself, rotation included.
         job["note"] = opts["_mode_note"]
+    elif has_display_transform(info):
+        job["note"] = ("Rotation/flip is baked into the picture; the export "
+                       "carries no rotation tag.")
     job["filter_script"] = script_path
     hwaccel = opts.get("hwaccel") or "auto"
     cmd = build_command(source, output, segments, opts, script_path, has_audio, hwaccel)

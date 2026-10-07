@@ -217,43 +217,166 @@ def test_stream_copy_multicut_falls_back_and_preserves_av_sync(source, tmp_path)
         assert all(current >= previous for previous, current in zip(dts, dts[1:]))
 
 
-def test_copy_fallback_preserves_pixel_orientation(source, tmp_path):
+# ---------------------------------------------------------------------------
+# Orientation: exports bake the source rotation/flip and write no tag
+# ---------------------------------------------------------------------------
+
+def _wait_for(job, timeout=180):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = export.get_job(job["id"])
+        if state["state"] in ("done", "error"):
+            return state
+        time.sleep(0.2)
+    return export.get_job(job["id"])
+
+
+def _requires_display_rotation():
     help_text = subprocess.run(
         ["ffmpeg", "-hide_banner", "-h", "full"], capture_output=True,
         text=True, check=False,
     )
     if "-display_rotation" not in (help_text.stdout + help_text.stderr):
-        pytest.skip("installed FFmpeg cannot override display rotation")
+        pytest.skip("installed FFmpeg cannot write a display rotation")
 
-    rotated = str(tmp_path / "rotated-source.mp4")
+
+def _displayed_size(info):
+    """Size a player shows: a 90/270 degree matrix is applied, a 180 is not."""
+    v = info["video"]
+    if abs(v["rotation"]) % 180 == 90:
+        return v["height"], v["width"]
+    return v["width"], v["height"]
+
+
+def _shown_corners(path):
+    """Colour name of each corner of the frame as a player displays it."""
+    png = f"{path}.frame.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+         "-frames:v", "1", png], check=True, capture_output=True)
+    raw = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", png, "-f", "rawvideo",
+        "-pix_fmt", "rgb24", "-"])
+    frame = probe(png)
+    w, h = frame["video"]["width"], frame["video"]["height"]
+
+    def name_at(x, y):
+        i = 3 * (y * w + x)
+        r, g, b = raw[i], raw[i + 1], raw[i + 2]
+        if min(r, g, b) > 150:
+            return "white"
+        if r > 150 and g < 110 and b < 110:
+            return "red"
+        if g > 110 and r < 110 and b < 110:
+            return "green"
+        if b > 150 and r < 110 and g < 110:
+            return "blue"
+        return f"rgb({r},{g},{b})"
+
+    return tuple(name_at(x, y) for x, y in (
+        (w // 8, h // 8), (w - w // 8, h // 8),
+        (w // 8, h - h // 8), (w - w // 8, h - h // 8)))
+
+
+@pytest.fixture(scope="module")
+def quadrant(tmp_path_factory):
+    """Four distinctly coloured corners, so orientation is checkable per pixel."""
+    path = str(tmp_path_factory.mktemp("orientation") / "quadrant.mp4")
     subprocess.run([
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-display_rotation", "270", "-i", source, "-map", "0", "-c", "copy", rotated,
+        "-f", "lavfi", "-i", "color=black:size=320x240:rate=30:duration=4",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=4",
+        "-shortest",
+        "-vf", ("drawbox=x=0:y=0:w=160:h=120:c=red:t=fill,"
+                "drawbox=x=160:y=0:w=160:h=120:c=green:t=fill,"
+                "drawbox=x=0:y=120:w=160:h=120:c=blue:t=fill,"
+                "drawbox=x=160:y=120:w=160:h=120:c=white:t=fill"),
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", path,
     ], check=True, capture_output=True)
+    return path
+
+
+def _tagged(src, path, rotation):
+    """A phone-style clip: pixels stored sideways, rotation tag on the stream."""
+    _requires_display_rotation()
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-display_rotation", str(rotation), "-i", src, "-map", "0", "-c", "copy",
+        path,
+    ], check=True, capture_output=True)
+    return path
+
+
+@pytest.mark.parametrize("rotation", [90, 180, 270])
+def test_export_bakes_orientation_and_writes_no_rotation_tag(
+        quadrant, tmp_path, rotation):
+    """A tagged source exports as upright pixels, with no display matrix.
+
+    Regression: the re-encode path kept the source rotation tag instead of
+    applying it, and the stream-copy fallback dropped it. Both left the visible
+    orientation to the player, so clips came out sideways.
+    """
+    rotated = _tagged(quadrant, str(tmp_path / f"rotated-{rotation}.mp4"), rotation)
     info = probe(rotated)
     assert info["video"]["has_display_matrix"]
     assert info["video"]["rotation"] != 0
 
     prof = source_match_profile(info)
     prof.update(codec="libx264", preset="ultrafast", hwaccel="none")
+    out = str(tmp_path / f"baked-{rotation}.mp4")
+    state = _wait_for(export.export(rotated, info, [[3.0, 4.0]], prof, out))
+    assert state["state"] == "done", f"export failed: {state.get('error')}"
+    assert "baked into the picture" in state.get("note", "")
+
+    result = probe(out)
+    assert result["video"]["rotation"] == 0
+    assert not result["video"]["has_display_matrix"]
+    assert (result["video"]["width"], result["video"]["height"]) == _displayed_size(info)
+    assert _shown_corners(out) == _shown_corners(rotated)
+
+
+def test_copy_fallback_applies_rotation_instead_of_losing_it(quadrant, tmp_path):
+    """Copy mode must not re-orient a tagged clip when it falls back.
+
+    Regression: the sync-safe fallback zeroed the display matrix without baking
+    it, so a mid-cut export of a phone clip came out rotated (90/270 degrees)
+    compared with the source shown in the preview.
+    """
+    rotated = _tagged(quadrant, str(tmp_path / "rotated-copy.mp4"), 270)
+    info = probe(rotated)
+    assert info["video"]["has_display_matrix"] and info["video"]["rotation"] != 0
+
+    prof = source_match_profile(info)
+    prof.update(codec="libx264", preset="ultrafast", hwaccel="none")
     out = str(tmp_path / "rotated-copy-fallback.mp4")
     job = export.export(
-        rotated, info, [list(SILENCES[0])], {**prof, "mode": "copy"}, out)
+        rotated, info, [[0.5, 1.0]], {**prof, "mode": "copy"}, out)
     assert job["kind"] == "reencode"
-    assert "previous stream-copy export" in job.get("note", "")
+    assert "rotation/flip display tag" in job.get("note", "")
 
-    deadline = time.time() + 180
-    while time.time() < deadline:
-        state = export.get_job(job["id"])
-        if state["state"] in ("done", "error"):
-            break
-        time.sleep(0.2)
-    state = export.get_job(job["id"])
-    assert state["state"] == "done", f"orientation-preserving fallback failed: {state.get('error')}"
+    state = _wait_for(job)
+    assert state["state"] == "done", f"copy fallback failed: {state.get('error')}"
     result = probe(out)
-    assert (result["video"]["width"], result["video"]["height"]) == (
-        info["video"]["width"], info["video"]["height"])
+    assert result["video"]["rotation"] == 0
     assert not result["video"]["has_display_matrix"]
+    assert (result["video"]["width"], result["video"]["height"]) == _displayed_size(info)
+    assert _shown_corners(out) == _shown_corners(rotated)
+
+    # The original sync reason must still be reported alongside the rotation.
+    sync_only = _wait_for(export.export(
+        rotated, info, [[0.5, 1.0]], {**prof, "mode": "copy"},
+        str(tmp_path / "rotated-sync.mp4")))
+    assert sync_only["state"] == "done"
+    assert "must be joined" in sync_only.get("note", "")
+
+
+def test_untagged_source_is_not_blocked_by_the_rotation_guard(source):
+    """The rotation guard must not disable honest stream copies."""
+    info = probe(source)
+    assert not info["video"]["has_display_matrix"]
+    assert not info["video"]["rotation"]
+    assert export.stream_copy_fallback_reason([(0.0, 5.0)], info) is None
 
 
 def test_stream_copy_tail_trim_remains_fast(source, tmp_path):
