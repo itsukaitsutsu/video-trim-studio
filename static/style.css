@@ -254,3 +254,28 @@ details.adv summary:hover { color: var(--text); }
 .cap-guide.h { left: 0; right: 0; height: 1px; }
 .cap-style-tools { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .cap-style-tools input[type="range"] { width: 130px; vertical-align: middle; }
+.cap-edit {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  line-height: 1.25;
+  color: #fff;
+  caret-color: #4da3ff;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid #4da3ff;
+  border-radius: 4px;
+  padding: 2px 4px;
+  resize: none;
+  outline: none;
+  text-align: left;
+  /* #capBox sets user-select:none/cursor:move/touch-action:none for
+     dragging - inherit none of that into the editor or typing breaks. */
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  touch-action: auto;
+  text-shadow: none;
+}

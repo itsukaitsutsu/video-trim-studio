@@ -1,0 +1,9 @@
+{
+  "source": "https://github.com/ggml-org/whisper.cpp",
+  "commit": "f24588a272ae8e23280d9c220536437164e6ed28",
+  "reported_version": "1.8.5",
+  "compiler": "MSVC 19.44.35229.0 (v143)",
+  "configuration": "Release /O2, shared libraries, Vulkan ON, OpenMP ON, GGML_NATIVE ON (/arch:AVX2 on build machine)",
+  "vulkan_sdk": "1.4.357.0",
+  "source_modifications": []
+}

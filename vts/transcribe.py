@@ -152,7 +152,7 @@ MODELS: dict[str, dict] = {
     "base": {"size": "142 MB", "note": "quick"},
     "small": {"size": "466 MB", "note": "good balance for CPU"},
     "medium": {"size": "~1.5 GB", "note": "recommended default"},
-    "large-v3-turbo": {"size": "~1.5 GB", "note": "fast, best for English"},
+    "large-v3-turbo": {"size": "~1.5 GB", "note": "fast, near-large accuracy (multilingual)"},
     "turbo": {"size": "~1.5 GB", "note": "alias of large-v3-turbo"},
     "large-v1": {"size": "~2.9 GB", "note": "older"},
     "large-v2": {"size": "~2.9 GB", "note": "older"},
@@ -168,6 +168,26 @@ DEFAULT_PROMPTS = {
           "dengan tanda baca yang betul.",
     "jw": "Halo, iki transkripsi video nganggo basa Jawa sing rapi.",
 }
+
+def fw_models_dir() -> "Path":
+    """Folder for manually downloaded faster-whisper models (CTranslate2 format).
+
+    Same convenience as whisper.cpp's GGML folder: drop the model files in
+    <app>/work/fw-models/<model name>/ and they are used instead of the
+    HuggingFace auto-download. Override with VTS_FW_MODELS."""
+    from pathlib import Path
+    env = os.environ.get("VTS_FW_MODELS", "").strip()
+    return Path(env) if env else Path(__file__).resolve().parent.parent / "work" / "fw-models"
+
+
+def resolve_fw_model(model_name: str) -> str:
+    """Local model folder wins; otherwise the plain name triggers the
+    HuggingFace download inside faster-whisper."""
+    local = fw_models_dir() / model_name
+    if (local / "model.bin").is_file():
+        return str(local)
+    return model_name
+
 
 DEVICES = ("auto", "cuda", "cpu")
 COMPUTE_TYPES = ("auto", "int8", "int8_float16", "float16", "float32")
@@ -535,11 +555,16 @@ def transcribe_step(wav_path: str, job: dict, model_name: str, language: str,
 
     job["stage"] = "model"
     size = MODELS.get(model_name, {}).get("size", "unknown size")
-    job["note"] = (f"loading model '{model_name}' on {device} ({compute_type})"
-                   + (f" - first run downloads {size}" if size != "unknown size" else ""))
+    model_path = resolve_fw_model(model_name)
+    if model_path != model_name:
+        job["note"] = (f"loading model '{model_name}' from {model_path} "
+                       f"on {device} ({compute_type})")
+    else:
+        job["note"] = (f"loading model '{model_name}' on {device} ({compute_type})"
+                       + (f" - first run downloads {size}" if size != "unknown size" else ""))
 
     def load():
-        return WhisperModel(model_name, device=device, compute_type=compute_type)
+        return WhisperModel(model_path, device=device, compute_type=compute_type)
 
     try:
         model = load()
@@ -547,7 +572,7 @@ def transcribe_step(wav_path: str, job: dict, model_name: str, language: str,
         if device != "cuda":
             raise CaptionError(f"Could not load model '{model_name}': {exc}") from exc
         job["note"] = f"CUDA failed ({exc}); falling back to CPU"
-        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        model = WhisperModel(model_path, device="cpu", compute_type="int8")
         device, compute_type = "cpu", "int8"
     if job["_cancel"].is_set():
         raise Cancelled("cancelled")
@@ -649,19 +674,30 @@ def _run(job: dict, source: str, opts: dict) -> None:
         if not initial_prompt and task == "transcribe":
             initial_prompt = DEFAULT_PROMPTS.get(language)
 
-        segments, meta = transcribe_step(
-            wav_path, job,
-            model_name=opts.get("model") or "medium",
-            language=language,
-            task=task,
-            device=opts.get("device") or "cpu",
-            compute_type=opts.get("compute_type") or "auto",
-            initial_prompt=initial_prompt,
-            vad=bool(opts.get("vad", True)),
-            word_timestamps=bool(opts.get("word_timestamps", True)),
-            beam_size=int(opts.get("beam_size") or 1),
-            temperature_fallback=bool(opts.get("temperature_fallback", False)),
-        )
+        engine = (opts.get("engine") or "faster-whisper").lower()
+        if engine == "whispercpp":
+            # whisper.cpp engine (Vulkan/AMD GPU): same (segments, meta)
+            # contract, so everything downstream is shared.
+            from vts import whispercpp as wcpp
+            segments, meta = wcpp.transcribe_step(wav_path, job, {
+                **opts, "language": language,
+                "translate_to_english": task == "translate",
+                "initial_prompt": initial_prompt,
+            })
+        else:
+            segments, meta = transcribe_step(
+                wav_path, job,
+                model_name=opts.get("model") or "medium",
+                language=language,
+                task=task,
+                device=opts.get("device") or "cpu",
+                compute_type=opts.get("compute_type") or "auto",
+                initial_prompt=initial_prompt,
+                vad=bool(opts.get("vad", True)),
+                word_timestamps=bool(opts.get("word_timestamps", True)),
+                beam_size=int(opts.get("beam_size") or 1),
+                temperature_fallback=bool(opts.get("temperature_fallback", False)),
+            )
 
         if job["_cancel"].is_set():
             raise Cancelled("cancelled")
@@ -720,39 +756,58 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
     """Validate, register a job and run it in the background."""
     if not source or not os.path.isfile(source):
         raise CaptionError(f"Video not found: {source}")
-    if not dependency_status()["available"]:
-        raise CaptionError(
-            "faster-whisper is not installed, so auto-captioning is unavailable.\n"
-            "Install it with:  python -m pip install faster-whisper")
     opts = dict(opts or {})
-    model = opts.get("model") or "medium"
-    if model not in MODELS:
-        raise CaptionError(f"Unknown model '{model}'. Choose one of: "
-                           f"{', '.join(MODELS)}")
+    engine = (opts.get("engine") or "faster-whisper").lower()
+    if engine not in ("faster-whisper", "whispercpp"):
+        raise CaptionError("engine must be 'faster-whisper' or 'whispercpp'.")
     language = opts.get("language") or "auto"
     if language not in LANGUAGES:
         raise CaptionError(f"Unknown language code '{language}'.")
-    if opts.get("device") not in (None, *DEVICES):
-        raise CaptionError(f"device must be one of: {', '.join(DEVICES)}")
-    compute = opts.get("compute_type") or "auto"
-    if compute not in COMPUTE_TYPES:
-        raise CaptionError(f"compute_type must be one of: {', '.join(COMPUTE_TYPES)}")
-    beam = int(opts.get("beam_size") or 1)
-    if not 1 <= beam <= 10:
-        raise CaptionError("beam_size must be between 1 and 10.")
+    if engine == "whispercpp":
+        # AMD-GPU/CPU engine: validate the external binary + GGML model.
+        from vts import whispercpp as wcpp
+        model = opts.get("model") or "medium"
+        if not wcpp.find_cli():
+            raise CaptionError(
+                "whisper-cli not found. Build whisper.cpp (with -DGGML_VULKAN=ON "
+                "for AMD GPUs) and put the binary in <app>/tools/, on PATH, or "
+                "set VTS_WHISPER_CLI.\nSource: " + wcpp.CLI_URL_HINT)
+        if not wcpp.model_file(model).is_file():
+            raise CaptionError(
+                f"GGML model '{model}' is not in {wcpp.models_dir()}. "
+                "Download it from the Auto-caption card first.")
+        opts["model"] = model
+    else:
+        if not dependency_status()["available"]:
+            raise CaptionError(
+                "faster-whisper is not installed, so auto-captioning is unavailable.\n"
+                "Install it with:  python -m pip install faster-whisper")
+        model = opts.get("model") or "medium"
+        if model not in MODELS:
+            raise CaptionError(f"Unknown model '{model}'. Choose one of: "
+                               f"{', '.join(MODELS)}")
+        if opts.get("device") not in (None, *DEVICES):
+            raise CaptionError(f"device must be one of: {', '.join(DEVICES)}")
+        compute = opts.get("compute_type") or "auto"
+        if compute not in COMPUTE_TYPES:
+            raise CaptionError(f"compute_type must be one of: {', '.join(COMPUTE_TYPES)}")
+        beam = int(opts.get("beam_size") or 1)
+        if not 1 <= beam <= 10:
+            raise CaptionError("beam_size must be between 1 and 10.")
 
     job = _new_job("caption", source)
     job["options"] = {k: opts.get(k) for k in (
-        "model", "language", "translate_to_english", "device", "compute_type",
-        "vad", "word_timestamps", "beam_size", "temperature_fallback",
-        "normalize_audio", "initial_prompt", "keep_audio", "burn", "output_dir")}
+        "engine", "model", "language", "translate_to_english", "device",
+        "compute_type", "vad", "word_timestamps", "beam_size",
+        "temperature_fallback", "normalize_audio", "initial_prompt",
+        "keep_audio", "burn", "output_dir")}
     threading.Thread(target=_run, args=(job, source, opts), daemon=True).start()
     return get_job(job["id"])                       # type: ignore[return-value]
 
 
 def format_for_ui() -> dict:
     """Language/model catalogs + install status, for the caption card."""
-    return {
+    out = {
         "languages": [{"code": c, "name": n} for c, n in LANGUAGES.items()],
         "models": [{"name": m, "size": v["size"], "note": v["note"]}
                    for m, v in MODELS.items()],
@@ -761,3 +816,10 @@ def format_for_ui() -> dict:
         "status": dependency_status(),
         "python": sys.version.split()[0],
     }
+    try:
+        from vts import whispercpp as wcpp
+        out["whispercpp"] = wcpp.status()
+    except Exception:                                            # noqa: BLE001
+        out["whispercpp"] = {"available": False, "models": [], "catalog": [],
+                             "models_dir": "", "cli_path": None, "hint": ""}
+    return out

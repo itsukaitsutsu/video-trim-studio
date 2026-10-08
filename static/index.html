@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=10">
+<link rel="stylesheet" href="/static/style.css?v=14">
 </head>
 <body>
 <header>
@@ -35,7 +35,7 @@
       <div id="capOverlay" hidden>
         <div id="guideV" class="cap-guide v" hidden></div>
         <div id="guideH" class="cap-guide h" hidden></div>
-        <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines">
+        <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
           <div id="capBoxText">Caption preview</div>
           <div class="cap-handle w" title="Drag to resize the box"></div>
           <div class="cap-handle e" title="Drag to resize the box"></div>
@@ -123,22 +123,39 @@
       <div id="capUnavailable" class="warn" hidden></div>
       <button id="capRecheck" class="ghost block small" hidden>Re-check for faster-whisper</button>
       <div id="capSetup">
-        <div class="row"><label>Model</label><select id="cModel"></select></div>
+        <div class="row"><label>Engine</label><select id="cEngine">
+          <option value="faster-whisper" selected>faster-whisper &mdash; CPU / NVIDIA CUDA</option>
+          <option value="whispercpp">whisper.cpp &mdash; Vulkan GPU (AMD / Intel / NVIDIA) or CPU</option>
+        </select></div>
+        <div id="wcppPanel" hidden>
+          <div id="wcppStatus" class="dim small"></div>
+          <div class="row"><label>wcpp model</label><select id="wModel"></select></div>
+          <div class="row"><label>Get model</label>
+            <select id="wDlSelect"></select>
+            <button id="wDlBtn" class="ghost small">Download</button>
+          </div>
+          <div class="progress" id="wDlProg" hidden>
+            <div class="bar"><div id="wDlBar"></div></div>
+            <div class="progtext"><span id="wDlPct">0%</span><span id="wDlNote" class="dim"></span></div>
+          </div>
+          <div id="wcppHint" class="dim small"></div>
+        </div>
+        <div class="row" id="rowFwModel"><label>Model</label><select id="cModel"></select></div>
         <div class="row"><label>Language</label><select id="cLang"></select></div>
-        <div class="row"><label>Device</label><select id="cDevice"></select></div>
+        <div class="row" id="rowFwDevice"><label>Device</label><select id="cDevice"></select></div>
         <label class="chk"><input type="checkbox" id="cTranslate"> translate to English (any language &rarr; English)</label>
         <details class="adv">
           <summary>Advanced options</summary>
-          <div class="row"><label>Compute type</label><select id="cCompute"></select></div>
+          <div class="row" id="rowFwCompute"><label>Compute type</label><select id="cCompute"></select></div>
           <div class="row"><label>Beam size</label><input id="cBeam" type="number" value="1" min="1" max="10" step="1"
               title="1 = greedy and fastest; 5 = slower, can hallucinate more"></div>
           <div class="row"><label>Hint / prompt</label><input id="cPrompt" type="text" placeholder="names, jargon (optional)"></div>
           <div class="row"><label>Output folder</label><input id="cOutDir" type="text" placeholder="next to the video" spellcheck="false"></div>
           <div class="checks">
-            <label class="chk"><input type="checkbox" id="cVad" checked> VAD (skip silence)</label>
+            <span id="fwOnlyChecks"><label class="chk"><input type="checkbox" id="cVad" checked> VAD (skip silence)</label>
             <label class="chk"><input type="checkbox" id="cWords" checked> word timestamps (JSON)</label>
             <label class="chk"><input type="checkbox" id="cTemp" title="retry hard segments at higher temperature"> temperature fallback</label>
-            <label class="chk"><input type="checkbox" id="cNorm" title="loudnorm for quiet or uneven recordings"> normalize audio</label>
+            <label class="chk"><input type="checkbox" id="cNorm" title="loudnorm for quiet or uneven recordings"> normalize audio</label></span>
             <label class="chk"><input type="checkbox" id="cKeep"> keep 16 kHz wav</label>
             <label class="chk"><input type="checkbox" id="cBurn"> burn into a copy</label>
           </div>
@@ -289,6 +306,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=10"></script>
+<script src="/static/app.js?v=14"></script>
 </body>
 </html>

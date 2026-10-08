@@ -546,8 +546,12 @@ function bindCaptionOverlay() {
     });
   });
   bindCaptionResize();
+  $("capBox").addEventListener("dblclick", (ev) => {
+    ev.preventDefault();                       // no word-select/focus side effects
+    startOverlayCaptionEdit();
+  });
   $("player").addEventListener("timeupdate", () => {
-    if ($("capOverlay").hidden) return;
+    if ($("capOverlay").hidden || CAP_EDITING) return;
     $("capBoxText").dataset.raw = captionTextAt($("player").currentTime);
     layoutCapOverlay();
   });
@@ -557,7 +561,8 @@ function bindCaptionOverlay() {
 
 /* ------------------------------------------------------------ auto-caption */
 
-const CAP = { job: null, timer: null, poll: 700, editorSig: null };
+const CAP = { job: null, timer: null, poll: 700, editorSig: null,
+              fwStatus: null, wcpp: null };
 // Caption burn position: normalised centre of the box on the frame.
 const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size: 5.5, align: "center", box_w: 0.7 };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
@@ -579,6 +584,9 @@ function fillCaptionCard(caption) {
   });
   fillSelect(dev, caption.devices, caption.status.default_device || "cpu");
   fillSelect(comp, caption.compute_types, "auto");
+  CAP.fwStatus = caption.status;
+  CAP.wcpp = caption.whispercpp || null;
+  renderWcppPanel();
 
   const st = caption.status;
   if (!st.available) {
@@ -598,14 +606,121 @@ function fillCaptionCard(caption) {
     $("capUnavailable").hidden = true;
     $("capRecheck").hidden = true;
   }
-  $("capBtn").disabled = !st.available;
-  $("capBtn").textContent = st.available
-    ? "Transcribe to captions" : "Auto-caption unavailable";
-  if (st.available) {
-    $("capNote").textContent =
-      `faster-whisper ${st.version}` +
-      (st.cuda_devices ? ` · ${st.cuda_devices} CUDA device(s) detected` : " · CPU only (no CUDA device)");
+  updateEngineUI();
+}
+
+/* --------------------------------------------------- whisper.cpp engine UI */
+
+function engineIsWcpp() {
+  return $("cEngine") && $("cEngine").value === "whispercpp";
+}
+
+function renderWcppPanel() {
+  const w = CAP.wcpp;
+  if (!w) return;
+  const wModel = $("wModel"), wDl = $("wDlSelect");
+  wModel.textContent = "";
+  (w.models || []).forEach((m) => {
+    const o = document.createElement("option");
+    o.value = m.name;
+    o.textContent = `${m.name} (${Math.round(m.size_bytes / 1048576)} MB on disk)`;
+    wModel.appendChild(o);
+  });
+  if (!wModel.options.length) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "no GGML models yet - download one below";
+    wModel.appendChild(o);
   }
+  wDl.textContent = "";
+  (w.catalog || []).filter((c) => !c.present).forEach((c) => {
+    const o = document.createElement("option");
+    o.value = c.name; o.textContent = `${c.name} (${c.size})`;
+    wDl.appendChild(o);
+  });
+  $("wDlBtn").disabled = !wDl.options.length;
+  $("wcppStatus").innerHTML = w.available
+    ? `whisper-cli found: <code>${escapeHtml(w.cli_path || "")}</code><br>` +
+      `${w.models.length} model(s) in <code>${escapeHtml(w.models_dir || "")}</code>`
+    : "<b>whisper-cli not found.</b> Build whisper.cpp (see hint below), then put " +
+      "the binary in <code>tools/</code> next to the app, add it to PATH, or set " +
+      "<code>VTS_WHISPER_CLI</code> to its full path.";
+  $("wcppHint").innerHTML =
+    "AMD GPU (RX 6000-series etc.): build with <code>cmake -DGGML_VULKAN=ON</code> " +
+    '- Vulkan runs on Windows and Linux. Source: ' +
+    '<a href="https://github.com/ggml-org/whisper.cpp" target="_blank" ' +
+    'rel="noopener">ggml-org/whisper.cpp</a>';
+}
+
+function syncCapButton() {
+  const btn = $("capBtn");
+  if (engineIsWcpp()) {
+    const w = CAP.wcpp || {};
+    const ok = !!w.available && (w.models || []).length > 0;
+    btn.disabled = !ok;
+    btn.textContent = ok ? "Transcribe with whisper.cpp"
+      : (!w.available ? "whisper-cli not found" : "download a GGML model first");
+  } else {
+    const st = CAP.fwStatus || { available: false };
+    btn.disabled = !st.available;
+    btn.textContent = st.available ? "Transcribe to captions" : "Auto-caption unavailable";
+  }
+}
+
+function updateEngineUI() {
+  const wcpp = engineIsWcpp();
+  $("wcppPanel").hidden = !wcpp;
+  ["rowFwModel", "rowFwDevice", "rowFwCompute"].forEach((id) => { $(id).hidden = wcpp; });
+  $("fwOnlyChecks").hidden = wcpp;
+  syncCapButton();
+  $("capNote").textContent = wcpp
+    ? "whisper.cpp engine - uses the Vulkan GPU backend when the binary is built with it"
+    : (CAP.fwStatus && CAP.fwStatus.available
+        ? `faster-whisper ${CAP.fwStatus.version}` +
+          (CAP.fwStatus.cuda_devices ? ` · ${CAP.fwStatus.cuda_devices} CUDA device(s) detected`
+                                     : " · CPU only (no CUDA device)")
+        : "");
+}
+
+async function downloadWcppModel() {
+  const name = $("wDlSelect").value;
+  if (!name) return;
+  const btn = $("wDlBtn");
+  btn.disabled = true; btn.textContent = "Starting…";
+  $("wDlProg").hidden = false;
+  $("wDlBar").style.width = "0%";
+  $("wDlPct").textContent = "0%";
+  $("wDlNote").textContent = "";
+  let job;
+  try {
+    job = await api("/api/whispercpp/download", {
+      method: "POST", body: JSON.stringify({ model: name }),
+    });
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Download";
+    $("wDlNote").textContent = e.message;
+    return;
+  }
+  const timer = setInterval(async () => {
+    try {
+      const j = await api(`/api/caption/${job.id}`);
+      $("wDlBar").style.width = `${j.progress || 0}%`;
+      $("wDlPct").textContent = `${Math.floor(j.progress || 0)}%`;
+      $("wDlNote").textContent = j.note || "";
+      if (j.state !== "running") {
+        clearInterval(timer);
+        btn.disabled = false; btn.textContent = "Download";
+        $("wDlNote").textContent =
+          j.state === "done" ? (j.note || "done") : (j.error || j.note || j.state);
+        CAP.wcpp = await api("/api/whispercpp/status");
+        renderWcppPanel();
+        syncCapButton();
+      }
+    } catch (e) {
+      clearInterval(timer);
+      btn.disabled = false; btn.textContent = "Download";
+      $("wDlNote").textContent = e.message;
+    }
+  }, CAP.poll);
 }
 
 function stopCaptionPolling() {
@@ -613,7 +728,8 @@ function stopCaptionPolling() {
 }
 
 function captionOptions() {
-  return {
+  const opts = {
+    engine: $("cEngine").value,
     model: $("cModel").value,
     language: $("cLang").value,
     device: $("cDevice").value,
@@ -629,6 +745,8 @@ function captionOptions() {
     initial_prompt: $("cPrompt").value.trim() || null,
     output_dir: $("cOutDir").value.trim() || null,
   };
+  if (opts.engine === "whispercpp") opts.model = $("wModel").value;
+  return opts;
 }
 
 function resetCaptionCard() {
@@ -921,6 +1039,67 @@ function seekIntoCue(start, end) {
   // Land just *inside* the cue: seeking exactly to `start` (or before it)
   // shows the previous frame and the caption is not visible in the preview.
   return Math.min(start + 0.05, Math.max(start, end - 0.001));
+}
+
+let CAP_EDITING = false;
+
+function startOverlayCaptionEdit() {
+  // Double-click the preview box: edit the cue that is on screen right there,
+  // on top of the video. Saves through the same commit path as the list
+  // editor, so the table row and the subtitle file stay in sync.
+  if (CAP_EDITING) return;
+  const t = $("player").currentTime || 0;
+  const section = S.sections.find(
+    (s) => s.kind === "caption" && s.start <= t && t <= s.end);
+  if (!section) return;                       // no caption on this frame
+  CAP_EDITING = true;
+  $("player").pause();
+  const box = $("capBox"), textEl = $("capBoxText");
+  const ta = document.createElement("textarea");
+  ta.className = "cap-edit";
+  ta.value = section.text || "";
+  ta.spellcheck = false;
+  box.appendChild(ta);
+  textEl.style.visibility = "hidden";         // keeps the box sized
+  ta.focus();
+  ta.select();
+  const rowTxt = section.id != null
+    ? document.querySelector(`#secTable tr[data-id="${section.id}"] .txt`)
+    : null;
+  ta.addEventListener("input", () => {        // live-sync the table row
+    textEl.dataset.raw = ta.value;
+    if (rowTxt) rowTxt.textContent = ta.value;
+  });
+  ta.addEventListener("pointerdown", (ev) => ev.stopPropagation()); // no drag
+  ta.addEventListener("click", () => { if (!done && document.activeElement !== ta) ta.focus(); });
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    CAP_EDITING = false;
+    ta.remove();
+    textEl.style.visibility = "";
+    const value = ta.value.replace(/\s+/g, " ").trim();
+    if (commit && value !== (section.text || "")) {
+      commitCaptionEdit(section, value);      // section, table row, file
+      textEl.dataset.raw = value;
+    } else {
+      textEl.dataset.raw = section.text || "";
+    }
+    layoutCapOverlay();
+  };
+  ta.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); finish(true); }
+    else if (ev.key === "Escape") finish(false);
+  });
+  ta.addEventListener("blur", () => {
+    // Ignore transient focus flickers (the browser still finishing the
+    // dblclick); only commit once focus has really moved elsewhere.
+    setTimeout(() => {
+      if (!done && document.activeElement !== ta) finish(true);
+    }, 0);
+  });
 }
 
 function startCaptionEdit(section, tr) {
@@ -1681,6 +1860,8 @@ function bindUI() {
     del.closest("tr").remove();
     renumberCues();
   });
+  $("cEngine").addEventListener("change", updateEngineUI);
+  $("wDlBtn").onclick = downloadWcppModel;
   $("capRecheck").onclick = async () => {
     // faster-whisper is imported lazily when a job starts, so a package
     // installed in another terminal is picked up without restarting the app.

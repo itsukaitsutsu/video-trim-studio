@@ -747,6 +747,27 @@ def test_inline_edit_is_wired_between_html_and_js():
     assert "start - 0.1" not in js
     # The list editor live-syncs the preview box while typing.
     assert "syncPreview" in js and 'dataset.raw = input.value' in js
+    # The preview box itself is editable: dblclick opens an on-video editor
+    # that commits through the same path as the list editor.
+    for needle in ("startOverlayCaptionEdit", "CAP_EDITING", "cap-edit"):
+        assert needle in js, f"{needle} missing from app.js"
+    assert "double-click to edit" in html
+    # whisper.cpp engine (AMD/Vulkan) is wired end to end
+    for needle in ('id="cEngine"', 'id="wcppPanel"', 'id="wModel"', 'id="wDlBtn"'):
+        assert needle in html, f"{needle} missing from index.html"
+    for needle in ("engineIsWcpp", "renderWcppPanel", "downloadWcppModel",
+                   "/api/whispercpp/download"):
+        assert needle in js, f"{needle} missing from app.js"
+    srv = open(os.path.join(root, "server.py"), encoding="utf-8").read()
+    assert "/api/whispercpp/status" in srv and "/api/whispercpp/download" in srv
+    css = open(os.path.join(root, "static", "style.css"), encoding="utf-8").read()
+    # the editor must opt back into text selection (capBox disables it for
+    # dragging) or the textarea cannot be typed into
+    assert "user-select: text" in css
+    # transient focus flickers after the dblclick must not tear the editor
+    # down; the dblclick default is suppressed at the source
+    assert "document.activeElement !== ta" in js
+    assert "ev.preventDefault();                       // no word-select/focus side effects" in js
     # Cache-busting query strings stop replaced files from serving stale JS.
     assert "app.js?v=" in html and "style.css?v=" in html
 
@@ -882,7 +903,7 @@ def test_export_caption_controls_are_wired():
                    "updateCaptionExportInfo", "job.captions"):
         assert needle in js, f"{needle} missing from app.js"
     assert 'id="xCaptions"' in html and 'id="xCapInfo"' in html
-    assert "app.js?v=10" in html
+    assert "app.js?v=14" in html
 
 
 # ---------------------------------------------------------------------------
@@ -970,7 +991,7 @@ def test_caption_overlay_is_wired_between_html_and_js():
     for needle in ("capOverlay", "capBox", "capBoxText", "guideV", "guideH",
                    "capStyleRow", "capFontSize", "capPosReset", "capPosInfo"):
         assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
-    assert "app.js?v=10" in html
+    assert "app.js?v=14" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1018,7 +1039,7 @@ def test_upload_handler_points_the_path_at_the_saved_file():
     js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
     assert 'data.saved_path' in js                    # path filled from the upload
     assert '$("dSubPath").value = "";' not in js.split("dSubFile", 1)[1].split("};", 1)[0]
-    assert "app.js?v=10" in open(os.path.join(root, "static", "index.html"),
+    assert "app.js?v=14" in open(os.path.join(root, "static", "index.html"),
                                  encoding="utf-8").read()
 
 
@@ -1084,7 +1105,7 @@ def test_alignment_and_resize_controls_are_wired():
     assert "justify_char" not in js and "justify_char" not in html  # JC mode removed
     for needle in ("capAlign", "cap-handle", ">J<"):
         assert needle in html, f"{needle} missing from index.html"
-    assert "app.js?v=10" in html
+    assert "app.js?v=14" in html
 
 
 def test_write_ass_justify_flushes_both_edges(tmp_path):
@@ -1106,3 +1127,12 @@ def test_write_ass_justify_flushes_both_edges(tmp_path):
     assert seventh.startswith("{\\an4\\pos(812,") and seventh.endswith("}wrap")
     last = events[7].split(",,")[-1]      # final line left-aligned, not centred
     assert last.startswith("{\\an4\\pos(100,") and last.endswith("}into two lines")
+
+def test_resolve_fw_model_prefers_local_folder(tmp_path, monkeypatch):
+    import vts.transcribe as t
+    monkeypatch.setenv("VTS_FW_MODELS", str(tmp_path))
+    assert t.resolve_fw_model("medium") == "medium"      # nothing local yet
+    mdir = tmp_path / "medium"
+    mdir.mkdir()
+    (mdir / "model.bin").write_bytes(b"x")
+    assert t.resolve_fw_model("medium") == str(mdir)     # local folder wins

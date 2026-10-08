@@ -174,6 +174,7 @@ class ManualCaptionRequest(BaseModel):
 
 class CaptionRequest(BaseModel):
     """Auto-caption options; every field has a working default."""
+    engine: str = "faster-whisper"   # faster-whisper (CPU/CUDA) | whispercpp (Vulkan/AMD)
     language: str = "auto"
     model: str = "medium"
     translate_to_english: bool = False
@@ -706,12 +707,36 @@ def caption(req: CaptionRequest):
         opts["output_dir"] = os.path.abspath(
             os.path.expanduser(str(opts["output_dir"]).strip().strip('"')))
     # Device/compute 'auto' is resolved here so the choices are validated once.
-    device, compute = caption_mod.pick_device_and_compute(
-        opts.get("device", "auto"), opts.get("compute_type", "auto"))
-    opts["device"], opts["compute_type"] = device, compute
+    # (whisper.cpp picks its own backend - Vulkan when built with it - so the
+    # CUDA/CPU choices don't apply to it.)
+    if opts.get("engine", "faster-whisper") != "whispercpp":
+        device, compute = caption_mod.pick_device_and_compute(
+            opts.get("device", "auto"), opts.get("compute_type", "auto"))
+        opts["device"], opts["compute_type"] = device, compute
     try:
         return caption_mod.start_caption(proj.path, opts)
     except caption_mod.CaptionError as exc:
+        raise HTTPException(400, str(exc))
+
+
+class WhisperCppDownloadRequest(BaseModel):
+    model: str
+
+
+@app.get("/api/whispercpp/status")
+def whispercpp_status():
+    """whisper-cli binary + GGML model inventory for the caption card."""
+    from vts import whispercpp as wcpp
+    return wcpp.status()
+
+
+@app.post("/api/whispercpp/download")
+def whispercpp_download(req: WhisperCppDownloadRequest):
+    """Download a GGML model (streamed, polled like caption jobs)."""
+    from vts import whispercpp as wcpp
+    try:
+        return wcpp.start_download(req.model)
+    except wcpp.CaptionError as exc:
         raise HTTPException(400, str(exc))
 
 

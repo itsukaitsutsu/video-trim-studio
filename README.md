@@ -109,9 +109,17 @@ failed.
 The first transcription also downloads the chosen model (75 MB for `tiny`,
 ~1.5 GB for `medium`) into the HuggingFace cache; later runs reuse it.
 
+**Slow connection? Download the model manually.** There are no CUDA-specific
+files — the same four files serve both CUDA and CPU. Grab them from
+`https://huggingface.co/Systran/faster-whisper-<model>` (or the same path on
+the `hf-mirror.com` mirror): `model.bin`, `config.json`, `tokenizer.json`,
+`vocabulary.txt`, and put all four into `work/fw-models/<model name>/` (e.g.
+`work/fw-models/medium/`). The app then loads from that folder and skips the
+automatic download entirely.
+
 | Option | Notes |
 | --- | --- |
-| **Model** | `tiny`/`base` are fast, `medium` is the balanced default, `large-v3` is the most accurate and slow on CPU, `large-v3-turbo` is fast but weak outside English. |
+| **Model** | `tiny`/`base` are fast, `medium` is the balanced default, `large-v3` is the most accurate and slow on CPU, `large-v3-turbo` is nearly as accurate and much faster (multilingual, incl. Indonesian). |
 | **Language** | 99 codes plus *Auto-detect*. `id`, `ms`, `jw`, `en`, … |
 | **Translate to English** | Any spoken language into English subtitles (Whisper's `translate` task). |
 | **Device / compute type** | `auto` uses CUDA when CTranslate2 sees a GPU, otherwise CPU `int8`. An RX 6600 XT is CUDA-less, so it runs on CPU; low-VRAM CUDA setups can pick `int8_float16`. |
@@ -127,6 +135,30 @@ the last transcript lines. **Cancel transcription** stops it at the next
 segments boundary. **Use these captions → Detect sections** then runs the
 normal detection with the generated captions, and the subtitle path is filled in
 so a plain **Detect sections** works too.
+
+### whisper.cpp engine — GPU transcription on AMD cards (Vulkan)
+
+faster-whisper runs on CTranslate2, whose pip builds only support **CPU and
+NVIDIA CUDA** — an AMD card like the RX 6600 XT cannot be used by it, which is
+why the Device choice here is just CUDA/CPU. The caption card therefore has an
+**Engine** switch: `whisper.cpp` uses a separate engine with a **Vulkan**
+backend that runs on AMD/Intel/NVIDIA GPUs on both Windows and Linux.
+
+1. **Get the CLI binary.** Build [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+   with Vulkan: `cmake -B build -DGGML_VULKAN=ON && cmake --build build --config Release`
+   (needs the Vulkan SDK / your GPU driver). Then make `whisper-cli` visible:
+   copy it into `<app>/tools/`, put it on PATH, or set `VTS_WHISPER_CLI` to its
+   full path. The card's status line tells you whether it was found.
+2. **Get a GGML model.** The card lists downloadable models (`tiny` … `large-v3`)
+   and streams them from HuggingFace into `work/whisper-models/` with progress —
+   or download `ggml-<name>.bin` yourself into that folder.
+3. **Pick Engine = whisper.cpp**, a model, and transcribe. Everything else is
+   shared: same outputs, editable cues, burn-in, detection.
+
+With a Vulkan build the card reports `backend: vulkan` while it runs; without
+GPU support in the binary it simply uses the CPU (still often faster than
+faster-whisper on CPU). The engine uses long-form CLI flags only, which are
+stable across whisper.cpp releases.
 
 ### Editable captions
 
