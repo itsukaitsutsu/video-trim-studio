@@ -58,9 +58,24 @@ def removed_total(deletions: list[tuple[float, float]], duration: float) -> floa
 # Filter graph (frame-accurate mode)
 # ---------------------------------------------------------------------------
 
+def escape_filter_path(path: str) -> str:
+    """Quote a filesystem path for the `subtitles=` filter argument.
+
+    Forward slashes everywhere, then the filter-arg specials escaped, then
+    wrapped in single quotes. Works cross-platform (incl. `C:` drive letters)."""
+    p = str(path).replace("\\", "/")
+    for ch in (":", "'", "[", "]", ";", ","):
+        p = p.replace(ch, "\\" + ch)
+    return f"'{p}'"
+
+
 def build_filter_complex(segments: list[tuple[float, float]], fade_ms: int,
-                         has_audio: bool) -> str:
-    """trim + concat every kept segment in a single graph."""
+                         has_audio: bool, burn_srt: str | None = None) -> str:
+    """trim + concat every kept segment in a single graph.
+
+    With `burn_srt`, a subtitles filter runs *after* the concat, so the cues
+    (already remapped onto the trimmed timeline) land exactly where the audio
+    says they should."""
     parts: list[str] = []
     labels: list[str] = []
     for i, (start, end) in enumerate(segments):
@@ -84,8 +99,11 @@ def build_filter_complex(segments: list[tuple[float, float]], fade_ms: int,
 
     vflag = 1
     aflag = 1 if has_audio else 0
-    outs = "[outv][outa]" if has_audio else "[outv]"
+    vout = "[concatv]" if burn_srt else "[outv]"
+    outs = f"{vout}[outa]" if has_audio else vout
     parts.append(f"{''.join(labels)}concat=n={len(segments)}:v={vflag}:a={aflag}{outs}")
+    if burn_srt:
+        parts.append(f"[concatv]subtitles={escape_filter_path(burn_srt)}[outv]")
     return ";".join(parts)
 
 
@@ -400,6 +418,10 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
 
     if mode == "copy":
         fallback_note = stream_copy_fallback_reason(segments, info)
+        if opts.get("burn_srt"):
+            burn_note = ("Captions are burned into the picture, which requires "
+                         "re-encoding; stream copy was upgraded to re-encode.")
+            fallback_note = f"{fallback_note} {burn_note}" if fallback_note else burn_note
         if fallback_note:
             # Do not hand concat-demuxer timestamp overlap to the muxer, and do
             # not emit a copy that depends on a rotation tag. Reuse the normal
@@ -427,13 +449,16 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
         job_snapshot["segments"] = len(segments)
         return job_snapshot
 
-    filter_graph = build_filter_complex(segments, int(opts.get("fade_ms", 30)), has_audio)
+    filter_graph = build_filter_complex(segments, int(opts.get("fade_ms", 30)),
+                                        has_audio, burn_srt=opts.get("burn_srt"))
     fd, script_path = tempfile.mkstemp(suffix=".txt", prefix="vts_filter_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(filter_graph)
 
     total = sum(e - s for s, e in segments)
     job = _new_job("reencode", output, total)
+    if opts.get("_burn_ass_cleanup"):
+        job["burn_ass"] = opts["_burn_ass_cleanup"]   # removed after the job
     if opts.get("_mode_note"):
         # A copy fallback note already explains itself, rotation included.
         job["note"] = opts["_mode_note"]
@@ -483,7 +508,7 @@ def _watch_and_cleanup(job, cmd, total, fallback, script_path,
             )
             _watch(job, encoder_fallback_cmd, total, False)
     finally:
-        for key in ("filter_script", "concat_list"):
+        for key in ("filter_script", "concat_list", "burn_ass"):
             path = job.get(key)
             if path and os.path.exists(path):
                 try:

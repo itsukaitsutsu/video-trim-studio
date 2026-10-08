@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -451,3 +452,657 @@ def test_speech_demo_endpoint_opens_the_spoken_clip(client):
     data = res.json()
     assert data["info"]["name"] == "sample-speech.mp4"
     assert data["info"]["audio"] is not None          # it must have speech to transcribe
+
+
+# ---------------------------------------------------------------------------
+# Editable captions: validation, manual sets, saving back to disk
+# ---------------------------------------------------------------------------
+
+def test_validate_cues_normalises_and_sorts():
+    cues = cap_mod.validate_cues([
+        {"start": "2.5", "end": 4, "text": "  second  "},
+        {"start": 0, "end": "1.99999", "text": "first"},
+        {"start": 1, "end": 2, "text": None},          # no text -> empty cue
+    ])
+    assert [c["text"] for c in cues] == ["first", "", "second"]
+    assert [c["start"] for c in cues] == [0.0, 1.0, 2.5]
+    assert cues[1]["end"] == 2.0                        # rounded to ms
+    assert cap_mod.validate_cues([]) == []              # empty is legal
+
+
+@pytest.mark.parametrize("raw,match", [
+    ("nope", "must be a list"),
+    ([{"start": 1, "text": "x"}], "numbers"),           # missing end
+    ([{"start": 2, "end": 1, "text": "x"}], "after start"),
+    ([{"start": -1, "end": 1, "text": "x"}], "0 or later"),
+    ([{"start": float("nan"), "end": 1, "text": "x"}], "not a valid number"),
+    ([{"start": 0, "end": float("inf"), "text": "x"}], "not a valid number"),
+    ([{"start": 0, "end": 1, "text": 5}], "must be a string"),
+    ([42], "expected an object"),
+    ([{"start": 0, "end": 99 * 3600, "text": "x"}], "24-hour"),
+])
+def test_validate_cues_rejects_bad_input(raw, match):
+    with pytest.raises(cap_mod.CaptionError, match=match):
+        cap_mod.validate_cues(raw)
+
+
+def test_manual_set_starts_blank_without_the_optional_dependency(monkeypatch, tmp_path):
+    """Editing captions must work on machines without faster-whisper."""
+    monkeypatch.setattr(cap_mod, "dependency_status",
+                        lambda: {"available": False, "install": "pip x"})
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"pretend video")
+    job = cap_mod.start_manual_captions(str(video))
+    state = cap_mod.get_job(job["id"])
+    assert state["state"] == "manual"
+    assert state["kind"] == "manual"
+    assert state["cues"] == []
+    assert state["outputs"]["srt"].endswith("v.srt")
+    assert "Blank caption set" in state["note"]
+
+
+def test_manual_set_loads_an_existing_sidecar(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    srt = tmp_path / "clip.srt"
+    srt.write_text("1\n00:00:01,000 --> 00:00:02,500\nHello there\n\n"
+                   "2\n00:00:03,000 --> 00:00:04,000\nSecond line\n\n",
+                   encoding="utf-8")
+    job = cap_mod.start_manual_captions(str(video), sidecar=str(srt))
+    assert job["cues"] == [
+        {"start": 1.0, "end": 2.5, "text": "Hello there"},
+        {"start": 3.0, "end": 4.0, "text": "Second line"},
+    ]
+    assert "2 cue(s)" in job["note"]
+
+
+def test_manual_set_reports_an_unreadable_sidecar(tmp_path):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"x")
+    with pytest.raises(cap_mod.CaptionError, match="Cannot read"):
+        cap_mod.start_manual_captions(str(video), sidecar=str(tmp_path / "gone.srt"))
+
+
+def test_update_cues_rewrites_the_caption_files(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    job = cap_mod.start_manual_captions(str(video), str(tmp_path))
+    saved = cap_mod.update_cues(job["id"], [
+        {"start": 2.0, "end": 3.5, "text": "edited second"},
+        {"start": 0.5, "end": 1.25, "text": "edited first"},
+    ])
+    assert saved["edited"] is True
+    assert saved["edited_at"]
+    assert [c["text"] for c in saved["cues"]] == ["edited first", "edited second"]
+    srt = Path(saved["outputs"]["srt"]).read_text(encoding="utf-8")
+    assert "00:00:00,500 --> 00:00:01,250" in srt and "edited first" in srt
+    assert srt.index("edited first") < srt.index("edited second")
+    assert Path(saved["outputs"]["vtt"]).read_text(encoding="utf-8").startswith("WEBVTT")
+    parsed = detect_mod.parse_subtitles(
+        Path(saved["outputs"]["srt"]).read_text(encoding="utf-8"))
+    assert len(parsed) == 2 and parsed[0]["text"] == "edited first"
+    assert "edited second" in saved["cues_text"]
+    meta = json.loads(Path(saved["outputs"]["json"]).read_text(encoding="utf-8"))
+    assert meta["info"]["edited"] is True and meta["info"]["cue_count"] == 2
+
+
+def test_update_cues_rejects_unknown_or_running_jobs(tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    assert cap_mod.update_cues("deadbeef0000", []) is None
+    running = cap_mod._new_job("caption", str(video))     # still 'running'
+    with pytest.raises(cap_mod.CaptionError, match="still running"):
+        cap_mod.update_cues(running["id"], [{"start": 0, "end": 1, "text": "x"}])
+    with pytest.raises(cap_mod.CaptionError, match="Cue 1"):
+        manual = cap_mod.start_manual_captions(str(video))
+        cap_mod.update_cues(manual["id"], [{"start": 5, "end": 2, "text": "x"}])
+
+
+# ---------------------------------------------------------------------------
+# Editable captions over HTTP
+# ---------------------------------------------------------------------------
+
+def test_caption_editor_roundtrip_over_http(client, tmp_path):
+    """Blank set -> edit cues -> files on disk -> detection sees the edits."""
+    video = tmp_path / "editable.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=5",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(video),
+    ], check=True, capture_output=True)
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    res = client.post("/api/caption/manual", json={})
+    assert res.status_code == 200, res.text
+    job = res.json()
+    assert job["state"] == "manual" and job["cues"] == []
+
+    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
+        {"start": 3.0, "end": 4.2, "text": "moved later"},
+        {"start": 0.4, "end": 2.0, "text": "fixed text"},
+    ]})
+    assert res.status_code == 200, res.text
+    saved = res.json()
+    assert [c["text"] for c in saved["cues"]] == ["fixed text", "moved later"]
+    assert Path(saved["outputs"]["srt"]).is_file()
+    # GET returns the same editable copy.
+    again = client.get(f"/api/caption/{job['id']}").json()
+    assert again["cues"] == saved["cues"] and again["edited"] is True
+
+    # Bad payloads are rejected with the cue-level message, not a traceback.
+    bad = client.put(f"/api/caption/{job['id']}/cues",
+                     json={"cues": [{"start": 4, "end": 1, "text": "x"}]})
+    assert bad.status_code == 400 and "after start" in bad.json()["detail"]
+    assert client.put("/api/caption/deadbeef/cues",
+                      json={"cues": []}).status_code == 404
+
+    # Detection reads the edited file and marks the caption sections.
+    det = client.post("/api/detect", json={
+        "detect_silence": False, "use_cues": True,
+        "subtitles_path": saved["outputs"]["srt"], "min_section_ms": 100,
+    })
+    assert det.status_code == 200, det.text
+    data = det.json()
+    assert data["cue_count"] == 2
+    texts = [s["text"] for s in data["sections"] if s["kind"] == "caption"]
+    assert "fixed text" in texts and "moved later" in texts
+
+
+def test_manual_caption_open_srt_over_http(client, tmp_path):
+    video = tmp_path / "side.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(video),
+    ], check=True, capture_output=True)
+    srt = tmp_path / "imported.srt"
+    srt.write_text("1\n00:00:00,200 --> 00:00:01,800\nImported line\n\n",
+                   encoding="utf-8")
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    job = client.post("/api/caption/manual", json={"load": str(srt)}).json()
+    assert job["cues"][0]["text"] == "Imported line"
+
+    missing = client.post("/api/caption/manual", json={"load": str(tmp_path / "no.srt")})
+    assert missing.status_code == 400 and "not found" in missing.json()["detail"]
+    wrong = client.post("/api/caption/manual", json={"load": str(video)})
+    assert wrong.status_code == 400
+
+
+def test_sidecar_is_reported_when_a_video_is_opened(client, tmp_path):
+    video = tmp_path / "paired.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=2",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(video),
+    ], check=True, capture_output=True)
+    res = client.post("/api/open", json={"path": str(video)})
+    assert res.status_code == 200
+    assert res.json()["sidecar_subtitles"] is None       # nothing next to it yet
+    srt = tmp_path / "paired.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n\n", encoding="utf-8")
+    res = client.post("/api/open", json={"path": str(video)})
+    assert res.json()["sidecar_subtitles"] == str(srt)
+
+
+def test_caption_editor_is_wired_between_html_and_js():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    for needle in ('capEditor', 'capSave', 'capAddCue', 'capRevert',
+                   'capNewBtn', 'capOpenSrtBtn', 'capCueBody', '/cues'):
+        assert needle in js, f"{needle} missing from app.js"
+    for needle in ('capEditor', 'capSave', 'capAddCue', 'capRevert',
+                   'capNewBtn', 'capOpenSrtBtn', 'capCueTable'):
+        assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
+
+
+# ---------------------------------------------------------------------------
+# Inline caption editing in the section list (double-click -> save to file)
+# ---------------------------------------------------------------------------
+
+SRT_THREE = ("1\n00:00:01,000 --> 00:00:02,500\nFirst line\n\n"
+             "2\n00:00:02,500 --> 00:00:06,000\nA long line split by a pause\n\n"
+             "3\n00:00:07,000 --> 00:00:08,000\nLast line\n\n")
+
+
+def test_subtitle_edit_saves_back_to_srt(client, tmp_path):
+    srt = tmp_path / "talk.srt"
+    srt.write_text(SRT_THREE, encoding="utf-8")
+    res = client.post("/api/subtitles/edit", json={
+        "path": str(srt), "start": 1.0, "end": 2.5, "text": "Fixed first line"})
+    assert res.status_code == 200, res.text
+    assert res.json()["updated"] == 1
+    cues = detect_mod.parse_subtitles(srt.read_text(encoding="utf-8"))
+    assert [c["text"] for c in cues] == [
+        "Fixed first line", "A long line split by a pause", "Last line"]
+    assert len(cues) == 3                       # timings and count untouched
+
+
+def test_subtitle_edit_updates_every_cue_under_a_split_row(client, tmp_path):
+    """A pause inside one sentence shows as ONE row covering two cues."""
+    srt = tmp_path / "split.srt"
+    srt.write_text(
+        "1\n00:00:02,000 --> 00:00:03,900\npart one\n\n"
+        "2\n00:00:04,200 --> 00:00:05,000\npart two\n\n", encoding="utf-8")
+    res = client.post("/api/subtitles/edit", json={
+        "path": str(srt), "start": 2.0, "end": 5.0,
+        "text": "one clean sentence"})
+    assert res.json()["updated"] == 2
+    cues = detect_mod.parse_subtitles(srt.read_text(encoding="utf-8"))
+    assert all(c["text"] == "one clean sentence" for c in cues)
+
+
+def test_subtitle_edit_keeps_vtt_format_and_flattens_newlines(client, tmp_path):
+    vtt = tmp_path / "talk.vtt"
+    vtt.write_text("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nold text\n\n",
+                   encoding="utf-8")
+    res = client.post("/api/subtitles/edit", json={
+        "path": str(vtt), "start": 1.0, "end": 2.0,
+        "text": "multi\nline\nbecomes one"})
+    assert res.status_code == 200, res.text
+    body = vtt.read_text(encoding="utf-8")
+    assert body.startswith("WEBVTT")
+    assert "multi line becomes one" in body and "old text" not in body
+
+
+def test_subtitle_edit_rejects_bad_targets(client, tmp_path):
+    missing = client.post("/api/subtitles/edit", json={
+        "path": str(tmp_path / "nope.srt"), "start": 0, "end": 1, "text": "x"})
+    assert missing.status_code == 404
+    video = tmp_path / "movie.mp4"
+    video.write_bytes(b"x")
+    wrong = client.post("/api/subtitles/edit", json={
+        "path": str(video), "start": 0, "end": 1, "text": "x"})
+    assert wrong.status_code == 400
+    srt = tmp_path / "t.srt"
+    srt.write_text(SRT_THREE, encoding="utf-8")
+    backwards = client.post("/api/subtitles/edit", json={
+        "path": str(srt), "start": 5, "end": 2, "text": "x"})
+    assert backwards.status_code == 400
+    # A range that matches nothing changes nothing but is not an error.
+    untouched = client.post("/api/subtitles/edit", json={
+        "path": str(srt), "start": 100, "end": 101, "text": "x"})
+    assert untouched.json()["updated"] == 0
+
+
+def test_inline_edit_is_wired_between_html_and_js():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    for needle in ('/api/subtitles/edit', 'startCaptionEdit', 'commitCaptionEdit',
+                   'dblclick', 'txt-edit'):
+        assert needle in js, f"{needle} missing from app.js"
+    assert "click a caption text to edit it" in html
+    # Focusing the player on row click yanked the page up to the video, which
+    # is what made inline editing unusable; keep it gone.
+    assert "player.focus" not in js
+    # Clicking a caption must bring that cue on screen: the seek lands INSIDE
+    # the cue (seekIntoCue), never before it - seeking to/before the start
+    # shows the previous frame and the caption is not visible.
+    assert "seekIntoCue" in js
+    assert "start - 0.1" not in js
+    # The list editor live-syncs the preview box while typing.
+    assert "syncPreview" in js and 'dataset.raw = input.value' in js
+    # Cache-busting query strings stop replaced files from serving stale JS.
+    assert "app.js?v=" in html and "style.css?v=" in html
+
+
+# ---------------------------------------------------------------------------
+# Export with captions synced to the trimmed result
+# ---------------------------------------------------------------------------
+
+from vts import captionmap as cmap_mod      # noqa: E402
+
+
+def test_remap_cues_shifts_splits_drops_and_merges():
+    kept = [(0.0, 2.0), (4.0, 6.0)]          # cut 2-4 out of 6 s
+    cues = [
+        {"start": 0.5, "end": 1.5, "text": "a"},
+        {"start": 1.5, "end": 4.5, "text": "b"},     # spans the cut
+        {"start": 2.2, "end": 3.8, "text": "gone"},  # entirely removed
+        {"start": 5.0, "end": 5.8, "text": "c"},
+    ]
+    out = cmap_mod.remap_cues(cues, kept)
+    assert out == [
+        {"start": 0.5, "end": 1.5, "text": "a"},
+        {"start": 1.5, "end": 2.5, "text": "b"},     # merged back together
+        {"start": 3.0, "end": 3.8, "text": "c"},     # shifted 2 s earlier
+    ]
+
+
+def test_remap_cues_no_cuts_is_identity():
+    cues = [{"start": 1.0, "end": 2.0, "text": "x"}]
+    assert cmap_mod.remap_cues(cues, [(0.0, 10.0)]) == cues
+
+
+def _make_clip(path, duration=6):
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"color=c=gray:size=160x120:rate=10:duration={duration}",
+        "-f", "lavfi", "-i", f"sine=frequency=330:duration={duration}",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(path),
+    ], check=True, capture_output=True)
+
+
+def _wait_job(client, job_id, timeout=120):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/job/{job_id}").json()
+        if job["state"] != "running":
+            return job
+        time.sleep(0.5)
+    raise AssertionError(f"export job {job_id} did not finish in time")
+
+
+def test_export_writes_remapped_srt(client, tmp_path):
+    video = tmp_path / "podcast.mp4"
+    _make_clip(video, 6)
+    srt = tmp_path / "podcast.srt"
+    srt.write_text(
+        "1\n00:00:00,500 --> 00:00:01,500\nbefore the cut\n\n"
+        "2\n00:00:01,500 --> 00:00:04,500\nspans the cut\n\n"
+        "3\n00:00:05,000 --> 00:00:05,800\nafter the cut\n\n", encoding="utf-8")
+    out = tmp_path / "podcast.clean.mp4"
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    res = client.post("/api/export", json={
+        "deletions": [[2, 4]], "output": str(out),
+        "opts": {"mode": "reencode", "codec": "libx264"},
+        "subtitles_path": str(srt), "caption_mode": "srt",
+    })
+    assert res.status_code == 200, res.text
+    job = res.json()
+    assert job["captions"]["cues_in"] == 3 and job["captions"]["cues_out"] == 3
+    done = _wait_job(client, job["id"])
+    assert done["state"] == "done", done.get("error")
+    assert out.is_file()
+    remapped = Path(job["captions"]["srt"])
+    assert remapped.is_file() and remapped.with_suffix("").name == out.stem
+    cues = detect_mod.parse_subtitles(remapped.read_text(encoding="utf-8"))
+    assert [(c["start"], c["end"], c["text"]) for c in cues] == [
+        (0.5, 1.5, "before the cut"),
+        (1.5, 2.5, "spans the cut"),       # split pieces merged, shifted
+        (3.0, 3.8, "after the cut"),       # 2 s earlier than the source
+    ]
+
+
+def test_export_burns_captions_and_upgrades_copy_mode(client, tmp_path):
+    video = tmp_path / "burn.mp4"
+    _make_clip(video, 6)
+    srt = tmp_path / "burn.srt"
+    srt.write_text("1\n00:00:00,200 --> 00:00:01,800\nburned line\n\n",
+                   encoding="utf-8")
+    out = tmp_path / "burn.clean.mp4"
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    # stream copy + burn must transparently upgrade to re-encode
+    res = client.post("/api/export", json={
+        "deletions": [[2, 4]], "output": str(out), "opts": {"mode": "copy"},
+        "subtitles_path": str(srt), "caption_mode": "burn",
+    })
+    assert res.status_code == 200, res.text
+    job = res.json()
+    assert job["kind"] == "reencode"
+    assert "burn" in job["note"].lower() or "re-encod" in job["note"].lower()
+    done = _wait_job(client, job["id"])
+    assert done["state"] == "done", done.get("error")
+    assert out.is_file()
+    info = probe(str(out))
+    assert abs(float(info["duration"]) - 4.0) < 0.5     # 6 s minus the 2 s cut
+    # the remapped srt used for burning is left next to the export
+    assert job["captions"]["srt"].endswith("burn.clean.srt")
+    assert Path(job["captions"]["srt"]).is_file()
+
+
+def test_export_caption_validation(client, tmp_path):
+    video = tmp_path / "v.mp4"
+    _make_clip(video, 3)
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    base = {"deletions": [[1, 2]], "opts": {"mode": "reencode"}}
+    res = client.post("/api/export", json={**base, "caption_mode": "srt"})
+    assert res.status_code == 400 and "subtitle file" in res.json()["detail"].lower()
+    res = client.post("/api/export", json={
+        **base, "caption_mode": "srt", "subtitles_path": str(tmp_path / "no.srt")})
+    assert res.status_code == 404
+    res = client.post("/api/export", json={
+        **base, "caption_mode": "wrong", "subtitles_path": str(video)})
+    assert res.status_code == 400
+
+
+def test_export_caption_controls_are_wired():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    for needle in ("xCaptions", "caption_mode", "subtitles_path",
+                   "updateCaptionExportInfo", "job.captions"):
+        assert needle in js, f"{needle} missing from app.js"
+    assert 'id="xCaptions"' in html and 'id="xCapInfo"' in html
+    assert "app.js?v=10" in html
+
+
+# ---------------------------------------------------------------------------
+# CapCut-style caption positioning: overlay position burned via ASS
+# ---------------------------------------------------------------------------
+
+def test_write_ass_places_every_cue_at_the_chosen_point(tmp_path):
+    out = tmp_path / "cap.ass"
+    cmap_mod.write_ass(
+        [{"start": 0.5, "end": 2.25, "text": "hello world"},
+         {"start": 3.0, "end": 4.0, "text": ""}],        # empty cue skipped
+        out, width=1280, height=720, x=0.5, y=0.5, size_pct=10.0)
+    body = out.read_text(encoding="utf-8")
+    assert "PlayResX: 1280" in body and "PlayResY: 720" in body
+    assert "{\\an5\\pos(640,360)}hello world" in body
+    assert "Fontsize" not in body or ",Arial,72," in body   # size lives in the style
+    assert body.count("Dialogue:") == 1                   # empty cue dropped
+    assert "0:00:00.50,0:00:02.25," in body               # ASS centisecond stamps
+
+
+def test_write_ass_clamps_and_sanitises(tmp_path):
+    out = tmp_path / "cap.ass"
+    cmap_mod.write_ass([{"start": -1, "end": 1, "text": "a {tag} b"}],
+                       out, 320, 240, x=5, y=-3, size_pct=99)
+    body = out.read_text(encoding="utf-8")
+    assert "\\pos(320,0)" in body                         # clamped to the frame
+    assert "{tag}" not in body and "a (tag) b" in body    # tags neutralised
+    assert "0:00:00.00,0:00:01.00," in body
+
+
+def test_export_burns_at_the_preview_position(client, tmp_path):
+    video = tmp_path / "pos.mp4"
+    _make_clip(video, 5)
+    srt = tmp_path / "pos.srt"
+    srt.write_text("1\n00:00:00,300 --> 00:00:03,000\ndragged caption\n\n",
+                   encoding="utf-8")
+    out = tmp_path / "pos.clean.mp4"
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    res = client.post("/api/export", json={
+        "deletions": [[3.5, 4.5]], "output": str(out),
+        "opts": {"mode": "reencode", "codec": "libx264"},
+        "subtitles_path": str(srt), "caption_mode": "burn",
+        "caption_style": {"x": 0.5, "y": 0.33, "size_pct": 8},
+    })
+    assert res.status_code == 200, res.text
+    job = res.json()
+    assert job["captions"]["positioned"] is True
+    done = _wait_job(client, job["id"])
+    assert done["state"] == "done", done.get("error")
+    assert out.is_file()
+    info = probe(str(out))
+    assert abs(float(info["duration"]) - 4.0) < 0.5
+    # the temp ASS is cleaned up after the job
+    time.sleep(0.3)
+    assert not Path(job["id"]).exists()  # sanity: id is not a path
+    import glob
+    assert not glob.glob(str(tmp_path / "*.ass"))
+
+
+def test_export_burn_without_style_keeps_plain_srt(client, tmp_path):
+    video = tmp_path / "nostyle.mp4"
+    _make_clip(video, 4)
+    srt = tmp_path / "nostyle.srt"
+    srt.write_text("1\n00:00:00,200 --> 00:00:01,000\nplain\n\n", encoding="utf-8")
+    out = tmp_path / "nostyle.clean.mp4"
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    res = client.post("/api/export", json={
+        "deletions": [[2, 3]], "output": str(out),
+        "opts": {"mode": "reencode", "codec": "libx264"},
+        "subtitles_path": str(srt), "caption_mode": "burn",
+        "caption_style": {},
+    })
+    assert res.json()["captions"]["positioned"] is False
+    done = _wait_job(client, res.json()["id"])
+    assert done["state"] == "done", done.get("error")
+
+
+def test_caption_overlay_is_wired_between_html_and_js():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    for needle in ("CAPPOS", "capOverlay", "capBox", "bindCaptionOverlay",
+                   "caption_style", "videoContentRect", "guideV", "SNAP_X"):
+        assert needle in js, f"{needle} missing from app.js"
+    for needle in ("capOverlay", "capBox", "capBoxText", "guideV", "guideH",
+                   "capStyleRow", "capFontSize", "capPosReset", "capPosInfo"):
+        assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
+    assert "app.js?v=10" in html
+
+
+# ---------------------------------------------------------------------------
+# Imported (uploaded) captions must be editable, not read-only
+# ---------------------------------------------------------------------------
+
+def test_uploaded_subtitles_are_persisted_and_editable(client, tmp_path):
+    video = tmp_path / "imp.mp4"
+    _make_clip(video, 4)
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    srt_bytes = ("1\n00:00:00,300 --> 00:00:01,900\nimported line\n\n"
+                 "2\n00:00:02,200 --> 00:00:03,400\nsecond line\n\n").encode()
+    res = client.post("/api/parse-subtitles",
+                      files={"file": ("mysubs.srt", srt_bytes, "text/plain")})
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["count"] == 2
+    saved = data.get("saved_path")
+    assert saved and Path(saved).is_file()
+    assert saved.endswith(".srt") and "mysubs" in Path(saved).name
+    assert Path(saved).read_bytes() == srt_bytes
+
+    # Detection reads the saved file, then an inline edit writes back to it.
+    det = client.post("/api/detect", json={
+        "detect_silence": False, "use_cues": True,
+        "subtitles_path": saved, "min_section_ms": 100})
+    assert det.json()["cue_count"] == 2
+    edit = client.post("/api/subtitles/edit", json={
+        "path": saved, "start": 0.3, "end": 1.9, "text": "imported line (fixed)"})
+    assert edit.json()["updated"] == 1
+    assert "imported line (fixed)" in Path(saved).read_text(encoding="utf-8")
+
+
+def test_uploaded_subtitles_without_extension_get_srt(client):
+    res = client.post("/api/parse-subtitles",
+                      files={"file": ("noext", b"1\n00:00:00,000 --> 00:00:01,000\nhi\n\n",
+                                       "application/octet-stream")})
+    assert res.status_code == 200, res.text
+    assert res.json()["saved_path"].endswith(".srt")
+
+
+def test_upload_handler_points_the_path_at_the_saved_file():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    assert 'data.saved_path' in js                    # path filled from the upload
+    assert '$("dSubPath").value = "";' not in js.split("dSubFile", 1)[1].split("};", 1)[0]
+    assert "app.js?v=10" in open(os.path.join(root, "static", "index.html"),
+                                 encoding="utf-8").read()
+
+
+# ---------------------------------------------------------------------------
+# Alignment modes + resizable box (wrap, justify, per-line placement)
+# ---------------------------------------------------------------------------
+
+def test_wrap_lines_greedy_with_hard_break():
+    lines = cmap_mod.wrap_lines("aa bb cc dd", 5)
+    assert lines == ["aa bb", "cc dd"]
+    long = cmap_mod.wrap_lines("abcdefghij k", 4)
+    assert long[0] == "abcd" and long[1] == "efgh"      # hard-broken word
+    assert cmap_mod.wrap_lines("", 10) == [""]
+
+
+def test_write_ass_alignment_and_box_width(tmp_path):
+    text = "this caption is long enough to wrap into two lines"
+    cues = [{"start": 1.0, "end": 2.0, "text": text}]
+    out = tmp_path / "align.ass"
+    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=10.0,
+                       align="left", box_w=0.5)
+    body = out.read_text(encoding="utf-8")
+    assert body.count("Dialogue:") >= 2                  # wrapped to >= 2 lines
+    assert "{\\an4\\pos(250," in body                    # left edge of the box
+    assert "{\\an5\\pos(" not in body and "{\\an6\\pos(" not in body
+
+    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=10.0,
+                       align="right", box_w=0.5)
+    body = out.read_text(encoding="utf-8")
+    assert "{\\an6\\pos(750," in body                    # right edge
+
+
+
+def test_export_burn_accepts_alignment_and_box_width(client, tmp_path):
+    video = tmp_path / "al.mp4"
+    _make_clip(video, 4)
+    srt = tmp_path / "al.srt"
+    srt.write_text(
+        "1\n00:00:00,200 --> 00:00:03,000\njudul panjang yang pasti dibungkus dua baris\n\n",
+        encoding="utf-8")
+    out = tmp_path / "al.clean.mp4"
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    res = client.post("/api/export", json={
+        "deletions": [[3, 3.5]], "output": str(out),
+        "opts": {"mode": "reencode", "codec": "libx264"},
+        "subtitles_path": str(srt), "caption_mode": "burn",
+        "caption_style": {"x": 0.5, "y": 0.2, "size_pct": 7,
+                          "align": "right", "box_w": 0.6},
+    })
+    assert res.status_code == 200, res.text
+    done = _wait_job(client, res.json()["id"])
+    assert done["state"] == "done", done.get("error")
+    assert out.is_file()
+
+
+def test_alignment_and_resize_controls_are_wired():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    for needle in ("wrapText", "CHAR_FACTOR", "box_w", "capAlign", "syncAlignButtons",
+                   "bindCaptionResize", "justify", "renderCaptionLines"):
+        assert needle in js, f"{needle} missing from app.js"
+    assert "justify_char" not in js and "justify_char" not in html  # JC mode removed
+    for needle in ("capAlign", "cap-handle", ">J<"):
+        assert needle in html, f"{needle} missing from index.html"
+    assert "app.js?v=10" in html
+
+
+def test_write_ass_justify_flushes_both_edges(tmp_path):
+    """Justify = every line but the last spans the full box width: first word
+    on the left edge, last word ending on the right edge (each word gets its
+    own \pos, because libass itself cannot justify)."""
+    text = "this caption is long enough to wrap into two lines"
+    cues = [{"start": 1.0, "end": 2.0, "text": text}]
+    out = tmp_path / "justify.ass"
+    # fs = 40 px, char 22 px, box 800 px (100..900), 36 chars/line
+    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=4.0,
+                       align="justify", box_w=0.8)
+    events = [l for l in out.read_text(encoding="utf-8").splitlines()
+              if l.startswith("Dialogue:")]
+    assert len(events) == 8          # 7 words placed + 1 left-aligned last line
+    first = events[0].split(",,")[-1]
+    assert first.startswith("{\\an4\\pos(100,") and first.endswith("}this")
+    seventh = events[6].split(",,")[-1]   # "wrap" (88 px) ends at the right edge
+    assert seventh.startswith("{\\an4\\pos(812,") and seventh.endswith("}wrap")
+    last = events[7].split(",,")[-1]      # final line left-aligned, not centred
+    assert last.startswith("{\\an4\\pos(100,") and last.endswith("}into two lines")

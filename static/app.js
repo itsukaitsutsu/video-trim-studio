@@ -353,9 +353,217 @@ async function browseTo(path) {
   }
 }
 
+
+/* ------------------------------ caption position preview (CapCut-style) */
+
+// While a burn is armed, a draggable caption box sits on the preview exactly
+// where the burned text will land. Dragging shows snap guides at the frame's
+// thirds and centre (like CapCut); on release the position is stored and sent
+// with the export, which burns a positioned ASS instead of the plain .srt.
+
+function videoContentRect() {
+  // The <video> box can letterbox its picture; return the real frame rect
+  // relative to .player-wrap so the overlay maps 1:1 onto the burned video.
+  const video = $("player"), wrap = video.parentElement;
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+  const vb = video.getBoundingClientRect(), wb = wrap.getBoundingClientRect();
+  const scale = Math.min(vb.width / vw, vb.height / vh);
+  const w = vw * scale, h = vh * scale;
+  return { x: vb.left - wb.left + (vb.width - w) / 2,
+           y: vb.top - wb.top + (vb.height - h) / 2, w, h };
+}
+
+function layoutCapOverlay() {
+  const overlay = $("capOverlay");
+  if (!overlay) return;
+  const armed = ["burn", "both"].includes($("xCaptions").value) && !!S.project;
+  overlay.hidden = !armed;
+  if (!armed) return;
+  if ($("capBoxText").dataset.raw === undefined) $("capBoxText").dataset.raw =
+    captionTextAt($("player").currentTime || 0);
+  const r = videoContentRect();
+  overlay.style.left = `${r.x}px`;
+  overlay.style.top = `${r.y}px`;
+  overlay.style.width = `${r.w}px`;
+  overlay.style.height = `${r.h}px`;
+  const box = $("capBox");
+  box.style.left = `${CAPPOS.x * 100}%`;
+  box.style.top = `${CAPPOS.y * 100}%`;
+  const fontPx = Math.max(10, r.h * CAPPOS.size / 100);
+  box.style.fontSize = `${fontPx}px`;
+  box.style.width = `${Math.max(0.08, CAPPOS.box_w) * r.w}px`;
+  box.style.textAlign = CAPPOS.align === "justify" ? "left" : CAPPOS.align;
+  const maxChars = Math.floor((CAPPOS.box_w * r.w) / (fontPx * CHAR_FACTOR));
+  renderCaptionLines(
+    wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars));
+  $("capPosInfo").textContent =
+    `x ${Math.round(CAPPOS.x * 100)}% \u00b7 y ${Math.round(CAPPOS.y * 100)}%` +
+    ` \u00b7 w ${Math.round(CAPPOS.box_w * 100)}% \u00b7 ${CAPPOS.align}`;
+}
+
+function renderCaptionLines(lines) {
+  // CSS text-align:justify is unreliable here (our lines end in forced
+  // breaks), so justify is rendered the same way the burn does it: words
+  // placed across the full box width, last line left-aligned.
+  const container = $("capBoxText");
+  if (CAPPOS.align === "justify" && lines.length > 1) {
+    container.textContent = "";
+    lines.forEach((ln, i) => {
+      const row = document.createElement("div");
+      row.className = "cap-line";
+      row.style.justifyContent = i < lines.length - 1 ? "space-between" : "flex-start";
+      ln.split(" ").forEach((w) => {
+        const sp = document.createElement("span");
+        sp.textContent = w;
+        row.appendChild(sp);
+      });
+      container.appendChild(row);
+    });
+  } else {
+    container.textContent = lines.join("\n");
+  }
+}
+
+function wrapText(text, maxChars) {
+  // Greedy word wrap mirroring vts/captionmap.wrap_lines (same CHAR_FACTOR),
+  // so the preview breaks lines exactly where the burn will.
+  if (!maxChars || maxChars < 4) return [String(text)];
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const cand = cur ? cur + " " + w : w;
+    if (cand.length <= maxChars) { cur = cand; continue; }
+    if (cur) lines.push(cur);
+    let rest = w;
+    while (rest.length > maxChars) { lines.push(rest.slice(0, maxChars)); rest = rest.slice(maxChars); }
+    cur = rest;
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
+}
+
+function captionTextAt(t) {
+  const sec = S.sections.find((s) => s.kind === "caption" && s.start <= t && t <= s.end);
+  return sec && sec.text ? sec.text : "Caption preview";
+}
+
+
+function syncAlignButtons() {
+  document.querySelectorAll(".capAlign").forEach((b) =>
+    b.classList.toggle("on", b.dataset.align === CAPPOS.align));
+}
+
+function bindCaptionResize() {
+  // Dragging a box edge changes its width around the centre (CapCut-style
+  // resize); the text re-wraps because layoutCapOverlay re-runs.
+  document.querySelectorAll("#capBox .cap-handle").forEach((handle) => {
+    handle.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      handle.setPointerCapture(ev.pointerId);
+      handle.classList.add("active");
+      const overlay = $("capOverlay");
+      const move = (e) => {
+        const r = overlay.getBoundingClientRect();
+        if (!r.width) return;
+        const cx = CAPPOS.x * r.width;
+        const half = Math.abs((e.clientX - r.left) - cx);
+        CAPPOS.box_w = Math.min(0.98, Math.max(0.12, (2 * half) / r.width));
+        layoutCapOverlay();
+      };
+      const up = (e) => {
+        handle.releasePointerCapture?.(e.pointerId);
+        handle.classList.remove("active");
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", up);
+        handle.removeEventListener("pointercancel", up);
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up);
+      handle.addEventListener("pointercancel", up);
+    });
+  });
+}
+
+function bindCaptionOverlay() {
+  const box = $("capBox"), overlay = $("capOverlay");
+  const SNAP_PX = 8;
+  const SNAP_X = [1 / 3, 0.5, 2 / 3], SNAP_Y = [1 / 3, 0.5, 2 / 3];
+
+  box.addEventListener("pointerdown", (ev) => {
+    ev.preventDefault();
+    box.setPointerCapture(ev.pointerId);
+    box.classList.add("dragging");
+    const move = (e) => {
+      const r = overlay.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      let nx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+      let ny = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      let sx = null, sy = null;
+      for (const v of SNAP_X) if (Math.abs(nx - v) * r.width < SNAP_PX) { sx = v; break; }
+      for (const v of SNAP_Y) if (Math.abs(ny - v) * r.height < SNAP_PX) { sy = v; break; }
+      $("guideV").hidden = sx === null;
+      $("guideH").hidden = sy === null;
+      if (sx !== null) { $("guideV").style.left = `${sx * 100}%`; nx = sx; }
+      if (sy !== null) { $("guideH").style.top = `${sy * 100}%`; ny = sy; }
+      CAPPOS.x = nx; CAPPOS.y = ny;
+      box.style.left = `${nx * 100}%`;
+      box.style.top = `${ny * 100}%`;
+      $("capPosInfo").textContent =
+        `x ${Math.round(nx * 100)}% \u00b7 y ${Math.round(ny * 100)}%`;
+    };
+    const up = (e) => {
+      box.releasePointerCapture?.(e.pointerId);
+      box.classList.remove("dragging");
+      $("guideV").hidden = true;
+      $("guideH").hidden = true;
+      box.removeEventListener("pointermove", move);
+      box.removeEventListener("pointerup", up);
+      box.removeEventListener("pointercancel", up);
+      layoutCapOverlay();
+    };
+    box.addEventListener("pointermove", move);
+    box.addEventListener("pointerup", up);
+    box.addEventListener("pointercancel", up);
+  });
+
+  $("capFontSize").addEventListener("input", () => {
+    CAPPOS.size = Number($("capFontSize").value) || CAPPOS_DEFAULT.size;
+    layoutCapOverlay();
+  });
+  $("capPosReset").onclick = () => {
+    Object.assign(CAPPOS, CAPPOS_DEFAULT);
+    $("capFontSize").value = String(CAPPOS_DEFAULT.size);
+    syncAlignButtons();
+    layoutCapOverlay();
+  };
+  document.querySelectorAll(".capAlign").forEach((b) => {
+    b.addEventListener("click", () => {
+      CAPPOS.align = b.dataset.align;
+      syncAlignButtons();
+      layoutCapOverlay();
+    });
+  });
+  bindCaptionResize();
+  $("player").addEventListener("timeupdate", () => {
+    if ($("capOverlay").hidden) return;
+    $("capBoxText").dataset.raw = captionTextAt($("player").currentTime);
+    layoutCapOverlay();
+  });
+  $("player").addEventListener("loadedmetadata", layoutCapOverlay);
+  window.addEventListener("resize", layoutCapOverlay);
+}
+
 /* ------------------------------------------------------------ auto-caption */
 
-const CAP = { job: null, timer: null, poll: 700 };
+const CAP = { job: null, timer: null, poll: 700, editorSig: null };
+// Caption burn position: normalised centre of the box on the frame.
+const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size: 5.5, align: "center", box_w: 0.7 };
+// Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
+// it, which is what keeps the preview and the burn in sync.
+const CHAR_FACTOR = 0.55;
+const CAPPOS = { ...CAPPOS_DEFAULT };
 
 function fillCaptionCard(caption) {
   if (!caption) return;
@@ -427,7 +635,9 @@ function resetCaptionCard() {
   // A new video means the old transcript no longer describes this file.
   stopCaptionPolling();
   CAP.job = null;
+  CAP.editorSig = null;
   S.subsText = null;
+  $("capEditor").hidden = true;
   $("capProgWrap").hidden = true;
   $("capTail").hidden = true;
   $("capTail").textContent = "";
@@ -446,6 +656,8 @@ function resetCaptionCard() {
 
 async function startCaption() {
   if (!S.project) return alert("Open a video first.");
+  $("capEditor").hidden = true;
+  CAP.editorSig = null;
   const btn = $("capBtn");
   btn.disabled = true;
   btn.textContent = "Starting…";
@@ -506,9 +718,9 @@ function renderCaptionJob(job) {
   stopCaptionPolling();
   $("capCancel").hidden = true;
   $("capBtn").disabled = false;
-  $("capBtn").textContent = "Transcribe again";
+  $("capBtn").textContent = job.state === "manual" ? "Transcribe to captions" : "Transcribe again";
   $("capProgWrap").hidden = job.state !== "done";
-  if (job.state === "done") captionDone(job);
+  if (job.state === "done" || job.state === "manual") captionDone(job);
   else if (job.state === "cancelled") $("capNote").textContent = "Cancelled.";
   else captionFailed(job.error || "transcription failed");
 }
@@ -516,15 +728,20 @@ function renderCaptionJob(job) {
 function captionDone(job) {
   const out = job.outputs || {};
   const files = ["srt", "vtt", "json"].filter((k) => out[k]).map((k) => out[k]);
+  const unsaved = job.state === "manual" && !job.edited
+    ? "<br>(files are written when you press <b>Save captions</b>)" : "";
   $("capOut").innerHTML = files.map((p) => escapeHtml(p)).join("<br>") +
-    (out.video ? `<br>burned copy: ${escapeHtml(out.video)}` : "");
+    (out.video ? `<br>burned copy: ${escapeHtml(out.video)}` : "") + unsaved;
   $("capResult").hidden = false;
+  maybeRenderEditor(job);
   // Pre-fill the subtitle path either way, so the plain Detect button works too.
   if (out.srt) {
     S.subsText = job.cues_text || null;
     $("dSubPath").value = out.srt;
     $("dCues").checked = true;
-    $("subInfo").textContent = `${job.segment_count || 0} cues from transcription`;
+    const origin = job.state === "manual" ? "from captions" : "from transcription";
+    $("subInfo").textContent = `${job.segment_count || 0} cues ${origin}`;
+  updateCaptionExportInfo();
   }
 }
 
@@ -547,12 +764,242 @@ async function cancelCaption() {
 
 async function useCaptions() {
   if (!CAP.job) return;
+  if (!$("capEditor").hidden) {
+    const ok = await saveCues(true);
+    if (!ok) return;
+  }
   const out = CAP.job.outputs || {};
   S.subsText = CAP.job.cues_text || null;
   if (out.srt) $("dSubPath").value = out.srt;
   $("dCues").checked = true;
-  $("subInfo").textContent = `${CAP.job.segment_count || 0} cues from transcription`;
+  $("subInfo").textContent = `${CAP.job.segment_count || 0} cues ready for detection`;
+  updateCaptionExportInfo();
   await runDetect();
+}
+
+
+/* -------------------------------------------------- caption cue editor */
+
+// Rows are plain DOM inputs; CAP.job.cues is the last copy the server
+// confirmed. Rows are only rebuilt when that confirmed copy changes (see the
+// signature check), so polling or a save response never clobbers text the
+// user is still typing.
+
+function cueRow(cue, idx) {
+  return `<tr>
+    <td class="num">${idx + 1}</td>
+    <td><input type="number" class="cue-start" step="0.1" min="0" value="${cue.start}"></td>
+    <td><input type="number" class="cue-end" step="0.1" min="0" value="${cue.end}"></td>
+    <td><input type="text" class="cue-text" spellcheck="false" value="${escapeHtml(cue.text || "")}"></td>
+    <td><button class="mini cue-del" title="delete this cue">&times;</button></td>
+  </tr>`;
+}
+
+function renderCueRows(cues) {
+  $("capCueBody").innerHTML = cues.map((c, i) => cueRow(c, i)).join("");
+  $("capEdCount").textContent = `${cues.length} cue(s)`;
+}
+
+function collectCues() {
+  return [...$("capCueBody").querySelectorAll("tr")].map((tr, i) => ({
+    n: i + 1,
+    start: parseFloat(tr.querySelector(".cue-start").value),
+    end: parseFloat(tr.querySelector(".cue-end").value),
+    text: tr.querySelector(".cue-text").value,
+  }));
+}
+
+function renumberCues() {
+  [...$("capCueBody").querySelectorAll("tr")].forEach((tr, i) => {
+    tr.querySelector(".num").textContent = i + 1;
+  });
+  $("capEdCount").textContent = `${$("capCueBody").children.length} cue(s)`;
+}
+
+function maybeRenderEditor(job) {
+  const ed = $("capEditor");
+  if (!job || (job.state !== "done" && job.state !== "manual") || !Array.isArray(job.cues)) {
+    ed.hidden = true;
+    return;
+  }
+  ed.hidden = false;
+  const sig = `${job.id}:${job.edited_at || 0}:${job.cues.length}`;
+  if (CAP.editorSig === sig) return;   // keep whatever the user is typing
+  CAP.editorSig = sig;
+  renderCueRows(job.cues);
+  $("capSaved").textContent = job.edited
+    ? `saved ${job.cues.length} cue(s) at ${new Date(job.edited_at * 1000).toLocaleTimeString()}`
+    : (job.state === "manual" ? "not saved yet — press Save captions" : "");
+}
+
+function addCueRow() {
+  // A fresh cue starts where the last one ends (or at 0) and runs two seconds.
+  const valid = collectCues().filter((c) => Number.isFinite(c.start) && Number.isFinite(c.end));
+  const start = valid.length ? Math.max(...valid.map((c) => c.end)) : 0;
+  $("capCueBody").insertAdjacentHTML(
+    "beforeend",
+    cueRow({ start: Math.round(start * 1000) / 1000, end: Math.round(start * 1000) / 1000 + 2, text: "" },
+           $("capCueBody").children.length));
+  renumberCues();
+}
+
+function revertCues() {
+  if (!CAP.job || !Array.isArray(CAP.job.cues)) return;
+  renderCueRows(CAP.job.cues);
+  $("capSaved").textContent = "reverted to the last saved version";
+}
+
+async function saveCues(silent) {
+  if (!CAP.job) return false;
+  const cues = collectCues();
+  const bad = cues.find((c) =>
+    !Number.isFinite(c.start) || !Number.isFinite(c.end) || c.end <= c.start || c.start < 0);
+  if (bad) {
+    alert(`Cue ${bad.n}: check the times — end must be after start (values are seconds).`);
+    return false;
+  }
+  const btn = $("capSave");
+  btn.disabled = true; btn.textContent = "Saving…";
+  try {
+    const job = await api(`/api/caption/${CAP.job.id}/cues`, {
+      method: "PUT", body: JSON.stringify({ cues }),
+    });
+    CAP.job = job;
+    CAP.editorSig = `${job.id}:${job.edited_at || 0}:${job.cues.length}`;
+    renderCueRows(job.cues);           // normalised copy (sorted, trimmed)
+    $("capSaved").textContent =
+      `saved ${job.cues.length} cue(s) at ${new Date(job.edited_at * 1000).toLocaleTimeString()}`;
+    if (job.outputs && job.outputs.srt) {
+      S.subsText = job.cues_text || null;
+      $("dSubPath").value = job.outputs.srt;
+      $("dCues").checked = true;
+      $("subInfo").textContent = `${job.segment_count || 0} cues (edited)`;
+  updateCaptionExportInfo();
+    }
+    return true;
+  } catch (e) {
+    if (!silent) alert("Could not save captions: " + e.message);
+    return false;
+  } finally {
+    btn.disabled = false; btn.textContent = "Save captions";
+  }
+}
+
+async function newBlankCaptions() {
+  if (!S.project) return alert("Open a video first.");
+  try {
+    const job = await api("/api/caption/manual", { method: "POST", body: "{}" });
+    CAP.editorSig = null;
+    renderCaptionJob(job);
+    addCueRow();                       // one empty row so editing can start at once
+  } catch (e) { alert(e.message); }
+}
+
+async function openCaptionsFile() {
+  if (!S.project) return alert("Open a video first.");
+  // The file next to the video is the usual sidecar; ask only when absent.
+  let path = S.project.sidecar_subtitles;
+  if (!path) path = prompt("Path to the .srt / .vtt file:");
+  if (!path) return;
+  try {
+    const job = await api("/api/caption/manual", {
+      method: "POST", body: JSON.stringify({ load: path }),
+    });
+    CAP.editorSig = null;
+    renderCaptionJob(job);
+  } catch (e) { alert(e.message); }
+}
+
+
+/* ---------------------------------------- inline caption editing (list) */
+
+// Double-click a caption row in the section list to edit its text in place.
+// Enter or leaving the field saves; Escape cancels. The edit is written back
+// into the subtitle file (.srt/.vtt) so re-detection and exports keep it.
+
+function seekIntoCue(start, end) {
+  // Land just *inside* the cue: seeking exactly to `start` (or before it)
+  // shows the previous frame and the caption is not visible in the preview.
+  return Math.min(start + 0.05, Math.max(start, end - 0.001));
+}
+
+function startCaptionEdit(section, tr) {
+  if (section.kind !== "caption" || tr.querySelector(".txt input")) return;
+  const cell = tr.querySelector(".txt");
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "txt-edit";
+  input.value = section.text || "";
+  cell.textContent = "";
+  cell.appendChild(input);
+  input.focus();
+  input.select();
+  // Bring the cue being edited on screen: seek into it (only when the
+  // playhead is currently outside it, so editing mid-cue never jumps).
+  const player = $("player");
+  const now = player.currentTime || 0;
+  if (now < section.start || now >= section.end) {
+    player.currentTime = seekIntoCue(section.start, section.end);
+  }
+  // Live-sync the preview box with what is typed here, so the list edit and
+  // the caption preview stay in step (wrapping/position visible while typing).
+  const syncPreview = () => {
+    const t = player.currentTime || 0;
+    if (t >= section.start && t < section.end && !$("capOverlay").hidden) {
+      $("capBoxText").dataset.raw = input.value;
+      layoutCapOverlay();
+    }
+  };
+  input.addEventListener("input", syncPreview);
+  syncPreview();
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const value = input.value.replace(/\s+/g, " ").trim();
+    if (commit && value !== (section.text || "")) commitCaptionEdit(section, value);
+    else renderList();                 // redraw restores the plain cell
+  };
+  input.addEventListener("keydown", (ev) => {
+    ev.stopPropagation();
+    if (ev.key === "Enter") finish(true);
+    else if (ev.key === "Escape") finish(false);
+  });
+  input.addEventListener("click", (ev) => ev.stopPropagation());
+  input.addEventListener("blur", () => finish(true));
+}
+
+async function commitCaptionEdit(section, newText) {
+  section.text = newText;
+  renderList();
+  const path = ($("dSubPath").value || "").trim();
+  if (!path) {
+    // Uploaded subtitle text has no file on disk, so the edit cannot persist.
+    $("subInfo").textContent =
+      "edit kept in memory only — set a subtitle file path to save edits";
+    return;
+  }
+  try {
+    const res = await api("/api/subtitles/edit", {
+      method: "POST",
+      body: JSON.stringify({ path, start: section.start, end: section.end, text: newText }),
+    });
+    const name = res.path.split(/[\\/]/).pop();
+    $("subInfo").textContent =
+      `saved to ${name} (${res.updated} cue${res.updated === 1 ? "" : "s"} updated)`;
+    // The file on disk is now newer than any cached copy: force detection to
+    // re-read it, and keep the caption card's editor on the same page.
+    S.subsText = null;
+    if (CAP.job && CAP.job.outputs && CAP.job.outputs.srt === path) {
+      CAP.job.cues = (CAP.job.cues || []).map((c) =>
+        (c.start < section.end - 1e-6 && c.end > section.start + 1e-6)
+          ? { ...c, text: newText } : c);
+      CAP.job.cues_text = null;
+      CAP.editorSig = null;
+    }
+  } catch (e) {
+    $("subInfo").textContent = `edit not saved: ${e.message}`;
+  }
 }
 
 /* --------------------------------------------------------------- detection */
@@ -629,12 +1076,24 @@ function renderList() {
       ev.stopPropagation();
       toggleSection(s.id, ev.target.checked);
     };
-    tr.onclick = () => {
+    tr.addEventListener("click", (ev) => {
+      if (ev.target.closest(".check-cell")) return;     // checkbox has its own handler
+      if (tr.querySelector(".txt input")) return;       // editing: never seek
+      // Clicking the caption text IS the edit affordance (double-click works
+      // too). It deliberately does not seek, so typing can start at once.
+      if (s.kind === "caption" && ev.target.closest("td.txt")) {
+        startCaptionEdit(s, tr);
+        return;
+      }
       const player = $("player");
-      player.currentTime = Math.max(0, s.start - 0.1);
-      player.focus();
+      // Seek INTO the cue so the preview shows the frame where this caption
+      // is visible (not the one before it). no focus(): no page jump.
+      player.currentTime = Math.max(0, seekIntoCue(s.start, s.end));
       draw();
-    };
+    });
+    tr.addEventListener("dblclick", () => {
+      if (s.kind === "caption") startCaptionEdit(s, tr);
+    });
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
@@ -1033,6 +1492,29 @@ function loadTimelineAssets() {
   loadThumbs();
 }
 
+
+/* ------------------------------------------------- export caption status */
+
+function updateCaptionExportInfo() {
+  const el = $("xCapInfo");
+  if (!el) return;
+  const mode = $("xCaptions").value;
+  const path = ($("dSubPath").value || "").trim();
+  $("capStyleRow").hidden = !(mode === "burn" || mode === "both");
+  layoutCapOverlay();
+  if (mode === "none") { el.textContent = ""; return; }
+  if (!path) {
+    el.textContent = "no subtitle file set — pick one in the Detect card " +
+      "(or run Auto-caption) before exporting";
+    return;
+  }
+  const bits = [`source: ${path}`];
+  if (mode === "burn" || mode === "both")
+    bits.push("burning re-encodes, even in stream-copy mode");
+  bits.push("cues are shifted to match the cuts");
+  el.textContent = bits.join(" · ");
+}
+
 /* ----------------------------------------------------------------- export */
 
 function updateTally() {
@@ -1061,13 +1543,28 @@ async function doExport() {
   try {
     const job = await api("/api/export", {
       method: "POST",
-      body: JSON.stringify({ deletions: dels, output: $("xOutput").value.trim(), opts: collectOpts() }),
+      body: JSON.stringify({
+        deletions: dels,
+        output: $("xOutput").value.trim(),
+        opts: collectOpts(),
+        subtitles_path: $("dSubPath").value.trim() || null,
+        caption_mode: $("xCaptions").value,
+        caption_style: ["burn", "both"].includes($("xCaptions").value)
+          ? { x: CAPPOS.x, y: CAPPOS.y, size_pct: CAPPOS.size,
+              align: CAPPOS.align, box_w: CAPPOS.box_w } : {},
+      }),
     });
     S.job = job;
     $("progWrap").hidden = false;
+    const cap = job.captions
+      ? ` · captions: ${job.captions.cues_out}/${job.captions.cues_in} cues` +
+        (job.captions.mode === "burn" || job.captions.mode === "both" ? " burned in" : "") +
+        (job.captions.positioned ? " at your preview position" : "") +
+        ` → ${job.captions.srt.split(/[\\/]/).pop()}`
+      : "";
     $("exportInfo").textContent =
       (job.note ? `⚠ ${job.note} ` : "") +
-      `Job ${job.id} · ${job.kind} · ${job.segments} kept segments → ${job.output}`;
+      `Job ${job.id} · ${job.kind} · ${job.segments} kept segments → ${job.output}` + cap;
     pollJob(job.id);
   } catch (e) {
     $("jobError").hidden = false;
@@ -1154,12 +1651,13 @@ function bindUI() {
     fd.append("file", f);
     try {
       const data = await api("/api/parse-subtitles", { method: "POST", body: fd });
+      // The server kept a copy in work/: that file is the source of truth, so
+      // inline edits can save back into it (imported captions are editable).
       S.subsText = null;
-      // keep the raw text so /api/detect can re-parse with the same code path
-      S.subsText = await f.text();
-      $("dSubPath").value = "";
-      $("subInfo").textContent = `${data.count} cues loaded (${f.name})`;
+      $("dSubPath").value = data.saved_path || "";
+      $("subInfo").textContent = `${data.count} cues loaded (${f.name}) — editable`;
       $("dCues").checked = true;
+      updateCaptionExportInfo();
     } catch (err) { alert(err.message); }
   };
 
@@ -1168,6 +1666,21 @@ function bindUI() {
   $("capBtn").onclick = startCaption;
   $("capCancel").onclick = cancelCaption;
   $("capUse").onclick = useCaptions;
+  $("capNewBtn").onclick = newBlankCaptions;
+  $("capOpenSrtBtn").onclick = openCaptionsFile;
+  $("capAddCue").onclick = addCueRow;
+  $("capRevert").onclick = revertCues;
+  $("capSave").onclick = () => saveCues(false);
+  bindCaptionOverlay();
+  $("xCaptions").addEventListener("change", updateCaptionExportInfo);
+  $("dSubPath").addEventListener("input", updateCaptionExportInfo);
+  updateCaptionExportInfo();
+  $("capCueBody").addEventListener("click", (ev) => {
+    const del = ev.target.closest(".cue-del");
+    if (!del) return;
+    del.closest("tr").remove();
+    renumberCues();
+  });
   $("capRecheck").onclick = async () => {
     // faster-whisper is imported lazily when a job starts, so a package
     // installed in another terminal is picked up without restarting the app.

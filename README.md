@@ -8,8 +8,8 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 
 - Local web UI with video preview, seekable timeline, filmstrip, waveform, section list, search, and cut-preview playback.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
-- Imports `.srt` / `.vtt` by file path or upload. Caption text and timestamps appear in the section list.
-- **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing.
+- Imports `.srt` / `.vtt` by file path or upload. Caption text and timestamps appear in the section list. **Click a caption text in the list to edit it in place** (double-click works too) — Enter or leaving the field saves it back into the subtitle file, Escape cancels. Clicking the other columns still seeks the preview, without scrolling the page.
+- **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
 - Selects sections by checkbox, click-and-drag down the checkbox column to paint
   a range, timeline click/drag, type, search, or bulk-select controls.
 - Press **Space** to play/pause the video preview (except while typing or when a
@@ -74,6 +74,8 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
 4. Review the section list/timeline. Red blocks are selected for deletion. Click or drag on the section row, tick checkboxes, filter by kind/search, or use bulk controls. **Selecting a caption section deletes its time range from the video**; it does not just hide the subtitle.
 5. Turn on **Skip deleted parts while playing** to preview the cut.
 6. Confirm the output path and export settings. Keep the output extension the same as the source (the app enforces this matching profile). Use **Re-encode (frame accurate)** for normal editing, then click **Export clean cut**.
+7. *(Optional)* In **Captions** (export card), choose how the trimmed video keeps its subtitles: write a **remapped `.srt`** next to the export, **burn** them into the picture, or both. The cues are shifted/split/dropped through the exact cuts you selected, so they stay in sync with the trimmed audio; a `.vtt`/`.srt` edited in the list is what gets remapped. Burning re-encodes, even in stream-copy mode.
+8. *(Optional, burn only)* **Position the captions CapCut-style.** When burn is armed, a live caption box appears over the preview showing the current cue. **Drag it** anywhere — blue guide lines appear and it snaps to the frame's thirds and centre. **Drag the box's left/right edge** to resize it (the text re-wraps inside), pick the text **alignment** (L/C/R/J buttons), tune **size** with the slider, or **reset** to the default bottom-centre. The export burns the text with exactly that layout (a positioned, word-wrapped ASS generated from it), so what you see in the preview is what you get.
 7. The export is written to the chosen path. The source is never overwritten.
 
 ## Auto-caption (faster-whisper)
@@ -125,6 +127,27 @@ the last transcript lines. **Cancel transcription** stops it at the next
 segments boundary. **Use these captions → Detect sections** then runs the
 normal detection with the generated captions, and the subtitle path is filled in
 so a plain **Detect sections** works too.
+
+### Editable captions
+
+Whisper is not perfect, so every caption set is editable in the card:
+
+- After a transcription finishes (or after opening/creating a set — below),
+  the **Caption editor** lists every cue with its start/end times (seconds)
+  and text. Fix the wording, nudge the timings, **+ Add cue**, or delete rows,
+  then press **Save captions**: the `.srt`/`.vtt`/`.json` files are rewritten
+  on disk, so detection and a later re-run see the corrected text.
+- **New blank captions** — write subtitles by hand; needs no faster-whisper at
+  all, so it also works for videos without an audio track.
+- **Open .srt / .vtt…** — load an existing subtitle file into the editor (a
+  file next to the video is offered automatically).
+- **Use these captions → Detect sections** saves any pending edits first, so
+  detection always works from the latest text.
+
+Notes: saving sorts cues by start time and trims text; after an edit the
+`.json` holds the edited cue list (word-level timestamps come from the
+transcription and are replaced once you edit). The editor works on the source
+timeline, like the transcription itself.
 
 ### Command line
 

@@ -19,6 +19,7 @@ import re
 import shutil
 import string
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from vts import captionmap as captionmap_mod    # noqa: E402
 from vts import detect as detect_mod          # noqa: E402
 from vts import export as export_mod         # noqa: E402
 from vts import media as media_mod           # noqa: E402
@@ -96,6 +98,12 @@ class Project:
             "profile": self.profile,
             "preview": self.preview_state(),
             "demo_subtitles": self.demo_subtitles,
+            # An .srt/.vtt sitting next to the video is the usual sidecar
+            # location; the caption editor can open it with one click.
+            "sidecar_subtitles": next(
+                (str(p) for ext in (".srt", ".vtt")
+                 if (p := Path(self.path).with_suffix(ext)).is_file()),
+                None),
             "sections": self.sections,
             "summary": detect_mod.summary(
                 [detect_mod.Section(**{k: s[k] for k in ("id", "kind", "start", "end", "text")})
@@ -140,6 +148,28 @@ class ExportRequest(BaseModel):
     deletions: list[list[float]]
     output: str | None = None
     opts: dict = {}
+    subtitles_path: str | None = None
+    caption_mode: str = "none"    # none | srt | burn | both
+    caption_style: dict = {}      # {x, y, size_pct} from the preview overlay
+
+
+class SubtitleEditRequest(BaseModel):
+    """Inline edit of one caption row in the section list."""
+    path: str
+    start: float
+    end: float
+    text: str
+
+
+class CaptionCuesRequest(BaseModel):
+    """Edited cue list: [{'start': s, 'end': s, 'text': str}, ...]."""
+    cues: list
+
+
+class ManualCaptionRequest(BaseModel):
+    """An editable caption set without transcription."""
+    load: str | None = None            # existing .srt / .vtt to open
+    output_dir: str | None = None
 
 
 class CaptionRequest(BaseModel):
@@ -395,12 +425,23 @@ def detect(req: DetectRequest):
 
 @app.post("/api/parse-subtitles")
 async def parse_subtitles(file: UploadFile = File(...)):
-    text = (await file.read()).decode("utf-8-sig", errors="replace")
+    raw = await file.read()
+    text = raw.decode("utf-8-sig", errors="replace")
     cues = detect_mod.parse_subtitles(text)
     if not cues:
         raise HTTPException(400, "No cues found - is this an .srt or .vtt file?")
+    # Persist the upload into ./work so imported captions have a real file on
+    # disk. Inline edits and caption exports save back into this file; without
+    # it the imported captions would be read-only.
+    name = re.sub(r"[^\w.\- ]+", "_", file.filename or "subtitles.srt")
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in (".srt", ".vtt"):
+        name = os.path.splitext(name)[0] + ".srt"
+    dest = WORK_DIR / f"imported_{name}"
+    dest.write_bytes(raw)
     return {"cues": cues, "count": len(cues),
-            "first": cues[0], "last": cues[-1]}
+            "first": cues[0], "last": cues[-1],
+            "saved_path": str(dest)}
 
 
 # ---------------------------------------------------------------------------
@@ -582,12 +623,71 @@ def export(req: ExportRequest):
                                      f"ffmpeg build. Available GPU encoders: "
                                      f"{encoder_candidates(proj.info['video']['codec'])}")
     dels = [[float(a), float(b)] for a, b in req.deletions if float(b) > float(a)]
+
+    # Captions synced to the trimmed result: remap the cues through the same
+    # cut list the exporter uses, write the shifted .srt next to the output,
+    # and optionally burn it in.
+    caption_mode = (req.caption_mode or "none").lower()
+    if caption_mode not in ("none", "srt", "burn", "both"):
+        raise HTTPException(400, "caption_mode must be none, srt, burn or both.")
+    if caption_mode != "none":
+        if not req.subtitles_path:
+            raise HTTPException(
+                400, "No subtitle file set — pick one in the Detect card first "
+                     "(or run Auto-caption).")
+        sp = os.path.abspath(os.path.expanduser(str(req.subtitles_path).strip().strip('"')))
+        if not os.path.isfile(sp):
+            raise HTTPException(404, f"Subtitle file not found: {sp}")
+        if not sp.lower().endswith((".srt", ".vtt")):
+            raise HTTPException(400, "Captions must come from an .srt or .vtt file.")
+        cues = detect_mod.parse_subtitles(
+            Path(sp).read_text(encoding="utf-8-sig", errors="replace"))
+        kept = export_mod.kept_segments(float(proj.info["duration"]), dels)
+        remapped = captionmap_mod.remap_cues(cues, kept)
+        srt_out = os.path.splitext(output)[0] + ".srt"
+        caption_mod.write_srt(remapped, srt_out)
+        burn_source = srt_out
+        ass_path = None
+        if caption_mode in ("burn", "both"):
+            style = req.caption_style or {}
+            if style and (style.get("x") is not None or style.get("y") is not None
+                          or style.get("size_pct") is not None):
+                # The user positioned the caption box in the preview: bake that
+                # exact layout by burning a positioned ASS instead of the plain
+                # .srt (which libass would pin to the bottom edge).
+                vinfo = proj.info.get("video") or {}
+                fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
+                os.close(fd)
+                captionmap_mod.write_ass(
+                    remapped, ass_path,
+                    int(vinfo.get("width") or 1280), int(vinfo.get("height") or 720),
+                    x=float(style.get("x", 0.5)), y=float(style.get("y", 0.88)),
+                    size_pct=float(style.get("size_pct", 5.5)),
+                    align=str(style.get("align", "center")),
+                    box_w=float(style.get("box_w", 0.0)))
+                burn_source = ass_path
+            opts["burn_srt"] = burn_source
+            opts["_burn_ass_cleanup"] = ass_path
+        opts["_caption_info"] = {
+            "mode": caption_mode,
+            "source": sp,
+            "srt": srt_out,
+            "cues_in": len(cues),
+            "cues_out": len(remapped),
+            "positioned": bool(ass_path),
+        }
+
     try:
         job = export_mod.export(proj.path, proj.info, dels, opts, output)
     except export_mod.JobError as exc:
         raise HTTPException(400, str(exc))
     except (RuntimeError, OSError) as exc:
         raise HTTPException(500, str(exc))
+    cap_info = opts.get("_caption_info")
+    if cap_info:
+        job["captions"] = {k: cap_info[k] for k in
+                           ("mode", "source", "srt", "cues_in", "cues_out",
+                            "positioned")}
     return job
 
 
@@ -629,6 +729,75 @@ def caption_cancel(job_id: str):
     if state is None:
         raise HTTPException(404, "Unknown caption job")
     return state
+
+
+@app.post("/api/caption/manual")
+def caption_manual(req: ManualCaptionRequest):
+    """Editable captions without faster-whisper: blank, or from an .srt/.vtt."""
+    proj = need_project()
+    sidecar = None
+    if req.load:
+        sidecar = os.path.abspath(
+            os.path.expanduser(str(req.load).strip().strip('"')))
+        if not os.path.isfile(sidecar):
+            raise HTTPException(400, f"Subtitle file not found: {sidecar}")
+        if not sidecar.lower().endswith((".srt", ".vtt")):
+            raise HTTPException(400, "Open an .srt or .vtt file.")
+    out_dir = None
+    if req.output_dir:
+        out_dir = os.path.abspath(
+            os.path.expanduser(str(req.output_dir).strip().strip('"')))
+    try:
+        return caption_mod.start_manual_captions(proj.path, out_dir, sidecar=sidecar)
+    except caption_mod.CaptionError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.put("/api/caption/{job_id}/cues")
+def caption_save_cues(job_id: str, req: CaptionCuesRequest):
+    """Overwrite the job's cues and rewrite its .srt/.vtt/.json files."""
+    try:
+        state = caption_mod.update_cues(job_id, req.cues)
+    except caption_mod.CaptionError as exc:
+        raise HTTPException(400, str(exc))
+    if state is None:
+        raise HTTPException(404, "Unknown caption job")
+    return state
+
+
+@app.post("/api/subtitles/edit")
+def subtitles_edit(req: SubtitleEditRequest):
+    """Save an inline caption edit back into the .srt/.vtt file.
+
+    A caption row in the section list can cover several cues (a pause inside a
+    long sentence splits it), so every cue overlapping the row's time range
+    gets the new text. The file is rewritten in its own format."""
+    path = os.path.abspath(os.path.expanduser(str(req.path).strip().strip('"')))
+    if not os.path.isfile(path):
+        raise HTTPException(404, f"Subtitle file not found: {path}")
+    low = path.lower()
+    if not low.endswith((".srt", ".vtt")):
+        raise HTTPException(400, "Only .srt and .vtt files can be saved back.")
+    if not (req.end > req.start):
+        raise HTTPException(400, "end must be after start.")
+    try:
+        raw = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise HTTPException(400, f"Cannot read '{path}': {exc}")
+    cues = detect_mod.parse_subtitles(raw)
+    # One display line per cue: SRT/VTT blocks break on raw newlines.
+    text = " ".join(str(req.text).split())
+    eps = 1e-6
+    updated = 0
+    for cue in cues:
+        if cue["start"] < req.end - eps and cue["end"] > req.start + eps:
+            cue["text"] = text
+            updated += 1
+    if low.endswith(".srt"):
+        caption_mod.write_srt(cues, path)
+    else:
+        caption_mod.write_vtt(cues, path)
+    return {"path": path, "updated": updated, "total": len(cues)}
 
 
 @app.get("/api/caption")

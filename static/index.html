@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <header>
@@ -32,6 +32,15 @@
   <div class="col-main">
     <div class="player-wrap">
       <video id="player" controls preload="metadata"></video>
+      <div id="capOverlay" hidden>
+        <div id="guideV" class="cap-guide v" hidden></div>
+        <div id="guideH" class="cap-guide h" hidden></div>
+        <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines">
+          <div id="capBoxText">Caption preview</div>
+          <div class="cap-handle w" title="Drag to resize the box"></div>
+          <div class="cap-handle e" title="Drag to resize the box"></div>
+        </div>
+      </div>
       <div id="previewInfo" class="dim small" hidden></div>
       <div class="player-tools">
         <label class="chk"><input type="checkbox" id="cutPreview" checked> Skip deleted parts while playing (cut preview)</label>
@@ -74,7 +83,7 @@
         <button class="mini" id="selAllSilence">all silence</button>
         <button class="mini" id="selAllCaptions">all captions</button>
       </div>
-      <div class="dim small selection-hint">Tip: hold and drag down the checkbox column to select or clear a run of sections.</div>
+      <div class="dim small selection-hint">Tip: hold and drag down the checkbox column to select or clear a run of sections &middot; click a caption text to edit it (Enter saves, Esc cancels, saved back to the subtitle file).</div>
       <div class="list-scroll">
         <table id="secTable">
           <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>caption text</th></tr></thead>
@@ -142,8 +151,38 @@
         </div>
         <pre id="capTail" class="caption-tail" hidden></pre>
         <button id="capCancel" class="ghost block small" hidden>Cancel transcription</button>
+        <div class="row cap-manual-row">
+          <label></label>
+          <span class="grow dim small">or start from something else:</span>
+        </div>
+        <div class="row cap-manual-row">
+          <label></label>
+          <span class="grow">
+            <button id="capNewBtn" class="ghost small" title="Empty cue list - no faster-whisper needed">New blank captions</button>
+            <button id="capOpenSrtBtn" class="ghost small" title="Open an existing .srt / .vtt into the editor">Open .srt / .vtt&hellip;</button>
+          </span>
+        </div>
         <div id="capResult" hidden>
           <div id="capOut" class="dim small"></div>
+          <div id="capEditor" hidden>
+            <div class="cap-editor-head">
+              <b>Caption editor</b>
+              <span id="capEdCount" class="dim small"></span>
+              <span class="grow"></span>
+              <button id="capAddCue" class="mini">+ Add cue</button>
+              <button id="capRevert" class="mini" title="Reload the last saved version">Undo changes</button>
+              <button id="capSave" class="mini primary">Save captions</button>
+            </div>
+            <div id="capSaved" class="dim small"></div>
+            <div class="cap-editor-scroll">
+              <table id="capCueTable">
+                <thead>
+                  <tr><th>#</th><th>Start (s)</th><th>End (s)</th><th>Text</th><th></th></tr>
+                </thead>
+                <tbody id="capCueBody"></tbody>
+              </table>
+            </div>
+          </div>
           <button id="capUse" class="primary block">Use these captions &rarr; Detect sections</button>
         </div>
         <pre id="capError" class="error" hidden></pre>
@@ -159,6 +198,31 @@
         </select>
       </div>
       <div class="row"><label>Output file</label><span class="grow"><input id="xOutput" type="text" spellcheck="false"></span></div>
+      <div class="row"><label>Captions</label>
+        <select id="xCaptions">
+          <option value="none" selected>don't include</option>
+          <option value="srt">write remapped .srt next to export</option>
+          <option value="burn">burn captions into the video</option>
+          <option value="both">burn + write remapped .srt</option>
+        </select>
+      </div>
+      <div class="row"><label></label><span id="xCapInfo" class="dim small"></span></div>
+      <div class="row" id="capStyleRow" hidden><label>Caption box</label>
+        <span class="grow cap-style-tools">
+          <span class="dim small">drag the caption over the preview &middot; drag the box edges to resize</span>
+          <span class="cap-align-group" title="Text alignment inside the box">
+            <button class="mini capAlign" data-align="left" title="Align left">L</button>
+            <button class="mini capAlign on" data-align="center" title="Align centre">C</button>
+            <button class="mini capAlign" data-align="right" title="Align right">R</button>
+            <button class="mini capAlign" data-align="justify" title="Justify: lines flush both box edges, extra space between words; last line left">J</button>
+          </span>
+          <label class="mini-label">size
+            <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="5.5">
+          </label>
+          <button id="capPosReset" class="mini">reset</button>
+          <span id="capPosInfo" class="dim small"></span>
+        </span>
+      </div>
       <div id="reencodeOpts">
         <div class="row"><label>Video codec</label><select id="xCodec"></select></div>
         <div class="row"><label>Quality</label>
@@ -225,6 +289,6 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=10"></script>
 </body>
 </html>

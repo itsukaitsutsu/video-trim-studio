@@ -17,6 +17,7 @@ alignment only covers ~14), so the JSON is karaoke-ready everywhere.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -52,14 +53,15 @@ class Cancelled(CaptionError):
 
 def get_job(job_id: str) -> dict | None:
     """Serialisable snapshot of a job. The full segment list stays server-side
-    (the UI gets `cues_text`, which is what detection actually needs)."""
+    (the UI gets `cues`, the editable start/end/text list, which is also what
+    detection needs)."""
     with _JOBS_LOCK:
         job = JOBS.get(job_id)
         if not job:
             return None
         snapshot = {k: v for k, v in job.items() if k not in ("_cancel", "segments")}
         snapshot["tail"] = list(job["tail"])
-        snapshot["segment_count"] = len(job.get("segments") or [])
+        snapshot["segment_count"] = len(job.get("cues") or job.get("segments") or [])
         return snapshot
 
 
@@ -91,6 +93,9 @@ def _new_job(kind: str, source: str) -> dict:
         "started": time.time(),
         "outputs": {},
         "meta": {},
+        "cues": [],                  # editable [{start, end, text}]
+        "edited": False,
+        "edited_at": None,
         "tail": deque(maxlen=8),     # last transcript lines, for the live view
         "tail_total": 0,
         "_cancel": threading.Event(),
@@ -278,6 +283,138 @@ def srt_to_cues_text(segments: list[dict]) -> str:
         f"{s['text'].strip()}\n\n"
         for i, s in enumerate(segments, 1)
     )
+
+
+# ---------------------------------------------------------------------------
+# Cue editing (transcripts arrive read-only; the user corrects them)
+# ---------------------------------------------------------------------------
+
+MAX_CUES = 5000
+MAX_CUE_SECONDS = 24 * 3600.0
+
+
+def validate_cues(raw) -> list[dict]:
+    """Normalise user-supplied cues into sorted [{'start','end','text'}].
+
+    The editor accepts anything JSON-able, so every shape problem is reported
+    with the offending cue number instead of a traceback."""
+    if not isinstance(raw, list):
+        raise CaptionError("cues must be a list of {start, end, text} objects.")
+    if len(raw) > MAX_CUES:
+        raise CaptionError(f"Too many cues ({len(raw)}); the limit is {MAX_CUES}.")
+    clean: list[dict] = []
+    for i, cue in enumerate(raw, 1):
+        if not isinstance(cue, dict):
+            raise CaptionError(f"Cue {i}: expected an object with start/end/text.")
+        try:
+            start = float(cue["start"])
+            end = float(cue["end"])
+        except (KeyError, TypeError, ValueError):
+            raise CaptionError(f"Cue {i}: start and end must be numbers (seconds).")
+        text = cue.get("text", "")
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            raise CaptionError(f"Cue {i}: text must be a string.")
+        for name, value in (("start", start), ("end", end)):
+            if not math.isfinite(value):
+                raise CaptionError(f"Cue {i}: {name} is not a valid number.")
+        if start < 0:
+            raise CaptionError(f"Cue {i}: start must be 0 or later.")
+        if end <= start:
+            raise CaptionError(f"Cue {i}: end ({end:.3f}) must be after start "
+                               f"({start:.3f}).")
+        if end > MAX_CUE_SECONDS:
+            raise CaptionError(f"Cue {i}: end goes beyond the 24-hour limit.")
+        clean.append({"start": round(start, 3), "end": round(end, 3),
+                      "text": text.strip()})
+    clean.sort(key=lambda c: (c["start"], c["end"]))
+    return clean
+
+
+def write_outputs(job: dict, cues: list[dict]) -> None:
+    """(Re)write the .srt/.vtt/.json trio from the current cue list."""
+    out = job.get("outputs") or {}
+    if not out.get("srt"):
+        raise CaptionError("This caption set has no output files to write.")
+    write_srt(cues, out["srt"])
+    if out.get("vtt"):
+        write_vtt(cues, out["vtt"])
+    meta = dict(job.get("meta") or {})
+    meta["edited"] = True
+    meta["cue_count"] = len(cues)
+    if out.get("json"):
+        write_json(cues, meta, out["json"])
+
+
+def update_cues(job_id: str, cues) -> dict | None:
+    """Replace a job's cues and rewrite the caption files on disk.
+
+    Returns None for an unknown job; raises CaptionError for shape problems or
+    a job that cannot be edited (still running, or never produced files)."""
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return None
+        if job["state"] == "running":
+            raise CaptionError("Transcription is still running — wait for it "
+                               "to finish before editing its captions.")
+    clean = validate_cues(cues)
+    write_outputs(job, clean)
+    with _JOBS_LOCK:
+        job["cues"] = clean
+        job["cues_text"] = srt_to_cues_text(clean)
+        job["edited"] = True
+        job["edited_at"] = time.time()
+        job["progress"] = 100.0
+        job["note"] = f"{len(clean)} cue(s) saved to {job['outputs'].get('srt')}"
+    return get_job(job_id)
+
+
+def start_manual_captions(source: str, output_dir: str | None = None,
+                          sidecar: str | None = None) -> dict:
+    """An editable caption set without faster-whisper.
+
+    Starts empty, or pre-filled from an existing .srt/.vtt (`sidecar`), so the
+    user can fix timings and text even when the audio cannot be transcribed.
+    The three caption files are (re)written every time the set is saved."""
+    if not source or not os.path.isfile(source):
+        raise CaptionError(f"Video not found: {source}")
+    out_dir = output_dir or default_output_dir(source)
+    os.makedirs(out_dir, exist_ok=True)
+    stem = Path(source).stem
+
+    job = _new_job("manual", source)
+    job["state"] = "manual"
+    job["stage"] = "ready"
+    job["progress"] = 100.0
+    job["outputs"] = {
+        "srt": os.path.join(out_dir, f"{stem}.srt"),
+        "vtt": os.path.join(out_dir, f"{stem}.vtt"),
+        "json": os.path.join(out_dir, f"{stem}.json"),
+    }
+    job["options"] = {"output_dir": out_dir}
+
+    cues: list[dict] = []
+    if sidecar:
+        try:
+            text = Path(sidecar).read_text(encoding="utf-8-sig", errors="replace")
+        except OSError as exc:
+            with _JOBS_LOCK:
+                JOBS.pop(job["id"], None)
+            raise CaptionError(f"Cannot read '{sidecar}': {exc}")
+        from vts import detect as detect_mod     # lazy: parser lives there
+        cues = validate_cues(detect_mod.parse_subtitles(text))
+        job["note"] = (f"Loaded {len(cues)} cue(s) from {os.path.basename(sidecar)}"
+                       " — edit and press Save.")
+    else:
+        job["note"] = "Blank caption set — add cues, edit them, press Save."
+
+    job["cues"] = cues
+    job["cues_text"] = srt_to_cues_text(cues)
+    job["meta"] = {"manual": True}
+    job["elapsed"] = 0.0
+    return get_job(job["id"])                       # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +685,8 @@ def _run(job: dict, source: str, opts: dict) -> None:
 
         job["meta"] = meta
         job["segments"] = segments
+        job["cues"] = [{"start": s["start"], "end": s["end"], "text": s["text"]}
+                       for s in segments]
         job["cues_text"] = srt_to_cues_text(segments)
         job["eta"] = 0
         job["state"] = "done"
