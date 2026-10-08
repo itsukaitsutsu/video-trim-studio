@@ -37,6 +37,7 @@ Your **RX 6600 XT + i7-10700F + 16 GB RAM** is suitable for this app:
 - The RX 6600 XT can use FFmpeg's **AMD AMF** H.264/H.265 encoder on Windows, when the installed FFmpeg build and AMD driver expose `h264_amf` / `hevc_amf`. This helps exports run faster.
 - The i7-10700F can use `libx264` if AMF is unavailable; CPU export works but will take longer.
 - This build does **not** require CUDA or an NVIDIA GPU. Auto-captioning is an optional extra: it runs on CPU (`int8`) here and downloads the Whisper model you pick.
+- Want GPU transcription? NVIDIA cards use faster-whisper with CUDA, AMD cards use whisper.cpp with Vulkan — step-by-step for both in [GPU transcription setup](#gpu-transcription-setup--nvidia-cuda-and-amd-vulkan).
 - 16 GB is reasonable for normal 1080p footage. Very long, high-resolution/high-frame-rate projects may take longer and benefit from closing other applications.
 
 To confirm AMF is available on the PC where you will run the app, open a new terminal after installing FFmpeg and run:
@@ -109,8 +110,9 @@ failed.
 The first transcription also downloads the chosen model (75 MB for `tiny`,
 ~1.5 GB for `medium`) into the HuggingFace cache; later runs reuse it.
 
-**Slow connection? Download the model manually.** There are no CUDA-specific
-files — the same four files serve both CUDA and CPU. Grab them from
+**Slow connection? Download the model manually** — full link tables for both
+engines are in [`MODEL-DOWNLOAD.md`](MODEL-DOWNLOAD.md). There are no
+CUDA-specific files — the same four files serve both CUDA and CPU. Grab them from
 `https://huggingface.co/Systran/faster-whisper-<model>` (or the same path on
 the `hf-mirror.com` mirror): `model.bin`, `config.json`, `tokenizer.json`,
 `vocabulary.txt`, and put all four into `work/fw-models/<model name>/` (e.g.
@@ -136,29 +138,80 @@ segments boundary. **Use these captions → Detect sections** then runs the
 normal detection with the generated captions, and the subtitle path is filled in
 so a plain **Detect sections** works too.
 
-### whisper.cpp engine — GPU transcription on AMD cards (Vulkan)
+### GPU transcription setup — NVIDIA (CUDA) and AMD (Vulkan)
+
+Which engine you use depends on your graphics card:
+
+| Your GPU | Engine | Acceleration |
+| --- | --- | --- |
+| NVIDIA (GTX/RTX) | faster-whisper | CUDA |
+| AMD Radeon (RX 5000/6000/7000…) | whisper.cpp | Vulkan |
+| No GPU / Intel iGPU | either | CPU (whisper.cpp is usually the faster of the two) |
 
 faster-whisper runs on CTranslate2, whose pip builds only support **CPU and
-NVIDIA CUDA** — an AMD card like the RX 6600 XT cannot be used by it, which is
-why the Device choice here is just CUDA/CPU. The caption card therefore has an
-**Engine** switch: `whisper.cpp` uses a separate engine with a **Vulkan**
-backend that runs on AMD/Intel/NVIDIA GPUs on both Windows and Linux.
+NVIDIA CUDA** — an AMD card cannot be used by it. That is why the caption card
+has an **Engine** switch, and why AMD users get their GPU speed through
+whisper.cpp's Vulkan backend instead.
 
-1. **Get the CLI binary.** Build [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-   with Vulkan: `cmake -B build -DGGML_VULKAN=ON && cmake --build build --config Release`
-   (needs the Vulkan SDK / your GPU driver). Then make `whisper-cli` visible:
-   copy it into `<app>/tools/`, put it on PATH, or set `VTS_WHISPER_CLI` to its
-   full path. The card's status line tells you whether it was found.
-2. **Get a GGML model.** The card lists downloadable models (`tiny` … `large-v3`)
-   and streams them from HuggingFace into `work/whisper-models/` with progress —
-   or download `ggml-<name>.bin` yourself into that folder.
-3. **Pick Engine = whisper.cpp**, a model, and transcribe. Everything else is
-   shared: same outputs, editable cues, burn-in, detection.
+#### NVIDIA — CUDA with faster-whisper
 
-With a Vulkan build the card reports `backend: vulkan` while it runs; without
-GPU support in the binary it simply uses the CPU (still often faster than
-faster-whisper on CPU). The engine uses long-form CLI flags only, which are
-stable across whisper.cpp releases.
+1. Install the engine into the same Python that runs the app:
+   `python -m pip install -r requirements-caption.txt`
+2. Install the NVIDIA libraries CTranslate2 needs: **cuBLAS for CUDA 12** and
+   **cuDNN 9 for CUDA 12**.
+   - Easiest on Windows: one archive with both libraries from
+     [Purfview's whisper-standalone-win releases ("libs")](https://github.com/Purfview/whisper-standalone-win/releases/tag/libs)
+     — decompress it and put the folder on your `PATH`.
+   - Official alternative: CUDA 12 toolkit + cuDNN 9 from nvidia.com.
+3. Restart the app. The Auto-caption card's note should now say
+   *N CUDA device(s) detected*; leave Device on `auto` (it picks CUDA with
+   `float16`). If CUDA fails at run time, the job automatically falls back to
+   CPU and says so.
+4. Models download automatically on first run. If HuggingFace is slow for you,
+   download the four files (`model.bin`, `config.json`, `tokenizer.json`,
+   `vocabulary.txt`) from `https://huggingface.co/Systran/faster-whisper-<name>`
+   (or the same path on `hf-mirror.com`) into `work/fw-models/<name>/` — the
+   app prefers that folder and skips the automatic download. The files are
+   identical for CUDA and CPU.
+5. Version mismatch? Current CTranslate2 wants CUDA 12 + cuDNN 9. For
+   CUDA 12 + cuDNN 8 pin `pip install ctranslate2==4.4.0`; for CUDA 11 use
+   `ctranslate2==3.24.0` (see the faster-whisper README for details).
+
+#### AMD — Vulkan with whisper.cpp
+
+1. **Get a Vulkan-enabled `whisper-cli`** — pick one:
+   - *Prebuilt (easiest on Windows, no compiler):* download
+     [`whispercpp-v1.8.5-windows-x64.zip`](https://github.com/CryptoKey98/whispercpp-vulkan-runtime/releases)
+     (built from official whisper.cpp sources; needs only your AMD driver —
+     the Vulkan runtime ships with it — and the VC++ x64 redistributable).
+   - *Build it yourself (Windows/Linux):* install CMake, a C++ compiler and
+     the Vulkan SDK, then in a clone of
+     [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp):
+     `cmake -B build -DGGML_VULKAN=ON` then
+     `cmake --build build --config Release`.
+2. **Make it visible to the app:** put `whisper-cli` (plus the `.dll` files
+   next to it) into `<app>/tools/`, or add it to PATH, or set `VTS_WHISPER_CLI`
+   to its full path. The card's status line confirms when it's found.
+3. **Get a GGML model:** use the card's Download button, or put
+   `ggml-<name>.bin` into `work/whisper-models/` yourself (links in
+   `MODEL-DOWNLOAD.md`). Recommended: `ggml-large-v3-turbo.bin` for daily use,
+   `ggml-large-v3.bin` for max accuracy.
+4. **Engine → whisper.cpp**, pick the model, transcribe. When the GPU is doing
+   the work the job output mentions Vulkan and the app reports
+   `backend: vulkan`; Task Manager's GPU meter should climb. A binary built
+   without Vulkan still works — on CPU, which is often faster than
+   faster-whisper on CPU.
+
+#### Good to know (both engines)
+
+- Everything downstream is shared: same outputs (`.srt/.vtt/.json`), editable
+  cues, burn-in and section detection.
+- Model files are **not interchangeable**: whisper.cpp reads one GGML `.bin`
+  per model (`work/whisper-models/`), faster-whisper reads a four-file
+  CTranslate2 folder (`work/fw-models/<name>/`). You only need the files for
+  the engine you actually use — no need to download a model twice.
+- The engine uses long-form CLI flags only, which are stable across
+  whisper.cpp releases.
 
 ### Editable captions
 
@@ -299,6 +352,7 @@ demo/                 18-second sample video + captions, and a short
                       spoken clip for the Auto-caption card
 setup.bat, run.bat    Windows install/run helpers
 requirements*.txt     Runtime and test Python packages
+MODEL-DOWNLOAD.md     Manual model download links (faster-whisper + GGML)
 tests/                Unit, integration, and API tests
 ```
 
