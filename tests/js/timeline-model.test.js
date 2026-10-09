@@ -181,3 +181,18 @@ test("renaming a caption section also renames its caption on the timeline", () =
   assert.equal(out.caps.find((c) => c.id === "t2").text, "old words", "captions outside the section keep their text");
   assert.equal(tl.clips[0].text, "old words", "the input is not changed");
 });
+
+test("renaming a timeline caption updates its matching section label", () => {
+  const tl = {
+    clips: [clip("a", 0, 4, 0), clip("b", 4, 6, 4)].map((c) => ({
+      ...c, kind: "caption", text: "old words",
+    })),
+    caps: [cap("t1", 0, 1, 3, "old words"), cap("t2", 1, 5, 5.5, "old words")],
+    lanes: 2,
+  };
+  const out = TLM.setCaptionText(tl, "t1", "new words");
+  assert.equal(out.caps.find((c) => c.id === "t1").text, "new words");
+  assert.equal(out.clips.find((c) => c.id === "a").text, "new words");
+  assert.equal(out.clips.find((c) => c.id === "b").text, "old words", "non-overlapping sections keep their text");
+  assert.equal(tl.caps.find((c) => c.id === "t1").text, "old words", "the input is not changed");
+});

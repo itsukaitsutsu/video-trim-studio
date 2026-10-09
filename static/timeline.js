@@ -4,7 +4,7 @@
  * Editing rules live in timeline-model.js (window.TLM). */
 "use strict";
 
-const TL = { gut: 46, ruler: 20, vTop: 20, vH: 56, laneTop: 80, laneH: 22, laneGap: 3, wave: 12 };
+const TL = { labelW: 46, ruler: 20, vTop: 20, vH: 56, laneTop: 80, laneH: 22, laneGap: 3, wave: 12 };
 const laneY = (i) => TL.laneTop + i * (TL.laneH + TL.laneGap);
 const laneCount = () => Math.max(1, S.tl.lanes || 1);
 const tlHeight = () => laneY(laneCount()) + 4;
@@ -63,10 +63,10 @@ function zoomBy(factor) {
 
 /* ------------------------------------------------------------ geometry */
 
-function plotWidth() { return Math.max(1, $("timeline").clientWidth - TL.gut); }
+function plotWidth() { return Math.max(1, $("timeline").clientWidth); }
 function pxPerSec() { return plotWidth() / Math.max(S.view.span, 1e-6); }
-const t2x = (t) => TL.gut + ((t - S.view.start) / S.view.span) * plotWidth();
-const x2t = (x) => S.view.start + ((x - TL.gut) / plotWidth()) * S.view.span;
+const t2x = (t) => ((t - S.view.start) / S.view.span) * plotWidth();
+const x2t = (x) => S.view.start + (x / plotWidth()) * S.view.span;
 
 function rowAt(y) {
   if (y < TL.ruler) return { kind: "ruler" };
@@ -103,10 +103,32 @@ function edgeAt(it, x) {
 
 /* ------------------------------------------------------------ drawing */
 
+let renderedTrackLabelCount = -1;
+
+function syncTrackLabels(height) {
+  const rail = $("trackLabels");
+  if (!rail) return;
+  const count = laneCount();
+  if (count !== renderedTrackLabelCount) {
+    const captions = Array.from({ length: count }, (_, lane) =>
+      `<div class="track-name caption" style="top:${laneY(lane)}px;height:${TL.laneH}px">T${lane + 1}</div>`
+    ).join("");
+    rail.innerHTML =
+      `<div class="track-ruler"></div>` +
+      `<div class="track-name video" style="top:${TL.vTop}px;height:${TL.vH}px">V1</div>` +
+      captions;
+    renderedTrackLabelCount = count;
+  }
+  rail.style.height = `${height}px`;
+  const stage = rail.parentElement;
+  if (stage) stage.style.gridTemplateColumns = `${TL.labelW}px minmax(0, 1fr)`;
+}
+
 function canvasGeo() {
   const cv = $("timeline");
-  const w = cv.clientWidth;
   const h = tlHeight();
+  syncTrackLabels(h);
+  const w = cv.clientWidth;
   const dpr = window.devicePixelRatio || 1;
   cv.style.height = `${h}px`;
   if (cv.width !== Math.floor(w * dpr) || cv.height !== Math.floor(h * dpr)) {
@@ -150,7 +172,7 @@ function drawWave(ctx, c, x, x2, yBottom, h) {
   if (!n || !S.duration) return;
   ctx.fillStyle = "rgba(46,160,67,0.9)";
   const mid = yBottom - h / 2;
-  for (let px = Math.max(TL.gut, Math.floor(x)); px < Math.min(x2, $("timeline").clientWidth); px += 1) {
+  for (let px = Math.max(0, Math.floor(x)); px < Math.min(x2, $("timeline").clientWidth); px += 1) {
     const src = c.in + (x2t(px) - c.start);
     const idx = Math.floor((src / S.duration) * n);
     if (idx < 0 || idx >= n) continue;
@@ -240,25 +262,19 @@ function draw() {
     ctx.fillText(fmtTime(t, false), x + 3, 12);
   }
 
-  // video row
+  // video row; the separate left rail holds the V1 label while this time area pans.
   ctx.fillStyle = "#0d1218";
-  ctx.fillRect(TL.gut, TL.vTop, w - TL.gut, TL.vH);
-  ctx.fillStyle = "#5b6b7f";
-  ctx.font = "10px ui-monospace, monospace";
-  ctx.fillText("V1", 8, TL.vTop + 22);
+  ctx.fillRect(0, TL.vTop, w, TL.vH);
   for (const c of S.tl.clips) {
     if (c.end < v0 || c.start > v1) continue;
     drawClip(ctx, c);
   }
 
-  // caption lanes
+  // caption lanes; their T labels are kept in the independent left rail.
   for (let i = 0; i < laneCount(); i += 1) {
     const y = laneY(i);
     ctx.fillStyle = "#0d1218";
-    ctx.fillRect(TL.gut, y, w - TL.gut, TL.laneH);
-    ctx.fillStyle = "#5b6b7f";
-    ctx.font = "10px ui-monospace, monospace";
-    ctx.fillText(`T${i + 1}`, 8, y + 15);
+    ctx.fillRect(0, y, w, TL.laneH);
   }
   for (const c of S.tl.caps) {
     if (c.end < v0 || c.start > v1) continue;
@@ -297,20 +313,27 @@ function commitTL() {
   return true;
 }
 
-function refresh() {
-  clampView();
+function refresh(forcePreview = false) {
+  // Keep the time-to-pixel mapping stable during a drag; clamp the viewport
+  // once the gesture ends instead of letting the clip under the pointer jump.
+  if (!S.drag) clampView();
   renderList();
+  syncListPlayhead();
   draw();
   updateTally();
   updateTimecode();
   layoutCapOverlay();
+  // The timeline is the source of truth. Edits can change which source frame
+  // belongs under the unchanged playhead (or turn it into a gap), so keep the
+  // video preview aligned whenever the edit list changes.
+  syncPreview(forcePreview);
 }
 
 function setTL(next) {
   S.tl = next;
   syncCapSel();
   commitTL();
-  refresh();
+  refresh(true);
 }
 
 function commitCaptions() {        // legacy name, used by the caption box
@@ -326,7 +349,7 @@ function undoTL() {
   S.sel = new Set([...S.sel].filter((id) => [...S.tl.clips, ...S.tl.caps].some((c) => c.id === id)));
   syncCapSel();
   scheduleSave();
-  refresh();
+  refresh(true);
   status("Undone.");
 }
 
@@ -338,7 +361,7 @@ function redoTL() {
   S.sel = new Set();
   syncCapSel();
   scheduleSave();
-  refresh();
+  refresh(true);
   status("Redone.");
 }
 
@@ -531,7 +554,7 @@ function bindTimeline() {
       setPlayhead(x2t(x));
       return;
     }
-    if (x < TL.gut || row.kind === "none") return;
+    if (row.kind === "none") return;
     const hit = hitItem(row, x);
     if (hit) {
       const edge = edgeAt(hit, x);
@@ -563,6 +586,7 @@ function bindTimeline() {
     if (!hit) return;
     S.sel = new Set([hit.id]);
     S.capSel = hit.id;
+    refresh();
     setPlayhead(hit.start + 0.05, true);
     startOverlayCaptionEdit();
   });
@@ -577,15 +601,20 @@ function bindTimeline() {
       return;
     }
     if (d.mode === "scrub") {
-      setPlayhead(x2t(Math.max(TL.gut, Math.min(r.width, x))));
+      setPlayhead(x2t(Math.max(0, Math.min(r.width, x))));
       return;
     }
     if (!d.moved && (Math.abs(x - d.x0) > 3 || Math.abs(y - d.y0) > 3)) d.moved = true;
     if (d.mode === "marquee") {
       d.x1 = x;
       d.y1 = y;
-      if (d.moved) applyMarquee(d);
+      if (d.moved) {
+        applyMarquee(d);
+        syncCapSel();
+        syncListSelection();
+      }
       draw();
+      layoutCapOverlay();
       return;
     }
     if (!d.moved) return;
@@ -604,9 +633,10 @@ function bindTimeline() {
       const t = snapTime(x2t(x), new Set([d.id]));
       S.tl = TLM.trimItem(d.base, d.id, d.mode === "trimL" ? "l" : "r", t, d.srcDur);
     }
-    draw();
-    layoutCapOverlay();
-    updateTimecode();
+    // Keep all views live while a clip is being moved or trimmed. Rebuilding
+    // the small section table here means its times stay in step with the
+    // canvas, while refresh also seeks the preview through the new edit list.
+    refresh();
   });
 
   window.addEventListener("mouseup", () => {
@@ -626,13 +656,20 @@ function bindTimeline() {
     }
     if (!d.moved) {
       S.tl = d.base;
+      const item = d.id && [...d.base.clips, ...d.base.caps].find((it) => it.id === d.id);
+      if (item) {
+        // A click on a block both selects it and shows that exact frame in the
+        // preview; the row at the playhead is highlighted in the clip list.
+        const t = Math.min(item.end - 0.001, Math.max(item.start, x2t(d.x0)));
+        setPlayhead(t, true);
+      }
       refresh();
       return;
     }
     if (d.alt && d.resultIds) S.sel = new Set(d.resultIds);
     syncCapSel();
     commitTL();
-    refresh();
+    refresh(true);
   });
 
   cv.addEventListener("wheel", (ev) => {
@@ -686,6 +723,8 @@ function setPlayhead(t, sync = true) {
   S.T = Math.max(0, Math.min(t, Math.max(0, contentEnd())));
   if (sync) syncPreview(true);
   followPlayhead();
+  syncListPlayhead();
+  syncListScroll(true);
   draw();
   updateTimecode();
   layoutCapOverlay();
@@ -742,6 +781,7 @@ function pausePlayback() {
   if (p && !p.paused) p.pause();
   if (S.project) {
     syncPreview(false);
+    syncListPlayhead();
     draw();
     updateTimecode();
     layoutCapOverlay();
@@ -769,6 +809,7 @@ function pvTick(now) {
   S.T = t;
   syncPreview(false);
   followPlayhead();
+  syncListPlayhead();
   draw();
   updateTimecode();
   layoutCapOverlay();
@@ -851,67 +892,265 @@ function bindKeys() {
 
 /* ------------------------------------------------------------ clip list */
 
-function visibleSections() {
+function allListItems() {
+  const entries = [
+    ...S.tl.clips.map((item) => ({
+      id: item.id, item, type: "clip", track: "V1", kind: item.kind || "other",
+    })),
+    ...S.tl.caps.map((item) => ({
+      id: item.id, item, type: "caption", track: `T${Math.max(0, item.lane || 0) + 1}`,
+      kind: "caption",
+    })),
+  ];
+  const rank = (entry) => entry.type === "clip" ? 0 : 1;
+  return entries.sort((a, b) =>
+    a.item.start - b.item.start || rank(a) - rank(b) ||
+    (a.type === "caption" ? a.item.lane - b.item.lane : 0) ||
+    a.item.end - b.item.end || a.id.localeCompare(b.id));
+}
+
+function visibleListItems() {
   const q = (S.filter.q || "").trim().toLowerCase();
-  return S.tl.clips.filter((c) => {
-    if (!S.filter.kinds.has(c.kind || "other")) return false;
-    if (c.end - c.start < S.filter.minDur) return false;
-    if (q && !(c.text || "").toLowerCase().includes(q)) return false;
+  return allListItems().filter((entry) => {
+    const item = entry.item;
+    if (!S.filter.kinds.has(entry.kind)) return false;
+    // The min-duration control historically filters detected V1 sections;
+    // don't hide short timeline captions from their lane cards.
+    if (entry.type === "clip" && item.end - item.start < S.filter.minDur) return false;
+    if (q && !(item.text || "").toLowerCase().includes(q)) return false;
     return true;
   });
+}
+
+function listActiveIdsAt(t) {
+  const ids = new Set();
+  const clip = TLM.clipAt(S.tl, t);
+  if (clip) ids.add(clip.id);
+  for (const cap of S.tl.caps) {
+    if (t >= cap.start && t <= cap.end) ids.add(cap.id);
+  }
+  return ids;
+}
+
+function listScrollTargetId(t) {
+  const activeIds = listActiveIdsAt(t);
+  if (S.capSel && activeIds.has(S.capSel)) return S.capSel;
+
+  const activeClip = TLM.clipAt(S.tl, t);
+  if (activeClip && S.sel.has(activeClip.id)) return activeClip.id;
+
+  const selectedCaption = S.tl.caps
+    .filter((cap) => activeIds.has(cap.id) && S.sel.has(cap.id))
+    .sort((a, b) => a.lane - b.lane || a.start - b.start)[0];
+  if (selectedCaption) return selectedCaption.id;
+
+  const activeCaption = S.tl.caps
+    .filter((cap) => activeIds.has(cap.id))
+    .sort((a, b) => a.lane - b.lane || a.start - b.start)[0];
+  return activeCaption?.id || activeClip?.id || null;
+}
+
+let lastListScrollId = null;
+
+function syncListScroll(force = false) {
+  const id = listScrollTargetId(playheadTime());
+  if (!id) { lastListScrollId = null; return; }
+  if (!force && id === lastListScrollId) return;
+
+  const tb = document.querySelector("#secTable tbody");
+  const row = tb && [...tb.querySelectorAll("tr[data-id]")]
+    .find((item) => item.dataset.id === id);
+  if (!row) { lastListScrollId = null; return; } // a list filter may hide it
+  const scroller = row.closest(".list-scroll");
+  if (!scroller) return;
+
+  const viewport = scroller.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const head = scroller.querySelector("thead");
+  const stickyHead = head ? head.getBoundingClientRect().height : 0;
+  const visibleTop = Math.min(viewport.bottom, viewport.top + stickyHead + 1);
+  if (rowRect.top < visibleTop) {
+    scroller.scrollTop -= visibleTop - rowRect.top;
+  } else if (rowRect.bottom > viewport.bottom) {
+    scroller.scrollTop += rowRect.bottom - viewport.bottom;
+  }
+  lastListScrollId = id;
+}
+
+function listItemById(id) {
+  return allListItems().find((entry) => entry.id === id) || null;
 }
 
 function renderList() {
   const tb = document.querySelector("#secTable tbody");
   if (!tb) return;
-  const rows = visibleSections();
-  tb.innerHTML = rows.map((c) => {
-    const kind = c.kind || "other";
-    return `<tr data-id="${c.id}" class="${S.sel.has(c.id) ? "sel" : ""}">` +
-      `<td class="check-cell"><input type="checkbox" ${S.sel.has(c.id) ? "checked" : ""}></td>` +
-      `<td>${fmtTime(c.start, false)}</td><td>${fmtTime(c.end, false)}</td>` +
-      `<td>${fmtTime(c.end - c.start, false)}</td><td>${escapeHtml(kind)}</td>` +
+  const rows = visibleListItems();
+  const activeIds = listActiveIdsAt(playheadTime());
+  tb.innerHTML = rows.map((entry) => {
+    const { item, type, track, kind, id } = entry;
+    const classes = [
+      S.sel.has(id) ? "sel" : "",
+      activeIds.has(id) ? "at-playhead" : "",
+    ].filter(Boolean).join(" ");
+    const title = type === "caption"
+      ? "Edit this caption cue's text."
+      : "Edit section text. Matching timeline captions are updated too.";
+    return `<tr data-id="${escapeHtml(id)}" data-type="${type}" class="${classes}">` +
+      `<td class="check-cell"><input type="checkbox" ${S.sel.has(id) ? "checked" : ""}></td>` +
+      `<td class="track">${escapeHtml(track)}</td>` +
+      `<td>${fmtTime(item.start, false)}</td><td>${fmtTime(item.end, false)}</td>` +
+      `<td>${fmtTime(item.end - item.start, false)}</td><td>${escapeHtml(kind)}</td>` +
       `<td class="txt txt-edit" contenteditable="true" spellcheck="false" ` +
-      `title="Edit the text. Captions on the timeline with the same text are updated too.">` +
-      `${escapeHtml(c.text || "")}</td></tr>`;
+      `title="${escapeHtml(title)}">${escapeHtml(item.text || "")}</td></tr>`;
   }).join("");
   const empty = $("listEmpty");
   if (empty) {
-    empty.hidden = S.tl.clips.length > 0;
-    empty.textContent = "No clips yet — open a video first.";
+    const hasTimelineItems = S.tl.clips.length > 0 || S.tl.caps.length > 0;
+    empty.hidden = rows.length > 0;
+    empty.textContent = hasTimelineItems
+      ? "No timeline items match these filters."
+      : "No timeline items yet — open a video or add captions first.";
   }
 }
 
 let lastListId = null;
+let activeListRows = new Map();
+let lastActiveListIds = new Set();
+let checklistDrag = null;
+let suppressChecklistClick = false;
+
+function syncListPlayhead() {
+  const tb = document.querySelector("#secTable tbody");
+  if (!tb) return;
+  const nextIds = listActiveIdsAt(playheadTime());
+  const same = nextIds.size === lastActiveListIds.size &&
+    [...nextIds].every((id) => lastActiveListIds.has(id));
+  const stale = [...activeListRows.values()].some((row) => !row.isConnected);
+  if (same && !stale) return;
+
+  activeListRows.clear();
+  for (const row of tb.querySelectorAll("tr[data-id]")) {
+    const active = nextIds.has(row.dataset.id);
+    row.classList.toggle("at-playhead", active);
+    if (active) activeListRows.set(row.dataset.id, row);
+  }
+  lastActiveListIds = nextIds;
+  // Follow the cue on the selected lane (or the first active caption) when
+  // the playhead enters a different set of timeline items.
+  syncListScroll(false);
+}
+
+function syncListSelection() {
+  const tb = document.querySelector("#secTable tbody");
+  if (!tb) return;
+  for (const row of tb.querySelectorAll("tr[data-id]")) {
+    const selected = S.sel.has(row.dataset.id);
+    row.classList.toggle("sel", selected);
+    const checkbox = row.querySelector("input[type=checkbox]");
+    if (checkbox) checkbox.checked = selected;
+  }
+}
+
+function applyListSelection(ids, selected) {
+  let changed = false;
+  for (const id of ids) {
+    if (selected && !S.sel.has(id)) { S.sel.add(id); changed = true; }
+    else if (!selected && S.sel.delete(id)) changed = true;
+  }
+  if (!changed) return;
+  syncCapSel();
+  syncListSelection();
+  draw();
+  layoutCapOverlay();
+}
+
+function listRangeIds(anchor, id) {
+  const ids = visibleListItems().map((entry) => entry.id);
+  const a = ids.indexOf(anchor), b = ids.indexOf(id);
+  if (a < 0 || b < 0) return [id];
+  return ids.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+
+function checklistRowAtPoint(ev, tb) {
+  const el = document.elementFromPoint(ev.clientX, ev.clientY);
+  const row = el && el.closest ? el.closest("tr[data-id]") : null;
+  return row && tb.contains(row) ? row.dataset.id : null;
+}
+
+function beginChecklistDrag(tb, ev) {
+  const checkbox = ev.target.closest && ev.target.closest('input[type="checkbox"]');
+  if (!checkbox || !tb.contains(checkbox) || checkbox.disabled || checklistDrag) return;
+  if (ev.isPrimary === false || (ev.pointerType === "mouse" && ev.button !== 0)) return;
+  const row = checkbox.closest("tr[data-id]");
+  if (!row) return;
+
+  const id = row.dataset.id;
+  const selected = !S.sel.has(id);
+  checklistDrag = { pointerId: ev.pointerId, lastId: id, selected, tb };
+  ev.preventDefault(); // we toggle from the shared selection state, not the native click
+  try { checkbox.focus({ preventScroll: true }); } catch (_) { checkbox.focus(); }
+  tb.classList.add("checklist-dragging");
+  try { tb.setPointerCapture(ev.pointerId); } catch (_) { /* document listeners still handle it */ }
+
+  const ids = ev.shiftKey && lastListId ? listRangeIds(lastListId, id) : [id];
+  applyListSelection(ids, selected);
+  lastListId = id;
+}
+
+function moveChecklistDrag(ev) {
+  const drag = checklistDrag;
+  if (!drag || ev.pointerId !== drag.pointerId) return;
+  const id = checklistRowAtPoint(ev, drag.tb);
+  if (!id || id === drag.lastId) return;
+  const ids = listRangeIds(drag.lastId, id);
+  applyListSelection(ids, drag.selected);
+  drag.lastId = id;
+  lastListId = id;
+}
+
+function endChecklistDrag(ev) {
+  const drag = checklistDrag;
+  if (!drag || (ev && ev.pointerId !== drag.pointerId)) return;
+  checklistDrag = null;
+  drag.tb.classList.remove("checklist-dragging");
+  try { drag.tb.releasePointerCapture(drag.pointerId); } catch (_) { /* already released */ }
+  // The pointer gesture already changed S.sel. Ignore the synthetic click that
+  // browsers may dispatch on pointer-up so it cannot toggle the first box back.
+  suppressChecklistClick = true;
+  setTimeout(() => { suppressChecklistClick = false; }, 0);
+}
 
 function bindList() {
   const tb = document.querySelector("#secTable tbody");
+  tb.addEventListener("pointerdown", (ev) => beginChecklistDrag(tb, ev));
+  document.addEventListener("pointermove", moveChecklistDrag);
+  document.addEventListener("pointerup", endChecklistDrag);
+  document.addEventListener("pointercancel", endChecklistDrag);
+
   tb.addEventListener("click", (ev) => {
+    if (suppressChecklistClick) {
+      suppressChecklistClick = false;
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
     if (ev.target.closest && ev.target.closest("td.txt")) return;   // editing text, not seeking
     const tr = ev.target.closest("tr[data-id]");
     if (!tr) return;
     const id = tr.dataset.id;
-    const clip = S.tl.clips.find((c) => c.id === id);
-    if (ev.target.matches("input[type=checkbox]")) {
-      if (ev.shiftKey && lastListId) {
-        const rows = visibleSections().map((c) => c.id);
-        const a = rows.indexOf(lastListId), b = rows.indexOf(id);
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        const on = !S.sel.has(id);
-        for (const rid of rows.slice(lo, hi + 1)) {
-          if (on) S.sel.add(rid); else S.sel.delete(rid);
-        }
-        syncCapSel();
-        refresh();
-      } else {
-        toggleSel(id);
-      }
+    const entry = listItemById(id);
+    const checkbox = ev.target.closest && ev.target.closest('input[type="checkbox"]');
+    if (checkbox && tr.contains(checkbox)) {
+      const selected = !S.sel.has(id);
+      const ids = ev.shiftKey && lastListId ? listRangeIds(lastListId, id) : [id];
+      applyListSelection(ids, selected);
       lastListId = id;
       return;
     }
-    if (clip) {
+    if (entry) {
       selectOnly(id);
-      setPlayhead(clip.start + 0.01);
+      const item = entry.item;
+      setPlayhead(Math.min(item.start + 0.01, item.end - 0.001));
       lastListId = id;
     }
   });
@@ -929,29 +1168,37 @@ function bindList() {
   tb.addEventListener("focusout", (ev) => {
     const cell = ev.target.closest && ev.target.closest("td.txt");
     if (!cell) return;
-    const id = cell.closest("tr").dataset.id;
-    const clip = S.tl.clips.find((c) => c.id === id);
+    const row = cell.closest("tr[data-id]");
+    const id = row.dataset.id;
+    const item = row.dataset.type === "caption"
+      ? S.tl.caps.find((c) => c.id === id)
+      : S.tl.clips.find((c) => c.id === id);
     const cancel = cell.dataset.cancel === "1";
     delete cell.dataset.cancel;
-    if (!clip) return;
+    if (!item) return;
     const text = cell.textContent.replace(/\s+/g, " ").trim();
-    if (cancel || text === (clip.text || "")) {
-      cell.textContent = clip.text || "";
+    if (cancel || text === (item.text || "")) {
+      cell.textContent = item.text || "";
       return;
     }
-    setTL(TLM.setClipText(S.tl, id, text));
-    status("Text updated (captions on the timeline with the same text too).");
+    if (row.dataset.type === "caption") {
+      setTL(TLM.setCaptionText(S.tl, id, text));
+      status("Caption updated (matching section text follows).");
+    } else {
+      setTL(TLM.setClipText(S.tl, id, text));
+      status("Text updated (captions on the timeline with the same text too).");
+    }
   });
   $("selVisible").onclick = () => {
-    S.sel = new Set([...S.sel, ...visibleSections().map((c) => c.id)]);
+    S.sel = new Set([...S.sel, ...visibleListItems().map((entry) => entry.id)]);
     syncCapSel(); refresh();
   };
   $("selNone").onclick = () => clearSel();
   $("selInvert").onclick = () => {
     const next = new Set(S.sel);
-    for (const c of visibleSections()) {
-      if (next.has(c.id)) next.delete(c.id);
-      else next.add(c.id);
+    for (const entry of visibleListItems()) {
+      if (next.has(entry.id)) next.delete(entry.id);
+      else next.add(entry.id);
     }
     S.sel = next;
     syncCapSel(); refresh();
@@ -961,7 +1208,10 @@ function bindList() {
     syncCapSel(); refresh();
   };
   $("selAllCaptions").onclick = () => {
-    S.sel = new Set(S.tl.clips.filter((c) => c.kind === "caption").map((c) => c.id));
+    S.sel = new Set([
+      ...S.tl.clips.filter((c) => c.kind === "caption").map((c) => c.id),
+      ...S.tl.caps.map((c) => c.id),
+    ]);
     syncCapSel(); refresh();
   };
   $("selRemove").onclick = () => deleteSel(true);
@@ -1266,6 +1516,10 @@ async function onProjectOpen(data) {
   S.duration = data.info.duration;
   S.T = 0;
   S.sel = new Set();
+  lastListId = null;
+  activeListRows = new Map();
+  lastActiveListIds = new Set();
+  lastListScrollId = null;
   S.capSel = null;
   S.undo = [];
   S.redo = [];
@@ -1295,7 +1549,7 @@ async function onProjectOpen(data) {
   resetCaptionCard();
   $("detectInfo").textContent = "";
   $("exportBtn").disabled = true;
-  refresh();
+  refresh(true);
 
   // Restore this project's saved edit list after a page refresh.
   try {
@@ -1303,7 +1557,7 @@ async function onProjectOpen(data) {
     if (S.project === data && saved.timeline && saved.timeline.clips) {
       S.tl = saved.timeline;
       S.lastJSON = JSON.stringify(S.tl);
-      refresh();
+      refresh(true);
     }
   } catch (_) {
     // No saved edit list: keep the default single clip.

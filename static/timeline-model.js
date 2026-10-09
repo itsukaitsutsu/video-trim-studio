@@ -364,6 +364,24 @@
     return out;
   }
 
+  // Rename one timeline caption. A matching section label in the same time
+  // range follows it, mirroring setClipText() in the other direction.
+  function setCaptionText(tl, captionId, text) {
+    const out = clone(tl);
+    const cap = out.caps.find((c) => c.id === captionId);
+    if (!cap) return out;
+    const old = cap.text || "";
+    cap.text = String(text || "");
+    if (old) {
+      for (const clip of out.clips) {
+        if (clip.text === old && clip.start < cap.end - EPS && clip.end > cap.start + EPS) {
+          clip.text = cap.text;
+        }
+      }
+    }
+    return out;
+  }
+
   function timelineEnd(tl) {
     return tl.clips.reduce((m, c) => Math.max(m, c.end), 0);
   }
@@ -396,7 +414,7 @@
   const api = {
     MIN_LEN, newId, clone, isClip, emptyTimeline, clipsFromSource, clipsFromSections,
     capsFromCues, assignLanes, splitSelection, deleteItems, moveItems, trimItem,
-    copyItems, pasteItems, duplicateItems, addCaption, setClipText, timelineEnd, clipAt,
+    copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText, timelineEnd, clipAt,
     mergeRanges, validate,
   };
   if (typeof module === "object" && module.exports) module.exports = api;

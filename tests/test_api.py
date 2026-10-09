@@ -84,6 +84,20 @@ def test_project_required_before_open(client):
     assert client.get("/api/project").status_code == 409
 
 
+def test_open_remembers_original_video_path_for_restart_restore(client, source):
+    r = client.post("/api/open", json={"path": source})
+    assert r.status_code == 200, r.text
+    original_path = r.json()["info"]["path"]
+    assert original_path == os.path.abspath(source)
+    assert client.get("/api/last-project").json() == {"path": original_path}
+
+    # A server restart clears the active in-memory project, but leaves the
+    # original source path available to the browser's startup restore flow.
+    server.PROJECT = None
+    assert client.get("/api/project").status_code == 409
+    assert client.get("/api/last-project").json() == {"path": original_path}
+
+
 def test_open_rejects_missing_file(client):
     r = client.post("/api/open", json={"path": "/nope/does-not-exist.mp4"})
     assert r.status_code == 404

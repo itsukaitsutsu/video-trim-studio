@@ -155,6 +155,119 @@ def test_timeline_split_ripple_undo_paste_caption_export(browser_page, tmp_path)
     assert not page_errors, page_errors
 
 
+def test_timeline_preview_and_list_follow_the_same_playhead(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.wait_for_function("document.getElementById('player').readyState >= 1")
+
+    def canvas_box():
+        page.locator("#timeline").scroll_into_view_if_needed()
+        return page.locator("#timeline").bounding_box()
+
+    def x_of(t: float) -> float:
+        return page.evaluate(
+            "t => { const r = document.getElementById('timeline').getBoundingClientRect();"
+            " return r.left + t2x(t); }", t)
+
+    # Clicking a clip should select it, move the playhead, seek the preview,
+    # and mark the matching section in the clip list.
+    box = canvas_box()
+    page.mouse.click(x_of(6.0), box["y"] + 48)
+    page.wait_for_function("Math.abs(document.getElementById('player').currentTime - 6) < 0.25")
+    clip_id = page.evaluate("S.tl.clips[0].id")
+    assert abs(page.evaluate("S.T") - 6.0) < 0.1
+    assert page.evaluate("id => S.sel.has(id)", clip_id)
+    assert page.locator(f"#secTable tbody tr[data-id='{clip_id}']").evaluate(
+        "row => row.classList.contains('at-playhead')")
+
+    # Moving the clip changes which source frame belongs under the same
+    # timeline time. The preview must follow the updated source mapping.
+    page.evaluate("""() => {
+      const id = S.tl.clips[0].id;
+      S.tl = TLM.moveItems(S.tl, [id], 3, 0);
+      refresh();
+    }""")
+    page.wait_for_function("Math.abs(document.getElementById('player').currentTime - 3) < 0.25")
+    assert abs(page.evaluate("S.T") - 6.0) < 0.1
+    assert page.locator(f"#secTable tbody tr[data-id='{clip_id}']").evaluate(
+        "row => row.classList.contains('at-playhead')")
+
+    # A row click seeks back through the moved clip's source in-point too.
+    page.locator(f"#secTable tbody tr[data-id='{clip_id}'] td:nth-child(2)").click()
+    page.wait_for_function("Math.abs(document.getElementById('player').currentTime - 0.01) < 0.2")
+    assert abs(page.evaluate("S.T") - 3.01) < 0.1
+    assert not page_errors, page_errors
+
+
+def test_caption_cards_cover_every_lane_and_follow_timeline_selection(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.wait_for_function("document.getElementById('player').readyState >= 1")
+    page.evaluate("""() => {
+      S.tl = {
+        clips: [{ id: 'video-1', start: 0, end: S.duration, in: 0, kind: null, text: '' }],
+        caps: [
+          { id: 'caption-t1', lane: 0, start: 1, end: 2, text: 'Lane one', style: null },
+          { id: 'caption-t2', lane: 1, start: 1.2, end: 2.2, text: 'Lane two', style: null },
+          { id: 'caption-t3', lane: 2, start: 2.5, end: 3.5, text: 'Lane three', style: null },
+          ...Array.from({ length: 24 }, (_, i) => ({
+            id: `filler-${i}`, lane: i % 3, start: 4 + i * 0.4,
+            end: 4 + i * 0.4 + 0.3, text: `Filler ${i}`, style: null,
+          })),
+        ],
+        lanes: 3,
+      };
+      S.sel = new Set();
+      S.T = 0;
+      S.lastJSON = JSON.stringify(S.tl);
+      refresh(true);
+    }""")
+
+    for cue_id, lane in [("caption-t1", "T1"), ("caption-t2", "T2"), ("caption-t3", "T3")]:
+        assert page.locator(f"#secTable tbody tr[data-id='{cue_id}'] td.track").inner_text() == lane
+
+    # Start scrolled well away from the early caption rows. Clicking a timeline
+    # item should bring its matching card back into the list viewport.
+    bottom_scroll = page.locator(".list-scroll").evaluate(
+        "el => { el.scrollTop = el.scrollHeight; return el.scrollTop; }")
+    assert bottom_scroll > 0
+    page.locator("#timeline").scroll_into_view_if_needed()
+
+    # Clicking the T2 block selects the matching T2 card and places the
+    # playhead/preview at the same time, even while T1 overlaps it.
+    point = page.evaluate("""t => {
+      const r = document.getElementById('timeline').getBoundingClientRect();
+      return { x: r.left + t2x(t), y: r.top + laneY(1) + 10 };
+    }""", 1.6)
+    page.mouse.click(point["x"], point["y"])
+    page.wait_for_function("Math.abs(document.getElementById('player').currentTime - 1.6) < 0.25")
+    assert abs(page.evaluate("S.T") - 1.6) < 0.1
+    assert page.evaluate("S.capSel") == "caption-t2"
+    t2row = page.locator("#secTable tbody tr[data-id='caption-t2']")
+    assert t2row.evaluate("row => row.classList.contains('sel')")
+    assert t2row.evaluate("row => row.classList.contains('at-playhead')")
+    assert page.locator(".list-scroll").evaluate("el => el.scrollTop") < bottom_scroll
+    assert page.evaluate("""() => {
+      const list = document.querySelector('.list-scroll');
+      const row = document.querySelector("#secTable tbody tr[data-id='caption-t2']");
+      const headHeight = list.querySelector('thead').getBoundingClientRect().height;
+      const box = row.getBoundingClientRect();
+      const viewport = list.getBoundingClientRect();
+      return box.top >= viewport.top + headHeight - 1 && box.bottom <= viewport.bottom + 1;
+    }""")
+    assert page.locator("#secTable tbody tr[data-id='caption-t1']").evaluate(
+        "row => row.classList.contains('at-playhead')")
+
+    # Clicking the T3 card selects its exact lane item and seeks the timeline.
+    page.locator("#secTable tbody tr[data-id='caption-t3'] td.track").click()
+    page.wait_for_function("Math.abs(document.getElementById('player').currentTime - 2.51) < 0.25")
+    assert abs(page.evaluate("S.T") - 2.51) < 0.1
+    assert page.evaluate("S.capSel") == "caption-t3"
+    assert page.locator("#secTable tbody tr[data-id='caption-t3']").evaluate(
+        "row => row.classList.contains('at-playhead') && row.classList.contains('sel')")
+    assert not page_errors, page_errors
+
+
 def test_detection_fills_clips_and_captions_and_survives_reload(browser_page):
     page, page_errors = browser_page
     open_demo(page)
@@ -205,7 +318,7 @@ def test_playback_caption_box_lanes_and_list(browser_page):
     assert page.evaluate("S.tl.lanes") == lanes + 1
 
     # Type a new text into the list: the section and its caption both change.
-    cell = page.locator("#secTable tbody td.txt", has_text=first["text"]).first
+    cell = page.locator("#secTable tbody tr[data-type='clip'] td.txt", has_text=first["text"]).first
     cell.click()
     page.keyboard.press("Control+a")
     page.keyboard.type("Changed in the list")
@@ -213,10 +326,76 @@ def test_playback_caption_box_lanes_and_list(browser_page):
     assert page.evaluate("S.tl.clips.some(c => c.text === 'Changed in the list')")
     assert page.evaluate("S.tl.caps.some(c => c.text === 'Changed in the list')")
 
-    # Tick one clip in the list and remove it with ripple.
+    # Check one clip, then hold and drag across another checkbox to paint a
+    # multi-selection instead of clicking every section individually.
     n = page.evaluate("S.tl.clips.length")
-    page.click("#secTable tbody tr:nth-child(2) input[type=checkbox]")
+    first = page.locator("#secTable tbody tr:nth-child(1) input[type=checkbox]")
+    second = page.locator("#secTable tbody tr:nth-child(2) input[type=checkbox]")
+    first.scroll_into_view_if_needed()
+    first_box, second_box = first.bounding_box(), second.bounding_box()
+    first_id = page.locator("#secTable tbody tr:nth-child(1)").get_attribute("data-id")
+    second_id = page.locator("#secTable tbody tr:nth-child(2)").get_attribute("data-id")
+    selected_clip_count = page.evaluate(
+        "ids => S.tl.clips.filter(clip => ids.includes(clip.id)).length",
+        [first_id, second_id])
+    page.mouse.click(first_box["x"] + first_box["width"] / 2,
+                     first_box["y"] + first_box["height"] / 2)
     assert page.evaluate("S.sel.size") == 1
+
+    page.mouse.move(second_box["x"] + second_box["width"] / 2,
+                    second_box["y"] + second_box["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(first_box["x"] + first_box["width"] / 2,
+                    first_box["y"] + first_box["height"] / 2, steps=4)
+    page.mouse.up()
+    assert page.evaluate("ids => ids.every(id => S.sel.has(id))", [first_id, second_id])
+    assert page.evaluate("S.sel.size") == 2
+
     page.click("#selRemove")
-    assert page.evaluate("S.tl.clips.length") == n - 1
+    assert page.evaluate("S.tl.clips.length") == n - selected_clip_count
+    assert not page_errors, page_errors
+
+
+def test_track_labels_stay_pinned_left_during_horizontal_pan(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.click("#tlLane")
+    page.evaluate("""() => {
+      S.view = { start: 0, span: S.duration / 2 };
+      draw();
+    }""")
+
+    rail = page.locator("#trackLabels")
+    assert rail.locator(".track-name").all_inner_texts() == ["V1", "T1", "T2"]
+    before = rail.bounding_box()
+    start_before = page.evaluate("S.view.start")
+    page.locator("#timeline").evaluate("""canvas => canvas.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true, cancelable: true, deltaX: 400, deltaY: 0,
+      clientX: canvas.clientWidth / 2,
+    }))""")
+
+    assert page.evaluate("S.view.start") > start_before, "the time view should pan horizontally"
+    after = rail.bounding_box()
+    assert abs(after["x"] - before["x"]) < 1
+    assert abs(after["width"] - before["width"]) < 1
+    assert abs(page.locator("#timeline").bounding_box()["x"] - after["x"] - after["width"]) < 1
+    assert not page_errors, page_errors
+
+
+def test_startup_reopens_saved_video_when_project_is_missing(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    saved_path = page.locator("#pathInput").input_value()
+    saved_name = page.evaluate("S.project.info.name")
+
+    # Mimic the empty in-memory project seen after a server restart. Startup
+    # should ask for the saved original path and reopen it automatically.
+    page.route("**/api/project", lambda route: route.fulfill(
+        status=409, content_type="application/json",
+        body='{"detail":"No video is open yet."}',
+    ))
+    page.reload()
+    page.wait_for_function(
+        "name => S.project && S.project.info.name === name", arg=saved_name, timeout=30000)
+    assert page.locator("#pathInput").input_value() == saved_path
     assert not page_errors, page_errors

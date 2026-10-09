@@ -6,11 +6,12 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 
 ## What it does
 
-- Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes), filmstrip, waveform, clip list, search, and timeline playback.
+- Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
+- Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
-- Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a section's text in the clip list (the matching caption follows).
+- Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
 - **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
-- Selects clips by click, Shift/Ctrl-click, rubber band, or the clip list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
+- Selects timeline items by click, Shift/Ctrl-click, rubber band, or the timeline-list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
@@ -60,7 +61,7 @@ If it lists `h264_amf` / `hevc_amf`, the app will offer them. If it does not, ch
 3. Extract this project folder somewhere writable.
 4. Double-click **`setup.bat`** once. It creates a project virtual environment and installs the Python packages.
 5. Double-click **`run.bat`**. Leave the console window open and visit **<http://127.0.0.1:8765>**.
-6. Click **Open demo** to try the included clip, or paste a video path / use **Browse** / **Upload** to open your own video.
+6. Click **Open demo** to try the included clip, or paste a video path / use **Browse** to open your own video. The optional Upload control is available if you specifically want to copy a file into the app.
 
 The app binds to `127.0.0.1` by default, so it is only available on your PC. Do not change it to `0.0.0.0` unless you intentionally want other devices on your network to access it.
 
@@ -70,7 +71,7 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
 2. *(Optional)* Transcribe with **Auto-caption** (below), or load an `.srt` / `.vtt` in **Detect sections → Subtitle file**.
 3. **Detect sections.** Silence and caption sections become clips on the **V1** row, and the captions go onto the caption lanes. Detection replaces the current timeline, and Ctrl+Z brings the old one back. The threshold and minimum-silence controls work as before.
 4. **Edit the timeline.** All times are timeline seconds, and the preview plays the timeline.
-   - **Select:** click a clip or caption. Shift/Ctrl-click adds or removes one. Drag on empty space to rubber-band select. Ctrl+A selects all, and Esc clears.
+   - **Select:** click a clip or caption to select it and show that frame in the preview; the clip under the playhead is highlighted in the list. Shift/Ctrl-click adds or removes one. Drag on empty space to rubber-band select. Ctrl+A selects all, and Esc clears.
    - **Cut:** **Ctrl+K** (or **split**) splits the selection, or everything, at the playhead. Drag a clip edge to trim it. The edge stops at the neighbouring clips and at the start or end of the source.
    - **Move:** drag a clip or caption. A clip overwrites whatever it lands on, and a caption moves to a free lane if its lane is taken. Alt-drag copies instead.
    - **Remove:** **Delete** (or **delete**) leaves a gap. **Shift+Delete** (or **ripple delete**) closes the gap on every track, and the captions follow the picture.
@@ -78,7 +79,7 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
    - **Captions:** **+ caption** adds one at the playhead, and **+ lane** adds a caption lane to stack captions. Double-click a caption to edit its text. On the preview (burn mode), the caption box still drags and resizes as before.
    - **Undo / redo:** Ctrl+Z, Ctrl+Shift+Z, or Ctrl+Y. The edit list is saved while the app runs, so a page refresh keeps it.
    - **Playback:** Space plays the timeline. Left and Right step one frame, and Shift+arrows move one second. Gaps show black.
-   - **Clip list:** it selects the same clips, with tick boxes, shift-click ranges, the filters, and **remove selected** (which closes the gaps).
+   - **Timeline list:** shows V1 sections and caption cues from every lane (T1, T2, …), with a track column. It follows the playhead and scrolls the active item into view. Clicking a non-text cell selects that exact item and seeks the preview. Tick boxes, Shift-click, or hold and drag across rows to paint a multi-selection. **Remove selected** closes the gaps.
 5. **Export.** Set the output path and profile, then click **Export clean cut**. Clips are written in timeline order, gaps become black with silence, and captions use the timeline times. The source is never overwritten.
 6. *(Optional)* In the export card, write the captions as an `.srt` next to the export, burn them into the picture, or both. Burning uses the caption box layout you set on the preview.
 
@@ -224,7 +225,7 @@ whisper.cpp's Vulkan backend instead.
 The timeline draws the video clips on the V1 row, with the captions on caption
 lanes below them (like CapCut / Kdenlive):
 
-- **click** a block to select it, **drag** to move it in time, drag its
+- **click** a block to select it and seek the preview/playhead, **drag** to move it in time, drag its
   **edges** to trim, drag **up/down** to put it on another lane (a free lane is
   used when the lane is taken). Overlapping blocks on different lanes = several
   captions on one frame.
@@ -237,7 +238,7 @@ lanes below them (like CapCut / Kdenlive):
   caption. The preview shows all captions on the current frame at once, in
   their own styles, and the export burns exactly that (one positioned ASS
   Dialogue per caption - overlaps included).
-- The block, the preview boxes, the clip list and the burn all update together
+- The block, the preview boxes, the timeline list and the burn all update together
   after each edit. Timeline edits are saved with the project, not written back
   to the subtitle file (see Captions).
 - Ctrl+wheel zooms; drag on empty space to rubber-band select clips and captions.
@@ -387,7 +388,7 @@ vts/                       FFprobe, detection, timeline validation (timeline.py)
                            timeline export (edl.py), FFmpeg export, preview proxy,
                            faster-whisper auto-caption
 static/timeline-model.js   pure editing rules: split, move, trim, ripple, paste, undo data
-static/timeline.js         timeline canvas, mouse and keyboard, playback, clip list,
+static/timeline.js         timeline canvas, mouse and keyboard, playback, timeline list,
                            detection and export glue
 static/app.js              open and browse, caption card, caption box, export options
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)

@@ -120,10 +120,27 @@ async function openPath(path) {
   $("fileMeta").textContent = "probing…";
   try {
     const data = await api("/api/open", { method: "POST", body: JSON.stringify({ path }) });
-    onProjectOpen(data);
+    await onProjectOpen(data);
   } catch (e) {
     $("fileMeta").textContent = "";
     alert(`Could not open:\n${e.message}`);
+  }
+}
+
+async function restoreLastProject() {
+  let saved;
+  try { saved = await api("/api/last-project"); }
+  catch (_) { return; }
+  if (!saved.path) return;
+
+  $("pathInput").value = saved.path;
+  $("fileMeta").textContent = "Reopening the last video…";
+  try {
+    await onProjectOpen(await api("/api/open", {
+      method: "POST", body: JSON.stringify({ path: saved.path }),
+    }));
+  } catch (e) {
+    $("fileMeta").textContent = `Couldn't reopen the last video: ${e.message}. Check the path or use Browse to open another.`;
   }
 }
 
@@ -132,9 +149,6 @@ async function openPath(path) {
 let previewTimer = null;
 let previewFallbackTried = false;
 let timelineAssetsPending = false;
-let checklistDrag = null;
-let suppressChecklistClick = false;
-let suppressChecklistSelection = false;
 
 function setPreviewInfo(text) {
   const el = $("previewInfo");
@@ -1167,10 +1181,11 @@ function pollJob(id) {
   syncQualityRows();
   await loadEnv();
   try {
-    // The project is held server-side. Restore it after a browser refresh.
-    onProjectOpen(await api("/api/project"));
+    // The active project survives a browser refresh while the server is running.
+    await onProjectOpen(await api("/api/project"));
   } catch (_) {
-    // First launch: no source has been opened yet.
+    // A restart clears the in-memory project. Restore its saved source path.
+    await restoreLastProject();
   }
   draw();
 })();

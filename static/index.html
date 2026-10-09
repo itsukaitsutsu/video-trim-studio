@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=16">
+<link rel="stylesheet" href="/static/style.css?v=19">
 </head>
 <body>
 <header>
@@ -56,7 +56,7 @@
     <div class="timeline-card">
       <div class="tl-head">
         <strong>Timeline</strong>
-        <span class="dim" id="tlHint">click = select &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
+        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
         <span class="spacer"></span>
         <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
         <button class="mini" id="zoomIn" title="Zoom in">+</button>
@@ -76,7 +76,10 @@
         <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
         <span id="tlStatus" class="dim small"></span>
       </div>
-      <canvas id="timeline" height="132"></canvas>
+      <div class="timeline-stage">
+        <div id="trackLabels" class="track-labels" aria-label="Timeline track labels"></div>
+        <canvas id="timeline" height="132"></canvas>
+      </div>
       <div class="legend">
         <span><i class="sw" style="background:#2b4f6b"></i>video clip</span>
         <span><i class="sw silence"></i>silence</span>
@@ -91,25 +94,25 @@
         <button class="chip on" data-kind="caption">caption</button>
         <button class="chip on" data-kind="silence">silence</button>
         <button class="chip on" data-kind="other">other</button>
-        <label class="mini-label">min duration
+        <label class="mini-label">min section
           <input id="minDur" type="number" value="0.4" min="0" step="0.1" style="width:64px"> s
         </label>
         <input id="searchBox" type="search" placeholder="search caption text&hellip;">
         <span class="spacer"></span>
         <button class="mini" id="selVisible">select visible</button>
         <button class="mini" id="selNone">clear</button>
-        <button class="mini" id="selRemove" title="Remove the selected clips and close the gaps">remove selected</button>
+        <button class="mini" id="selRemove" title="Remove selected timeline items and close the gaps">remove selected</button>
         <button class="mini" id="selInvert">invert</button>
         <button class="mini" id="selAllSilence">all silence</button>
         <button class="mini" id="selAllCaptions">all captions</button>
       </div>
-      <div class="dim small selection-hint">Tip: click a row to seek and select its clip &middot; tick boxes to select several &middot; Shift-click ticks a range &middot; click the text to edit it &middot; "remove selected" closes the gaps (undo with Ctrl+Z).</div>
+      <div class="dim small selection-hint">V1 sections and caption cues from every lane (T1, T2, &hellip;) are listed here. The list follows the playhead and blue edges mark active items. Click a non-text cell to select and seek; tick boxes, Shift-click, or hold-drag to select several; click text to edit it.</div>
       <div class="list-scroll">
         <table id="secTable">
-          <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
+          <thead><tr><th></th><th>track</th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
           <tbody></tbody>
         </table>
-        <div id="listEmpty" class="empty">No sections yet &mdash; open a video and run detection.</div>
+        <div id="listEmpty" class="empty">No timeline items yet &mdash; open a video or add captions.</div>
       </div>
     </div>
   </div>
@@ -326,8 +329,9 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=1"></script>
-<script src="/static/timeline.js?v=1"></script>
-<script src="/static/app.js?v=15"></script>
+<script src="/static/timeline-model.js?v=2"></script>
+<script src="/static/timeline.js?v=5"></script>
+<script src="/static/app.js?v=17"></script>
+<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a47cceb0df0433d1',t:'MTc5MTU0Mjg0OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4bc70e2c01a94c73b74392e4234840661791215815920" integrity="sha512-L0ha0OXavK/8okipN9F8BtP84dg9DUhPERbBXzwI6dgTA55d2+yweo3pn5CSFYs45/r8md2+xvUPtTdvTNRfjA==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f","spa":2}' crossorigin="anonymous"></script>
 </body>
 </html>

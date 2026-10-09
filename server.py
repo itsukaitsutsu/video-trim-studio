@@ -48,6 +48,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 WORK_DIR = BASE_DIR / "work"
 WORK_DIR.mkdir(exist_ok=True)
+LAST_PROJECT_FILE = WORK_DIR / "last_project.txt"
 
 app = FastAPI(title="Video Trim Studio", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -134,6 +135,25 @@ def need_project() -> Project:
     if PROJECT is None:
         raise HTTPException(409, "No video is open yet.")
     return PROJECT
+
+
+def remembered_project_path() -> str | None:
+    """Return the video path last opened successfully, if one was saved."""
+    try:
+        path = LAST_PROJECT_FILE.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return os.path.abspath(os.path.expanduser(path)) if path else None
+
+
+def remember_project_path(path: str) -> None:
+    """Persist the last opened video across local server restarts."""
+    try:
+        LAST_PROJECT_FILE.write_text(os.path.abspath(path), encoding="utf-8")
+    except OSError as exc:
+        # Opening the video should still succeed if this small preference file
+        # cannot be written (for example, a read-only installation folder).
+        print(f"Warning: could not remember last video: {exc}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +374,7 @@ def open_project(info: dict, uploaded: bool = False) -> Project:
         proj = Project(info["path"], info, source_match_profile(info))
         proj.uploaded = uploaded
         PROJECT = proj
+    remember_project_path(proj.path)
     if proj.preview_mode == "proxy":
         proj.start_preview()
     return proj
@@ -1015,6 +1036,12 @@ def job(job_id: str):
 def project():
     proj = need_project()
     return proj.to_dict()
+
+
+@app.get("/api/last-project")
+def last_project():
+    """Return the last successfully opened video path for startup restore."""
+    return {"path": remembered_project_path()}
 
 
 def main():
