@@ -32,6 +32,13 @@ pytestmark = pytest.mark.skipif(
 # Catalogs and dependency reporting
 # ---------------------------------------------------------------------------
 
+def _frontend_js(root: str) -> str:
+    """All browser scripts: the timeline editor lives in its own files now."""
+    names = ("timeline-model.js", "timeline.js", "app.js")
+    return "\n".join(open(os.path.join(root, "static", n), encoding="utf-8").read()
+                     for n in names)
+
+
 def test_language_catalog_covers_the_common_codes():
     langs = cap_mod.LANGUAGES
     assert len(langs) > 90
@@ -426,7 +433,7 @@ def test_caption_dom_ids_exist_in_the_html():
     """Every element id the frontend looks up must exist in index.html."""
     import re
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     html_ids = set(re.findall(r'id="([^"]+)"', html))
     js_ids = set(re.findall(r'\$\("([A-Za-z0-9_]+)"\)', js))
@@ -437,7 +444,7 @@ def test_caption_dom_ids_exist_in_the_html():
 def test_caption_card_is_wired_end_to_end():
     """The UI entry points for the feature are present in both files."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ('/api/caption', 'capBtn', 'capUse', 'capCancel', 'fillCaptionCard'):
         assert needle in js, f"{needle} missing from app.js"
@@ -650,7 +657,7 @@ def test_sidecar_is_reported_when_a_video_is_opened(client, tmp_path):
 
 def test_caption_editor_is_wired_between_html_and_js():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ('capEditor', 'capSave', 'capAddCue', 'capRevert',
                    'capNewBtn', 'capOpenSrtBtn', 'capCueBody', '/cues'):
@@ -731,12 +738,13 @@ def test_subtitle_edit_rejects_bad_targets(client, tmp_path):
 
 def test_inline_edit_is_wired_between_html_and_js():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
-    for needle in ('/api/subtitles/edit', 'startCaptionEdit', 'commitCaptionEdit',
-                   'dblclick', 'txt-edit'):
-        assert needle in js, f"{needle} missing from app.js"
-    assert "click a caption text to edit it" in html
+    # The list's text cell edits the section and the caption it produced.
+    for needle in ('setClipText', 'txt-edit', 'contenteditable', 'dblclick',
+                   'startOverlayCaptionEdit'):
+        assert needle in js, f"{needle} missing from the front-end scripts"
+    assert "click the text to edit it" in html
     # Focusing the player on row click yanked the page up to the video, which
     # is what made inline editing unusable; keep it gone.
     assert "player.focus" not in js
@@ -745,8 +753,9 @@ def test_inline_edit_is_wired_between_html_and_js():
     # shows the previous frame and the caption is not visible.
     assert "seekIntoCue" in js
     assert "start - 0.1" not in js
-    # The list editor live-syncs the preview box while typing.
-    assert "syncPreview" in js and 'dataset.raw = input.value' in js
+    # The list's text cell commits on blur/Enter through the timeline model,
+    # which also renames the caption that carries the same text.
+    assert "focusout" in js and "setClipText" in js
     # The preview box itself is editable: dblclick opens an on-video editor
     # that commits through the same path as the list editor.
     for needle in ("startOverlayCaptionEdit", "CAP_EDITING", "cap-edit"):
@@ -897,7 +906,7 @@ def test_export_caption_validation(client, tmp_path):
 
 def test_export_caption_controls_are_wired():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ("xCaptions", "caption_mode", "subtitles_path",
                    "updateCaptionExportInfo", "job.captions"):
@@ -984,7 +993,7 @@ def test_export_burn_without_style_keeps_plain_srt(client, tmp_path):
 
 def test_caption_overlay_is_wired_between_html_and_js():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ("CAPPOS", "capOverlay", "capBox", "bindCaptionOverlay",
                    "caption_style", "videoContentRect", "guideV", "SNAP_X"):
@@ -1037,7 +1046,7 @@ def test_uploaded_subtitles_without_extension_get_srt(client):
 
 def test_upload_handler_points_the_path_at_the_saved_file():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     assert 'data.saved_path' in js                    # path filled from the upload
     assert '$("dSubPath").value = "";' not in js.split("dSubFile", 1)[1].split("};", 1)[0]
     assert "app.js?v=15" in open(os.path.join(root, "static", "index.html"),
@@ -1100,7 +1109,7 @@ def test_export_burn_accepts_alignment_and_box_width(client, tmp_path):
 
 def test_alignment_and_resize_controls_are_wired():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
+    js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ("wrapText", "CHAR_FACTOR", "box_w", "capAlign", "syncAlignButtons",
                    "bindCaptionResize", "justify", "renderCaptionLines"):
@@ -1165,11 +1174,15 @@ def test_captions_update_stacks_two_cues_and_rewrites_srt(client, tmp_path):
     res = client.post("/api/captions/update", json={"cues": [bottom, top]})
     assert res.status_code == 200, res.text
     body = res.json()
-    assert [c["id"] for c in body["cues"]] == [top["id"], "bottom1"]  # sorted
+    # Both cues start and end together, so the id breaks the tie (sort key:
+    # start, end, id). The ids are random, so compare with the sorted order.
+    assert [c["id"] for c in body["cues"]] == sorted([top["id"], "bottom1"])
     # sidecar rewritten with both cues
     import vts.detect as dmod
     on_disk = dmod.parse_subtitles(srt.read_text(encoding="utf-8"))
-    assert [c["text"] for c in on_disk] == ["JUDUL", "subtitle"]
+    # Same tie-break as the cue order: the random id decides the order.
+    expected = [t for _, t in sorted([(top["id"], "JUDUL"), ("bottom1", "subtitle")])]
+    assert [c["text"] for c in on_disk] == expected
     # sections see the caption range
     assert any(sec["kind"] == "caption" for sec in body["sections"])
 

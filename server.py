@@ -34,6 +34,8 @@ from vts import captionmap as captionmap_mod
 from vts import captions as captions_mod    # noqa: E402
 from vts import detect as detect_mod          # noqa: E402
 from vts import export as export_mod         # noqa: E402
+from vts import timeline as timeline_mod     # noqa: E402
+from vts import edl as edl_mod                 # noqa: E402
 from vts import media as media_mod           # noqa: E402
 from vts import preview as preview_mod       # noqa: E402
 from vts import transcribe as caption_mod    # noqa: E402
@@ -66,6 +68,8 @@ class Project:
         # detect run seeds it from the subtitle file.
         self.captions: list[dict] = []
         self.caption_path: str | None = None
+        # Edit list of the single video (clips + caption lanes); None = untouched.
+        self.timeline: dict | None = None
         self.detect_min_section_ms = 120
         self.waveform: list[int] = []
         self.thumbs: dict = {}
@@ -708,6 +712,110 @@ def export(req: ExportRequest):
         job["captions"] = {k: cap_info[k] for k in
                            ("mode", "source", "srt", "cues_in", "cues_out",
                             "positioned")}
+    return job
+
+
+class TimelinePut(BaseModel):
+    clips: list[dict] = []
+    caps: list[dict] = []
+    lanes: int = 1
+
+
+class TimelineExportRequest(BaseModel):
+    output: str | None = None
+    opts: dict | None = None
+    caption_mode: str | None = None      # none | srt | burn | both
+    caption_style: dict | None = None
+    timeline: dict | None = None         # defaults to the saved timeline
+
+
+@app.get("/api/timeline")
+def get_timeline():
+    proj = need_project()
+    return {"timeline": proj.timeline, "duration": float(proj.info["duration"])}
+
+
+@app.put("/api/timeline")
+def put_timeline(req: TimelinePut):
+    proj = need_project()
+    try:
+        proj.timeline = timeline_mod.normalize(req.model_dump(), float(proj.info["duration"]))
+    except timeline_mod.TimelineError as exc:
+        raise HTTPException(400, str(exc))
+    return {"timeline": proj.timeline}
+
+
+@app.post("/api/export/timeline")
+def export_timeline(req: TimelineExportRequest):
+    """Export the edit list: clips in timeline order, black gaps, editor captions."""
+    proj = need_project()
+    duration = float(proj.info["duration"])
+    raw = req.timeline if req.timeline is not None else proj.timeline
+    if raw is None:
+        raise HTTPException(400, "There is no timeline to export yet. Open a video first.")
+    try:
+        tl = timeline_mod.normalize(raw, duration)
+    except timeline_mod.TimelineError as exc:
+        raise HTTPException(400, str(exc))
+    if not tl["clips"]:
+        raise HTTPException(400, "The timeline has no video clips left to export.")
+
+    opts = {**proj.profile, **(req.opts or {})}
+    opts.setdefault("mode", "reencode")
+    output = req.output or export_mod.default_output_path(proj.path)
+    output = os.path.abspath(os.path.expanduser(output))
+    if os.path.abspath(output) == os.path.abspath(proj.path):
+        raise HTTPException(400, "Output must be a different file from the source.")
+    ext = os.path.splitext(output)[1].lower()
+    if ext not in VIDEO_EXTS:
+        raise HTTPException(400, f"Unsupported output container '{ext}'. "
+                                 f"Use one of: {', '.join(sorted(VIDEO_EXTS))}")
+    source_ext = proj.info.get("ext", "").lower()
+    if ext != source_ext:
+        raise HTTPException(400, f"Output container must match the source ({source_ext}) "
+                                 "for this source-matching profile. Keep the same extension.")
+    if opts.get("mode") == "reencode":
+        enc = opts.get("codec")
+        if enc and enc not in available_encoders():
+            raise HTTPException(400, f"Encoder '{enc}' is not available in this "
+                                     f"ffmpeg build. Available GPU encoders: "
+                                     f"{encoder_candidates(proj.info['video']['codec'])}")
+
+    caption_mode = (req.caption_mode or "none").lower()
+    if caption_mode not in ("none", "srt", "burn", "both"):
+        raise HTTPException(400, "caption_mode must be none, srt, burn or both.")
+    cap_info = None
+    if caption_mode != "none":
+        cues = timeline_mod.export_cues(tl, timeline_mod.video_length(tl))
+        srt_out = os.path.splitext(output)[0] + ".srt"
+        caption_mod.write_srt(cues, srt_out)
+        burned = caption_mode in ("burn", "both") and bool(cues)
+        ass_path = None
+        if burned:
+            style = req.caption_style or {}
+            if style and (style.get("x") is not None or style.get("y") is not None
+                          or style.get("size_pct") is not None):
+                # Bake the box position the user dragged in the preview.
+                dw, dh = media_mod.display_size(proj.info.get("video") or {})
+                fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
+                os.close(fd)
+                captionmap_mod.write_ass(
+                    cues, ass_path, dw, dh,
+                    style={k: style[k] for k in ("x", "y", "size_pct", "align", "box_w")
+                           if k in style})
+            opts["burn_srt"] = ass_path or srt_out
+            opts["_burn_ass_cleanup"] = ass_path
+        cap_info = {"mode": caption_mode, "srt": srt_out, "cues": len(cues),
+                    "burned": burned, "positioned": bool(ass_path)}
+
+    try:
+        job = edl_mod.export_timeline(proj.path, proj.info, tl["clips"], opts, output)
+    except export_mod.JobError as exc:
+        raise HTTPException(400, str(exc))
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(500, str(exc))
+    if cap_info:
+        job["captions"] = cap_info
     return job
 
 

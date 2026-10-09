@@ -1,17 +1,16 @@
 # Video Trim Studio
 
-A small, local-first video editor built around the FFmpeg silence detection and subtitle workflow from the supplied scripts. It detects **silence** with FFmpeg and reads speech-caption timing from an **SRT or WebVTT file**. You review the labelled timeline, tick sections to remove, preview the cut, then export.
+A small, local-first video editor built around the FFmpeg silence detection and subtitle workflow from the supplied scripts. It detects **silence** with FFmpeg and reads speech-caption timing from an **SRT or WebVTT file**. You review the labelled timeline, edit it like a simple video editor (cut, copy, paste, move, trim, undo), preview it, then export.
 
 > **Your choice in this version:** captions can come from an existing `.srt` / `.vtt`, **or** be generated in-app from the video's audio with faster-whisper (the **Auto-caption** card, plus a matching `auto_caption.py` CLI). Silence detection is built in.
 
 ## What it does
 
-- Local web UI with video preview, seekable timeline, filmstrip, waveform, section list, search, and cut-preview playback.
+- Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes), filmstrip, waveform, clip list, search, and timeline playback.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
-- Imports `.srt` / `.vtt` by file path or upload. Caption text and timestamps appear in the section list. **Click a caption text in the list to edit it in place** (double-click works too) — Enter or leaving the field saves it back into the subtitle file, Escape cancels. Clicking the other columns still seeks the preview, without scrolling the page.
+- Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a section's text in the clip list (the matching caption follows).
 - **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
-- Selects sections by checkbox, click-and-drag down the checkbox column to paint
-  a range, timeline click/drag, type, search, or bulk-select controls.
+- Selects clips by click, Shift/Ctrl-click, rubber band, or the clip list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
@@ -67,17 +66,21 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
 
 ## Typical workflow
 
-1. **Open a video**. Check the media details beside the path.
-2. *(Optional)* In **Auto-caption**, press **Transcribe to captions** to generate `.srt`/`.vtt`/`.json` from the audio, then **Use these captions → Detect sections** to run detection with them. See [Auto-caption](#auto-caption-faster-whisper) for the options. New to it? Click **Speech demo** in the top bar — that clip contains a spoken sentence, whereas the main demo has only tones and silences.
-3. In **Detect sections**, keep **Detect silence** enabled. Use the supplied script's `.srt`/`.vtt` in **Subtitle file**, or upload it. Click **Detect sections**.
-   - `Threshold (dB)` controls the silence noise floor. `-45 dB` is a useful starting point. A *higher* value such as `-40 dB` detects more quiet audio as silence; a *lower* value such as `-50 dB` is stricter.
-   - `Min silence` ignores short pauses. Start at 800 ms.
-4. Review the section list/timeline. Red blocks are selected for deletion. Click or drag on the section row, tick checkboxes, filter by kind/search, or use bulk controls. **Selecting a caption section deletes its time range from the video**; it does not just hide the subtitle.
-5. Turn on **Skip deleted parts while playing** to preview the cut.
-6. Confirm the output path and export settings. Keep the output extension the same as the source (the app enforces this matching profile). Use **Re-encode (frame accurate)** for normal editing, then click **Export clean cut**.
-7. *(Optional)* In **Captions** (export card), choose how the trimmed video keeps its subtitles: write a **remapped `.srt`** next to the export, **burn** them into the picture, or both. The cues are shifted/split/dropped through the exact cuts you selected, so they stay in sync with the trimmed audio; a `.vtt`/`.srt` edited in the list is what gets remapped. Burning re-encodes, even in stream-copy mode.
-8. *(Optional, burn only)* **Position the captions CapCut-style.** When burn is armed, a live caption box appears over the preview showing the current cue. **Drag it** anywhere — blue guide lines appear and it snaps to the frame's thirds and centre. **Drag the box's left/right edge** to resize it (the text re-wraps inside), pick the text **alignment** (L/C/R/J buttons), tune **size** with the slider, or **reset** to the default bottom-centre. The export burns the text with exactly that layout (a positioned, word-wrapped ASS generated from it), so what you see in the preview is what you get.
-7. The export is written to the chosen path. The source is never overwritten.
+1. **Open a video.** Check the media details beside the path.
+2. *(Optional)* Transcribe with **Auto-caption** (below), or load an `.srt` / `.vtt` in **Detect sections → Subtitle file**.
+3. **Detect sections.** Silence and caption sections become clips on the **V1** row, and the captions go onto the caption lanes. Detection replaces the current timeline, and Ctrl+Z brings the old one back. The threshold and minimum-silence controls work as before.
+4. **Edit the timeline.** All times are timeline seconds, and the preview plays the timeline.
+   - **Select:** click a clip or caption. Shift/Ctrl-click adds or removes one. Drag on empty space to rubber-band select. Ctrl+A selects all, and Esc clears.
+   - **Cut:** **Ctrl+K** (or **split**) splits the selection, or everything, at the playhead. Drag a clip edge to trim it. The edge stops at the neighbouring clips and at the start or end of the source.
+   - **Move:** drag a clip or caption. A clip overwrites whatever it lands on, and a caption moves to a free lane if its lane is taken. Alt-drag copies instead.
+   - **Remove:** **Delete** (or **delete**) leaves a gap. **Shift+Delete** (or **ripple delete**) closes the gap on every track, and the captions follow the picture.
+   - **Copy / cut / paste:** Ctrl+C, Ctrl+X, and Ctrl+V paste at the playhead, overwriting. Ctrl+Shift+V inserts and pushes the later items along.
+   - **Captions:** **+ caption** adds one at the playhead, and **+ lane** adds a caption lane to stack captions. Double-click a caption to edit its text. On the preview (burn mode), the caption box still drags and resizes as before.
+   - **Undo / redo:** Ctrl+Z, Ctrl+Shift+Z, or Ctrl+Y. The edit list is saved while the app runs, so a page refresh keeps it.
+   - **Playback:** Space plays the timeline. Left and Right step one frame, and Shift+arrows move one second. Gaps show black.
+   - **Clip list:** it selects the same clips, with tick boxes, shift-click ranges, the filters, and **remove selected** (which closes the gaps).
+5. **Export.** Set the output path and profile, then click **Export clean cut**. Clips are written in timeline order, gaps become black with silence, and captions use the timeline times. The source is never overwritten.
+6. *(Optional)* In the export card, write the captions as an `.srt` next to the export, burn them into the picture, or both. Burning uses the caption box layout you set on the preview.
 
 ## Auto-caption (faster-whisper)
 
@@ -218,24 +221,26 @@ whisper.cpp's Vulkan backend instead.
 
 ### Caption timeline (stacking, tracks, per-caption style)
 
-The timeline panel draws every caption as a block on a track row below the
-waveform (like CapCut / Kdenlive):
+The timeline draws the video clips on the V1 row, with the captions on caption
+lanes below them (like CapCut / Kdenlive):
 
 - **click** a block to select it, **drag** to move it in time, drag its
-  **edges** to trim, drag **up/down** to put it on another track. Overlapping
-  blocks on different tracks = several captions on one frame.
-- **+ caption** adds a 2 s caption at the playhead, **split** cuts the selected
-  block at the playhead, **del** (or the Delete key) removes it. **snap**
-  sticks drags to the playhead and neighbouring edges.
+  **edges** to trim, drag **up/down** to put it on another lane (a free lane is
+  used when the lane is taken). Overlapping blocks on different lanes = several
+  captions on one frame.
+- **+ caption** adds a 2 s caption at the playhead, **split** (Ctrl+K) cuts the
+  selection at the playhead, **delete** (Delete) removes it and leaves a gap, and
+  **ripple delete** (Shift+Delete) also closes the gap. **snap** sticks drags to
+  the playhead and neighbouring edges.
 - Every caption keeps its **own position/size/alignment**: select it and the
   drag/resize/align/font tools (and the draggable preview box) edit just that
   caption. The preview shows all captions on the current frame at once, in
   their own styles, and the export burns exactly that (one positioned ASS
   Dialogue per caption - overlaps included).
-- Everything stays in sync: the block, the preview boxes, the section list
-  rows, the subtitle file and the burn all update together after each edit.
-- Ctrl+wheel zooms; the usual click/drag range-select for deletions still
-  works on the rows above the caption tracks.
+- The block, the preview boxes, the clip list and the burn all update together
+  after each edit. Timeline edits are saved with the project, not written back
+  to the subtitle file (see Captions).
+- Ctrl+wheel zooms; drag on empty space to rubber-band select clips and captions.
 
 ### Editable captions
 
@@ -295,9 +300,11 @@ The source's original stream/container may contain features that need manual adj
 
 ## Captions
 
-Captions come from either an existing `.srt`/`.vtt` (select it in **Subtitle file**, or upload it) or from **Auto-caption**, which transcribes the audio with faster-whisper and writes the caption files for you. Word-level SRT cues can yield very small sections; the minimum-duration and minimum-section controls help keep the timeline manageable.
+Captions are items on the timeline. Each caption lane (T1, T2, …) holds one row of non-overlapping captions, so stacked lanes show overlapping captions. Captions follow the video when clips are removed with ripple delete.
 
-The generated `.srt` describes the **source** timeline. If you then cut parts out, the cue times no longer line up with the exported file - regenerate captions for the trimmed result, or keep the captions as a sidecar for the original.
+- **Where they come from:** Detect sections with *Use captions* ticked, or **Use these captions → Detect sections**, places the cues on the timeline. A cue in removed time is dropped, and a cue that crosses a cut is split.
+- **Where edits go:** timeline edits (text, timing, lanes, style) are saved with the project. They do **not** rewrite the subtitle file. The caption card's **Save captions** still rewrites the transcription's `.srt` / `.vtt` / `.json` files from its own cue list.
+- **Export:** the `.srt` uses the exact timeline times of the exported video. Burning re-encodes, even in stream-copy mode.
 
 ## Browsing for a file
 
@@ -355,35 +362,49 @@ Open <http://127.0.0.1:8765>. AMD AMF is primarily available with an appropriate
 
 ## Tests
 
-The included tests cover SRT/VTT parsing, silence detection, timeline labels, export planning, source-profile arguments, real FFmpeg re-encoding/stream-copy, A/V timestamp and sync-safe fallback regressions, HTTP endpoints, media seeking, waveform and thumbnails, plus the auto-caption engine (writers, job lifecycle, burn-in, and a real speech-to-captions transcription when faster-whisper, a `flite`-capable ffmpeg and the model download are all available; otherwise that test skips itself).
-
 ```bash
 python -m pip install -r requirements-dev.txt
-python -m pytest tests/ -q
+python -m pytest tests/ -q                 # API, export, caption, and timeline tests
+node --test tests/js/                      # timeline editing rules (Node 18+)
 ```
 
-The tests require FFmpeg and FFprobe on `PATH` for the integration cases.
+The browser test drives the editor with a real mouse and keyboard. It needs Playwright and Chromium:
+
+```bash
+python -m pip install playwright
+python -m playwright install chromium      # on Linux also: python -m playwright install-deps chromium
+python -m pytest tests/test_timeline_ui.py -q
+```
+
+The integration tests need FFmpeg and FFprobe on `PATH`. The timeline export tests check the real output: repeated and reordered clips, black gaps, stream copy, and burned captions.
 
 ## Project structure
 
 ```text
-server.py             FastAPI local server
-auto_caption.py       CLI wrapper around the auto-caption engine
-vts/                  FFprobe, detection, timeline assets, preview proxy, FFmpeg export,
-                      faster-whisper auto-caption
-static/               Browser UI (plain HTML/CSS/JS; no build step)
-demo/                 18-second sample video + captions, and a short
-                      spoken clip for the Auto-caption card
-setup.bat, run.bat    Windows install/run helpers
-requirements*.txt     Runtime and test Python packages
-MODEL-DOWNLOAD.md     Manual model download links (faster-whisper + GGML)
-tests/                Unit, integration, and API tests
+server.py                  FastAPI local server
+auto_caption.py            CLI wrapper around the auto-caption engine
+vts/                       FFprobe, detection, timeline validation (timeline.py),
+                           timeline export (edl.py), FFmpeg export, preview proxy,
+                           faster-whisper auto-caption
+static/timeline-model.js   pure editing rules: split, move, trim, ripple, paste, undo data
+static/timeline.js         timeline canvas, mouse and keyboard, playback, clip list,
+                           detection and export glue
+static/app.js              open and browse, caption card, caption box, export options
+static/                    index.html and style.css (plain HTML/CSS/JS; no build step)
+demo/                      18-second sample video + captions, and a short spoken clip
+setup.bat, run.bat         Windows install/run helpers
+requirements*.txt          Runtime and test Python packages
+MODEL-DOWNLOAD.md          Manual model download links (faster-whisper + GGML)
+tests/                     Unit, integration, API, browser, and timeline tests
+tests/js/                  Node tests for the timeline editing rules
 ```
 
 ## Notes / limitations
 
-- This is a focused cut editor, not a full nonlinear editor: no transitions, title cards, multitrack mixing, or visual effects.
-- The waveform and filmstrip are generated locally when a video is opened; the first load takes a moment.
-- The local app is designed for one user and one open project at a time.
-- Export operates on the primary video stream and first audio stream. Extra audio tracks, embedded subtitle streams, and data streams are not currently carried into the clean output.
-- The code is tested in a Linux FFmpeg environment using CPU H.264. AMF availability and performance depend on the FFmpeg build/AMD driver installed on your Windows PC.
+- **One video per project.** There is no B-roll, no second video or audio file, and no picture-in-picture. Stacking applies to caption lanes; the picture is a single track.
+- **Audio belongs to its video clip.** There are no separate audio tracks, per-clip volume, or keyframes. The only fade is the short one at each cut.
+- **No transitions, titles** (beyond captions), or visual effects.
+- **Gaps** between clips export as black picture and silence. Captions after the end of the last clip are dropped at export.
+- **The edit list lives in the running server.** It is restored on a page refresh, but opening another video starts a new timeline and a server restart clears it, so export a finished cut before stopping the app.
+- **The preview** plays the timeline with the browser's video player, so it can hitch at cuts and gaps. The exported file is the reference.
+- Export still uses the primary video stream and the first audio stream.

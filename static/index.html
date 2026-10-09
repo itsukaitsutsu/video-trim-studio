@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=15">
+<link rel="stylesheet" href="/static/style.css?v=16">
 </head>
 <body>
 <header>
@@ -12,7 +12,7 @@
     <span class="logo">&#9986;</span>
     <div>
       <h1>Video Trim Studio</h1>
-      <p class="sub">Detect caption &amp; silence sections &rarr; tick what to remove &rarr; export matching the source</p>
+      <p class="sub">Detect sections &rarr; edit the timeline (split, move, copy, delete, undo) &rarr; export the same format as the source</p>
     </div>
   </div>
   <div class="env" id="env">checking ffmpeg&hellip;</div>
@@ -31,7 +31,8 @@
 <main>
   <div class="col-main">
     <div class="player-wrap">
-      <video id="player" controls preload="metadata"></video>
+      <video id="player" preload="metadata" disableremoteplayback></video>
+      <div id="gapShade" hidden></div>
       <div id="capOverlay" hidden>
         <div id="guideV" class="cap-guide v" hidden></div>
         <div id="guideH" class="cap-guide h" hidden></div>
@@ -43,7 +44,10 @@
       </div>
       <div id="previewInfo" class="dim small" hidden></div>
       <div class="player-tools">
-        <label class="chk"><input type="checkbox" id="cutPreview" checked> Skip deleted parts while playing (cut preview)</label>
+        <button id="frameBack" class="mini" title="Previous frame (Left arrow)">&#9664; frame</button>
+        <button id="playBtn" class="mini primary-mini" title="Play / pause (Space)">&#9654; play</button>
+        <button id="frameFwd" class="mini" title="Next frame (Right arrow)">frame &#9654;</button>
+        <span id="timecode" style="font-family:ui-monospace,monospace"></span>
         <span class="dim small" title="Press Space to play or pause when focus is not in a form control">Space: play/pause</span>
         <span id="playInfo" class="dim"></span>
       </div>
@@ -52,24 +56,33 @@
     <div class="timeline-card">
       <div class="tl-head">
         <strong>Timeline</strong>
-        <span class="dim" id="tlHint">caption blocks: click = select &middot; drag = move &middot; edges = trim &middot; up/down = track &middot; dblclick = edit text &middot; Ctrl+wheel = zoom</span>
+        <span class="dim" id="tlHint">click = select &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
         <span class="spacer"></span>
-        <button class="mini" id="zoomOut">&minus;</button>
-        <button class="mini" id="zoomIn">+</button>
-        <button class="mini" id="zoomFit">fit</button>
+        <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
+        <button class="mini" id="zoomIn" title="Zoom in">+</button>
+        <button class="mini" id="zoomFit" title="Show everything">fit</button>
+        <span class="spacer"></span>
+        <button class="mini" id="tlUndo" title="Undo (Ctrl+Z)">undo</button>
+        <button class="mini" id="tlRedo" title="Redo (Ctrl+Shift+Z)">redo</button>
+        <button class="mini" id="tlCopy" title="Copy the selection (Ctrl+C)">copy</button>
+        <button class="mini" id="tlCut" title="Cut: copy, then remove and leave a gap (Ctrl+X)">cut</button>
+        <button class="mini" id="tlPaste" title="Paste at the playhead, overwriting (Ctrl+V; Ctrl+Shift+V inserts)">paste</button>
+        <button class="mini" id="capSplit" title="Split the selection, or everything, at the playhead (Ctrl+K)">split</button>
+        <button class="mini" id="capDel" title="Remove the selection and leave a gap (Delete)">delete</button>
+        <button class="mini" id="tlRipple" title="Remove the selection and close the gap (Shift+Delete)">ripple delete</button>
         <span class="spacer"></span>
         <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
-        <button class="mini" id="capSplit" title="Split the selected caption at the playhead">split</button>
-        <button class="mini" id="capDel" title="Delete the selected caption (Del)">del</button>
-        <label class="chk" title="Snap drag/trim to the playhead and other captions' edges"><input type="checkbox" id="tlSnap" checked> snap</label>
+        <button class="mini" id="tlLane" title="Add a caption lane to stack captions">+ lane</button>
+        <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
+        <span id="tlStatus" class="dim small"></span>
       </div>
       <canvas id="timeline" height="132"></canvas>
       <div class="legend">
-        <span><i class="sw caption"></i>caption</span>
+        <span><i class="sw" style="background:#2b4f6b"></i>video clip</span>
         <span><i class="sw silence"></i>silence</span>
-        <span><i class="sw other"></i>other audio</span>
-        <span><i class="sw deleted"></i>selected for deletion</span>
-        <span><i class="sw" style="background:#274b8f"></i>caption tracks (stack = several on one frame)</span>
+        <span><i class="sw caption"></i>caption section</span>
+        <span><i class="sw" style="background:#274b8f"></i>caption lanes (stack = several on one frame)</span>
+        <span class="dim small">gaps play and export as black</span>
       </div>
     </div>
 
@@ -85,14 +98,15 @@
         <span class="spacer"></span>
         <button class="mini" id="selVisible">select visible</button>
         <button class="mini" id="selNone">clear</button>
+        <button class="mini" id="selRemove" title="Remove the selected clips and close the gaps">remove selected</button>
         <button class="mini" id="selInvert">invert</button>
         <button class="mini" id="selAllSilence">all silence</button>
         <button class="mini" id="selAllCaptions">all captions</button>
       </div>
-      <div class="dim small selection-hint">Tip: hold and drag down the checkbox column to select or clear a run of sections &middot; click a caption text to edit it (Enter saves, Esc cancels, saved back to the subtitle file).</div>
+      <div class="dim small selection-hint">Tip: click a row to seek and select its clip &middot; tick boxes to select several &middot; Shift-click ticks a range &middot; click the text to edit it &middot; "remove selected" closes the gaps (undo with Ctrl+Z).</div>
       <div class="list-scroll">
         <table id="secTable">
-          <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>caption text</th></tr></thead>
+          <thead><tr><th></th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
           <tbody></tbody>
         </table>
         <div id="listEmpty" class="empty">No sections yet &mdash; open a video and run detection.</div>
@@ -312,6 +326,8 @@
   </div>
 </div>
 
+<script src="/static/timeline-model.js?v=1"></script>
+<script src="/static/timeline.js?v=1"></script>
 <script src="/static/app.js?v=15"></script>
 </body>
 </html>

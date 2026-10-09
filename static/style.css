@@ -290,3 +290,19 @@ details.adv summary:hover { color: var(--text); }
   opacity: .92;
 }
 #secTable tr.capsel td { box-shadow: inset 0 0 0 1px #388bfd; }
+
+
+/* ---- timeline editor (single video) ---- */
+.player-wrap { position: relative; }
+#gapShade { position: absolute; inset: 0; background: #000; z-index: 1; }
+#gapShade[hidden] { display: none; }
+#capOverlay { z-index: 2; }
+#timeline { display: block; width: 100%; user-select: none; }
+#tlStatus { margin-left: 6px; min-width: 140px; }
+#timecode { font-size: 12px; color: #9aa7b7; margin-left: 8px; }
+.primary-mini { border-color: #2f6fd6; }
+
+/* timeline toolbar: hint on its own line, buttons never split their label */
+.tl-head { flex-wrap: wrap; row-gap: 6px; }
+.tl-head #tlHint { flex: 1 1 100%; white-space: normal; }
+.tl-head .mini, .tl-head .chk, .tl-head #tlStatus { white-space: nowrap; }
