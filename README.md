@@ -206,12 +206,36 @@ whisper.cpp's Vulkan backend instead.
 
 - Everything downstream is shared: same outputs (`.srt/.vtt/.json`), editable
   cues, burn-in and section detection.
+- The burned captions keep the preview's position/size/alignment, including
+  for rotated (portrait phone) footage: the burn is computed in the displayed
+  orientation, not the coded stream dimensions.
 - Model files are **not interchangeable**: whisper.cpp reads one GGML `.bin`
   per model (`work/whisper-models/`), faster-whisper reads a four-file
   CTranslate2 folder (`work/fw-models/<name>/`). You only need the files for
   the engine you actually use — no need to download a model twice.
 - The engine uses long-form CLI flags only, which are stable across
   whisper.cpp releases.
+
+### Caption timeline (stacking, tracks, per-caption style)
+
+The timeline panel draws every caption as a block on a track row below the
+waveform (like CapCut / Kdenlive):
+
+- **click** a block to select it, **drag** to move it in time, drag its
+  **edges** to trim, drag **up/down** to put it on another track. Overlapping
+  blocks on different tracks = several captions on one frame.
+- **+ caption** adds a 2 s caption at the playhead, **split** cuts the selected
+  block at the playhead, **del** (or the Delete key) removes it. **snap**
+  sticks drags to the playhead and neighbouring edges.
+- Every caption keeps its **own position/size/alignment**: select it and the
+  drag/resize/align/font tools (and the draggable preview box) edit just that
+  caption. The preview shows all captions on the current frame at once, in
+  their own styles, and the export burns exactly that (one positioned ASS
+  Dialogue per caption - overlaps included).
+- Everything stays in sync: the block, the preview boxes, the section list
+  rows, the subtitle file and the burn all update together after each edit.
+- Ctrl+wheel zooms; the usual click/drag range-select for deletions still
+  works on the rows above the caption tracks.
 
 ### Editable captions
 

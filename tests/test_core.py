@@ -220,3 +220,30 @@ def test_summary_counts():
     assert s["count"] == len(secs)
     assert set(s["seconds_by_kind"]) == {"caption", "silence", "other"}
     assert abs(sum(s["seconds_by_kind"].values()) - 20.0) < 0.01
+
+def test_display_size_swaps_for_rotation():
+    from vts import media
+    assert media.display_size({"width": 640, "height": 360, "rotation": 0}) == (640, 360)
+    assert media.display_size({"width": 640, "height": 360, "rotation": 90}) == (360, 640)
+    assert media.display_size({"width": 640, "height": 360, "rotation": 270}) == (360, 640)
+    assert media.display_size({"width": 640, "height": 360, "rotation": 180}) == (640, 360)
+    assert media.display_size({}) == (1280, 720)
+
+def test_caption_store_normalize_and_lane_pack():
+    from vts import captions
+    cues = captions.normalize([
+        {"start": 5, "end": 1, "text": "x"},            # backwards -> min len
+        {"id": "a", "start": -2, "end": 3, "text": "hi", "track": -3,
+         "style": {"x": 9, "y": -1, "size_pct": 99, "align": "bogus"}},
+        {"start": 1, "end": 2, "text": "  two   words "},
+    ], duration=10)
+    assert [c["id"] for c in cues] and cues[0]["id"] == "a"
+    assert cues[0]["start"] == 0.0 and cues[0]["end"] == 3.0
+    assert cues[0]["track"] == 0
+    st = cues[0]["style"]
+    assert st["x"] == 1.0 and st["y"] == 0.0 and st["size_pct"] == 25.0
+    assert st["align"] == "center"
+    assert cues[1]["text"] == "two words"
+    packed = captions.lane_pack([
+        {"start": 0, "end": 2}, {"start": 1, "end": 3}, {"start": 2.5, "end": 4}])
+    assert [c["track"] for c in packed] == [0, 1, 0]

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=14">
+<link rel="stylesheet" href="/static/style.css?v=15">
 </head>
 <body>
 <header>
@@ -52,11 +52,16 @@
     <div class="timeline-card">
       <div class="tl-head">
         <strong>Timeline</strong>
-        <span class="dim" id="tlHint">click a block to select &middot; drag to select a range &middot; Alt+drag to deselect &middot; Ctrl+wheel to zoom</span>
+        <span class="dim" id="tlHint">caption blocks: click = select &middot; drag = move &middot; edges = trim &middot; up/down = track &middot; dblclick = edit text &middot; Ctrl+wheel = zoom</span>
         <span class="spacer"></span>
         <button class="mini" id="zoomOut">&minus;</button>
         <button class="mini" id="zoomIn">+</button>
         <button class="mini" id="zoomFit">fit</button>
+        <span class="spacer"></span>
+        <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
+        <button class="mini" id="capSplit" title="Split the selected caption at the playhead">split</button>
+        <button class="mini" id="capDel" title="Delete the selected caption (Del)">del</button>
+        <label class="chk" title="Snap drag/trim to the playhead and other captions' edges"><input type="checkbox" id="tlSnap" checked> snap</label>
       </div>
       <canvas id="timeline" height="132"></canvas>
       <div class="legend">
@@ -64,6 +69,7 @@
         <span><i class="sw silence"></i>silence</span>
         <span><i class="sw other"></i>other audio</span>
         <span><i class="sw deleted"></i>selected for deletion</span>
+        <span><i class="sw" style="background:#274b8f"></i>caption tracks (stack = several on one frame)</span>
       </div>
     </div>
 
@@ -306,6 +312,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=14"></script>
+<script src="/static/app.js?v=15"></script>
 </body>
 </html>

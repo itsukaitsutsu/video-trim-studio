@@ -76,6 +76,21 @@ def make_thumbnails(path: str, out_dir: str, count: int = 60,
     return {"interval": interval, "count": len(files), "files": files}
 
 
+def display_size(video: dict) -> tuple:
+    """Pixel size of the picture as the viewer sees it.
+
+    `width`/`height` from ffprobe are the coded stream dimensions. When the
+    container carries a 90/270-degree display matrix the displayed picture is
+    transposed, so anything drawn over/into the frames (preview overlay, ASS
+    burn-in) must use the swapped size — otherwise positions computed in the
+    preview do not land where the export burns them."""
+    w = int(video.get("width") or 0) or 1280
+    h = int(video.get("height") or 0) or 720
+    if abs(int(video.get("rotation") or 0)) % 180 == 90:
+        w, h = h, w
+    return w, h
+
+
 def _duration(path: str) -> float:
     out = run([
         "ffprobe", "-v", "error", "-show_entries", "format=duration",

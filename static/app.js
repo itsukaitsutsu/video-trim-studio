@@ -20,6 +20,9 @@ const S = {
   subsText: null,
   hoverT: null,
   drag: null,
+  capCues: [],          // timeline store: {id,start,end,text,track,style}
+  capSel: null,         // selected caption id (position tools + overlay edit it)
+  capDrag: null,
 };
 
 const KIND_COLOR = { caption: "#1f6feb", silence: "#9e6a03", other: "#6e7681" };
@@ -121,6 +124,7 @@ function onProjectOpen(data) {
   S.project = data;
   S.duration = data.info.duration;
   S.sections = Array.isArray(data.sections) ? data.sections : [];
+  S.capCues = []; S.capSel = null;
   S.selected.clear();
   S.peaks = [];
   S.thumbs = null;
@@ -373,40 +377,86 @@ function videoContentRect() {
            y: vb.top - wb.top + (vb.height - h) / 2, w, h };
 }
 
+function capActiveCuesAt(t) {
+  return S.capCues.filter((c) => c.start <= t && t <= c.end);
+}
+
+function capActiveCue() {
+  const act = capActiveCuesAt($("player").currentTime || 0);
+  return act.find((c) => c.id === S.capSel) || act[0] || null;
+}
+
+// The position tools edit the selected on-screen caption; when no caption is
+// on screen they edit the document default (also used for brand-new cues).
+function capStyleTarget() {
+  const cue = capActiveCue();
+  return cue ? cue.style : CAPPOS;
+}
+
+function styleCapBoxEl(el, st, r) {
+  el.style.left = `${st.x * 100}%`;
+  el.style.top = `${st.y * 100}%`;
+  el.style.fontSize = `${Math.max(10, r.h * st.size_pct / 100)}px`;
+  el.style.width = `${Math.max(0.08, st.box_w) * r.w}px`;
+  el.style.textAlign = st.align === "justify" ? "left" : st.align;
+}
+
 function layoutCapOverlay() {
   const overlay = $("capOverlay");
   if (!overlay) return;
   const armed = ["burn", "both"].includes($("xCaptions").value) && !!S.project;
   overlay.hidden = !armed;
   if (!armed) return;
-  if ($("capBoxText").dataset.raw === undefined) $("capBoxText").dataset.raw =
-    captionTextAt($("player").currentTime || 0);
+  const t = $("player").currentTime || 0;
+  if (!S.capCues.length && $("capBoxText").dataset.raw === undefined)
+    $("capBoxText").dataset.raw = captionTextAt(t);
   const r = videoContentRect();
   overlay.style.left = `${r.x}px`;
   overlay.style.top = `${r.y}px`;
   overlay.style.width = `${r.w}px`;
   overlay.style.height = `${r.h}px`;
+
+  const active = S.capCues.length ? capActiveCue() : null;
+  const st = active ? active.style : CAPPOS;
+
+  // Static siblings: the OTHER captions sharing this frame, each rendered in
+  // its own stored style so stacked captions preview exactly as burned.
+  overlay.querySelectorAll(".cap-static").forEach((n) => n.remove());
+  if (S.capCues.length) {
+    for (const c of capActiveCuesAt(t)) {
+      if (c === active) continue;
+      const d = document.createElement("div");
+      d.className = "cap-static";
+      styleCapBoxEl(d, c.style, r);
+      d.textContent = c.text || "";
+      overlay.appendChild(d);
+    }
+  }
+
   const box = $("capBox");
-  box.style.left = `${CAPPOS.x * 100}%`;
-  box.style.top = `${CAPPOS.y * 100}%`;
-  const fontPx = Math.max(10, r.h * CAPPOS.size / 100);
-  box.style.fontSize = `${fontPx}px`;
-  box.style.width = `${Math.max(0.08, CAPPOS.box_w) * r.w}px`;
-  box.style.textAlign = CAPPOS.align === "justify" ? "left" : CAPPOS.align;
-  const maxChars = Math.floor((CAPPOS.box_w * r.w) / (fontPx * CHAR_FACTOR));
+  styleCapBoxEl(box, st, r);
+  if (active) $("capBoxText").dataset.raw = active.text || "";
+  const fontPx = Math.max(10, r.h * st.size_pct / 100);
+  const maxChars = Math.floor((st.box_w * r.w) / (fontPx * CHAR_FACTOR));
   renderCaptionLines(
-    wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars));
+    wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars),
+    st.align);
   $("capPosInfo").textContent =
-    `x ${Math.round(CAPPOS.x * 100)}% \u00b7 y ${Math.round(CAPPOS.y * 100)}%` +
-    ` \u00b7 w ${Math.round(CAPPOS.box_w * 100)}% \u00b7 ${CAPPOS.align}`;
+    `x ${Math.round(st.x * 100)}% \u00b7 y ${Math.round(st.y * 100)}%` +
+    ` \u00b7 w ${Math.round(st.box_w * 100)}% \u00b7 ${st.align}` +
+    (active ? ` \u00b7 "${(active.text || "").slice(0, 16)}"`
+            : (S.capCues.length ? " \u00b7 default (no caption on screen)" : ""));
+  if (document.activeElement !== $("capFontSize"))
+    $("capFontSize").value = String(st.size_pct);
+  syncAlignButtons();
 }
 
-function renderCaptionLines(lines) {
+function renderCaptionLines(lines, align) {
   // CSS text-align:justify is unreliable here (our lines end in forced
   // breaks), so justify is rendered the same way the burn does it: words
   // placed across the full box width, last line left-aligned.
   const container = $("capBoxText");
-  if (CAPPOS.align === "justify" && lines.length > 1) {
+  if (align === "justify" && lines.length > 1) {
     container.textContent = "";
     lines.forEach((ln, i) => {
       const row = document.createElement("div");
@@ -451,7 +501,7 @@ function captionTextAt(t) {
 
 function syncAlignButtons() {
   document.querySelectorAll(".capAlign").forEach((b) =>
-    b.classList.toggle("on", b.dataset.align === CAPPOS.align));
+    b.classList.toggle("on", b.dataset.align === capStyleTarget().align));
 }
 
 function bindCaptionResize() {
@@ -464,17 +514,19 @@ function bindCaptionResize() {
       handle.setPointerCapture(ev.pointerId);
       handle.classList.add("active");
       const overlay = $("capOverlay");
+      const st = capStyleTarget();
       const move = (e) => {
         const r = overlay.getBoundingClientRect();
         if (!r.width) return;
-        const cx = CAPPOS.x * r.width;
+        const cx = st.x * r.width;
         const half = Math.abs((e.clientX - r.left) - cx);
-        CAPPOS.box_w = Math.min(0.98, Math.max(0.12, (2 * half) / r.width));
+        st.box_w = Math.min(0.98, Math.max(0.12, (2 * half) / r.width));
         layoutCapOverlay();
       };
       const up = (e) => {
         handle.releasePointerCapture?.(e.pointerId);
         handle.classList.remove("active");
+        if (st !== CAPPOS) commitCaptions();
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", up);
         handle.removeEventListener("pointercancel", up);
@@ -495,6 +547,7 @@ function bindCaptionOverlay() {
     ev.preventDefault();
     box.setPointerCapture(ev.pointerId);
     box.classList.add("dragging");
+    const st = capStyleTarget();
     const move = (e) => {
       const r = overlay.getBoundingClientRect();
       if (!r.width || !r.height) return;
@@ -507,7 +560,7 @@ function bindCaptionOverlay() {
       $("guideH").hidden = sy === null;
       if (sx !== null) { $("guideV").style.left = `${sx * 100}%`; nx = sx; }
       if (sy !== null) { $("guideH").style.top = `${sy * 100}%`; ny = sy; }
-      CAPPOS.x = nx; CAPPOS.y = ny;
+      st.x = nx; st.y = ny;
       box.style.left = `${nx * 100}%`;
       box.style.top = `${ny * 100}%`;
       $("capPosInfo").textContent =
@@ -516,6 +569,7 @@ function bindCaptionOverlay() {
     const up = (e) => {
       box.releasePointerCapture?.(e.pointerId);
       box.classList.remove("dragging");
+      if (st !== CAPPOS) commitCaptions();
       $("guideV").hidden = true;
       $("guideH").hidden = true;
       box.removeEventListener("pointermove", move);
@@ -529,20 +583,28 @@ function bindCaptionOverlay() {
   });
 
   $("capFontSize").addEventListener("input", () => {
-    CAPPOS.size = Number($("capFontSize").value) || CAPPOS_DEFAULT.size;
+    capStyleTarget().size_pct =
+      Number($("capFontSize").value) || CAPPOS_DEFAULT.size_pct;
     layoutCapOverlay();
   });
+  $("capFontSize").addEventListener("change", () => {
+    if (capStyleTarget() !== CAPPOS) commitCaptions();
+  });
   $("capPosReset").onclick = () => {
-    Object.assign(CAPPOS, CAPPOS_DEFAULT);
-    $("capFontSize").value = String(CAPPOS_DEFAULT.size);
+    const st = capStyleTarget();
+    Object.assign(st, CAPPOS_DEFAULT);
+    $("capFontSize").value = String(CAPPOS_DEFAULT.size_pct);
     syncAlignButtons();
     layoutCapOverlay();
+    if (st !== CAPPOS) commitCaptions();
   };
   document.querySelectorAll(".capAlign").forEach((b) => {
     b.addEventListener("click", () => {
-      CAPPOS.align = b.dataset.align;
+      const st = capStyleTarget();
+      st.align = b.dataset.align;
       syncAlignButtons();
       layoutCapOverlay();
+      if (st !== CAPPOS) commitCaptions();
     });
   });
   bindCaptionResize();
@@ -552,7 +614,8 @@ function bindCaptionOverlay() {
   });
   $("player").addEventListener("timeupdate", () => {
     if ($("capOverlay").hidden || CAP_EDITING) return;
-    $("capBoxText").dataset.raw = captionTextAt($("player").currentTime);
+    if (!S.capCues.length)
+      $("capBoxText").dataset.raw = captionTextAt($("player").currentTime);
     layoutCapOverlay();
   });
   $("player").addEventListener("loadedmetadata", layoutCapOverlay);
@@ -564,7 +627,7 @@ function bindCaptionOverlay() {
 const CAP = { job: null, timer: null, poll: 700, editorSig: null,
               fwStatus: null, wcpp: null };
 // Caption burn position: normalised centre of the box on the frame.
-const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size: 5.5, align: "center", box_w: 0.7 };
+const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size_pct: 5.5, align: "center", box_w: 0.7 };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
 // it, which is what keeps the preview and the burn in sync.
 const CHAR_FACTOR = 0.55;
@@ -1049,8 +1112,10 @@ function startOverlayCaptionEdit() {
   // editor, so the table row and the subtitle file stay in sync.
   if (CAP_EDITING) return;
   const t = $("player").currentTime || 0;
-  const section = S.sections.find(
-    (s) => s.kind === "caption" && s.start <= t && t <= s.end);
+  const cue = S.capCues.length ? capActiveCue() : null;
+  const section = cue
+    ? { id: null, start: cue.start, end: cue.end, text: cue.text }
+    : S.sections.find((s) => s.kind === "caption" && s.start <= t && t <= s.end);
   if (!section) return;                       // no caption on this frame
   CAP_EDITING = true;
   $("player").pause();
@@ -1081,7 +1146,7 @@ function startOverlayCaptionEdit() {
     textEl.style.visibility = "";
     const value = ta.value.replace(/\s+/g, " ").trim();
     if (commit && value !== (section.text || "")) {
-      commitCaptionEdit(section, value);      // section, table row, file
+      commitCaptionEdit(section, value, cue ? cue.id : null);
       textEl.dataset.raw = value;
     } else {
       textEl.dataset.raw = section.text || "";
@@ -1104,6 +1169,9 @@ function startOverlayCaptionEdit() {
 
 function startCaptionEdit(section, tr) {
   if (section.kind !== "caption" || tr.querySelector(".txt input")) return;
+  const oc = S.capCues.find((c) =>
+    c.start < section.end - 1e-6 && c.end > section.start + 1e-6);
+  if (oc && S.capSel !== oc.id) { S.capSel = oc.id; draw(); layoutCapOverlay(); }
   const cell = tr.querySelector(".txt");
   const input = document.createElement("input");
   input.type = "text";
@@ -1148,9 +1216,13 @@ function startCaptionEdit(section, tr) {
   input.addEventListener("blur", () => finish(true));
 }
 
-async function commitCaptionEdit(section, newText) {
+async function commitCaptionEdit(section, newText, cueId) {
   section.text = newText;
-  renderList();
+  if (cueId) {
+    const c = S.capCues.find((x) => x.id === cueId);
+    if (c) c.text = newText;
+  }
+  renderList(); draw();
   const path = ($("dSubPath").value || "").trim();
   if (!path) {
     // Uploaded subtitle text has no file on disk, so the edit cannot persist.
@@ -1161,8 +1233,11 @@ async function commitCaptionEdit(section, newText) {
   try {
     const res = await api("/api/subtitles/edit", {
       method: "POST",
-      body: JSON.stringify({ path, start: section.start, end: section.end, text: newText }),
+      body: JSON.stringify({ path, start: section.start, end: section.end,
+                             text: newText, cue_id: cueId || null }),
     });
+    if (Array.isArray(res.captions)) S.capCues = res.captions;
+    if (Array.isArray(res.sections)) S.sections = res.sections;
     const name = res.path.split(/[\\/]/).pop();
     $("subInfo").textContent =
       `saved to ${name} (${res.updated} cue${res.updated === 1 ? "" : "s"} updated)`;
@@ -1202,6 +1277,8 @@ async function runDetect() {
     };
     const data = await api("/api/detect", { method: "POST", body: JSON.stringify(body) });
     S.sections = data.sections;
+    S.capCues = Array.isArray(data.captions) ? data.captions : [];
+    S.capSel = null;
     S.selected.clear();
     const sm = data.summary;
     $("detectInfo").innerHTML =
@@ -1244,6 +1321,10 @@ function renderList() {
     const tr = document.createElement("tr");
     tr.dataset.id = s.id;
     if (S.selected.has(s.id)) tr.className = "sel";
+    if (s.kind === "caption" && S.capSel &&
+        S.capCues.some((c) => c.id === S.capSel &&
+          c.start < s.end - 1e-6 && c.end > s.start + 1e-6))
+      tr.className = (tr.className + " capsel").trim();
     tr.innerHTML =
       `<td class="check-cell" title="Hold and drag to select or clear several sections"><input type="checkbox" ${S.selected.has(s.id) ? "checked" : ""}></td>` +
       `<td class="tc">${fmtTime(s.start)}</td>` +
@@ -1260,9 +1341,14 @@ function renderList() {
       if (tr.querySelector(".txt input")) return;       // editing: never seek
       // Clicking the caption text IS the edit affordance (double-click works
       // too). It deliberately does not seek, so typing can start at once.
-      if (s.kind === "caption" && ev.target.closest("td.txt")) {
-        startCaptionEdit(s, tr);
-        return;
+      if (s.kind === "caption") {
+        const oc = S.capCues.find((c) =>
+          c.start < s.end - 1e-6 && c.end > s.start + 1e-6);
+        if (oc) { S.capSel = oc.id; draw(); layoutCapOverlay(); }
+        if (ev.target.closest("td.txt")) {
+          startCaptionEdit(s, tr);
+          return;
+        }
       }
       const player = $("player");
       // Seek INTO the cue so the preview shows the frame where this caption
@@ -1375,7 +1461,12 @@ function bindChecklistDrag() {
 
 /* ------------------------------------------------------------- timeline UI */
 
-const TL = { filmH: 42, waveTop: 46, waveH: 48, secTop: 98, secH: 26, rulerTop: 126 };
+const TL = { filmH: 42, waveTop: 46, waveH: 48, secTop: 98, secH: 26, rulerTop: 126,
+             capTop: 142, laneH: 24 };
+
+const capLaneCount = () =>
+  S.capCues.length ? Math.max(...S.capCues.map((c) => c.track)) + 1 : 1;
+const tlHeight = () => TL.capTop + capLaneCount() * TL.laneH + 8;
 
 function canvasGeo() {
   const cv = $("timeline");
@@ -1383,11 +1474,11 @@ function canvasGeo() {
   const dpr = window.devicePixelRatio || 1;
   if (cv.width !== Math.floor(w * dpr)) {
     cv.width = Math.floor(w * dpr);
-    cv.height = Math.floor(132 * dpr);
+    cv.height = Math.floor(tlHeight() * dpr);
   }
   const ctx = cv.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  return { ctx, w, h: 132 };
+  return { ctx, w, h: tlHeight() };
 }
 
 const t2x = (t) => ((t - S.view.start) / S.view.span) * $("timeline").clientWidth;
@@ -1465,6 +1556,38 @@ function draw() {
     }
   }
 
+  // caption lanes: one row per track, draggable blocks
+  const lanes = capLaneCount();
+  ctx.fillStyle = "#0d1218";
+  ctx.fillRect(0, TL.capTop - 6, w, lanes * TL.laneH + 10);
+  ctx.strokeStyle = "#1c2430";
+  for (let i = 1; i < lanes; i++) {
+    const y = TL.capTop + i * TL.laneH - 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  ctx.fillStyle = "#5b6b7f";
+  ctx.font = "9px ui-monospace, monospace";
+  for (let i = 0; i < lanes; i++) ctx.fillText("T" + i, 3, TL.capTop + i * TL.laneH + 11);
+  for (const c of S.capCues) {
+    if (c.end < v0 || c.start > v1) continue;
+    const x = t2x(c.start), bw = Math.max(3, t2x(c.end) - x);
+    const y = TL.capTop + c.track * TL.laneH + 2, bh = TL.laneH - 6;
+    ctx.fillStyle = c.id === S.capSel ? "#388bfd" : "#274b8f";
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x, y, bw, bh, 3) : ctx.rect(x, y, bw, bh);
+    ctx.fill();
+    ctx.fillStyle = "rgba(240,246,252,.55)";          // trim grips
+    ctx.fillRect(x, y, 2, bh); ctx.fillRect(x + bw - 2, y, 2, bh);
+    if (c.id === S.capSel) {
+      ctx.strokeStyle = "#f0f6fc"; ctx.strokeRect(x + .5, y + .5, bw - 1, bh - 1);
+    }
+    if (bw > 30) {
+      ctx.fillStyle = "#e6edf3"; ctx.font = "10px sans-serif";
+      ctx.save(); ctx.beginPath(); ctx.rect(x + 4, y, bw - 8, bh); ctx.clip();
+      ctx.fillText(c.text, x + 5, y + bh / 2 + 3); ctx.restore();
+    }
+  }
+
   // deletion overlay
   ctx.fillStyle = "rgba(248,81,73,.20)";
   for (const [s, e] of deletions()) {
@@ -1517,13 +1640,140 @@ function sectionsIn(a, b) {
   return S.sections.filter((s) => s.end > lo && s.start < hi);
 }
 
+/* ------------------------------------------- caption timeline lane editing */
+
+const capUid = () => "c" + Math.random().toString(36).slice(2, 10);
+
+function capCueAt(t, y) {
+  // block under (time, canvas-y); a block wins over empty lane space
+  const lane = Math.floor((y - TL.capTop) / TL.laneH);
+  return S.capCues.find((c) => c.track === lane && t >= c.start && t <= c.end) ||
+         S.capCues.find((c) => t >= c.start && t <= c.end) || null;
+}
+
+function capFirstFreeLane(start, end, prefer, ignoreId) {
+  const clash = (tr) => S.capCues.some((c) => c.id !== ignoreId &&
+    c.track === tr && c.start < end - 1e-6 && c.end > start + 1e-6);
+  if (prefer != null && !clash(prefer)) return prefer;
+  for (let tr = 0; tr <= capLaneCount(); tr++) if (!clash(tr)) return tr;
+  return capLaneCount();
+}
+
+function capSnap(t, ignoreId) {
+  if (!$("tlSnap") || !$("tlSnap").checked) return t;
+  const px = $("timeline").clientWidth / S.view.span;   // px per second
+  const tol = 8 / Math.max(px, 1e-6);
+  let best = t, bd = tol;
+  const pt = $("player").currentTime || 0;
+  for (const cand of [pt, 0, S.duration]) {
+    if (Math.abs(cand - t) < bd) { bd = Math.abs(cand - t); best = cand; }
+  }
+  for (const c of S.capCues) {
+    if (c.id === ignoreId) continue;
+    for (const cand of [c.start, c.end]) {
+      if (Math.abs(cand - t) < bd) { bd = Math.abs(cand - t); best = cand; }
+    }
+  }
+  return best;
+}
+
+async function commitCaptions() {
+  if (!S.project) return;
+  try {
+    const res = await api("/api/captions/update", {
+      method: "POST", body: JSON.stringify({ cues: S.capCues }) });
+    S.capCues = res.cues;
+    S.sections = res.sections;
+    if (S.capSel && !S.capCues.some((c) => c.id === S.capSel)) S.capSel = null;
+    renderList(); draw(); layoutCapOverlay();
+    if (typeof updateTally === "function") updateTally();
+  } catch (e) {
+    $("subInfo").textContent = `caption timeline not saved: ${e.message}`;
+  }
+}
+
+function capAdd() {
+  if (!S.project) return alert("Open a video first.");
+  const dur = S.duration || 0;
+  if (!dur) return;
+  const t = Math.max(0, Math.min(dur - 0.5, $("player").currentTime || 0));
+  const src = (S.capSel && S.capCues.find((c) => c.id === S.capSel))?.style || CAPPOS;
+  const start = Math.round(t * 1000) / 1000;
+  const cue = { id: capUid(), start, end: Math.min(dur, start + 2),
+                text: "New caption",
+                track: 0, style: { ...src } };
+  cue.track = capFirstFreeLane(cue.start, cue.end, 0, cue.id);
+  S.capCues.push(cue);
+  S.capSel = cue.id;
+  commitCaptions();
+}
+
+function capSplit() {
+  const cue = S.capCues.find((c) => c.id === S.capSel);
+  const t = $("player").currentTime || 0;
+  if (!cue) return alert("Select a caption block first.");
+  if (t <= cue.start + 0.1 || t >= cue.end - 0.1)
+    return alert("Move the playhead inside the selected caption to split it.");
+  const second = { ...cue, id: capUid(), start: Math.round(t * 1000) / 1000,
+                   style: { ...cue.style } };
+  cue.end = Math.round(t * 1000) / 1000;
+  S.capCues.push(second);
+  commitCaptions();
+}
+
+function capDelete() {
+  if (!S.capSel) return;
+  S.capCues = S.capCues.filter((c) => c.id !== S.capSel);
+  S.capSel = null;
+  commitCaptions();
+}
+
+function bindCapToolbar() {
+  $("capAdd").onclick = capAdd;
+  $("capSplit").onclick = capSplit;
+  $("capDel").onclick = capDelete;
+  document.addEventListener("keydown", (ev) => {
+    if ((ev.key === "Delete" || ev.key === "Backspace") && S.capSel &&
+        !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) {
+      ev.preventDefault();
+      capDelete();
+    }
+  });
+}
+
 function bindTimeline() {
   const cv = $("timeline");
 
   cv.addEventListener("mousedown", (ev) => {
     if (!S.project) return;
     const r = cv.getBoundingClientRect();
-    S.drag = { x0: ev.clientX - r.left, x1: ev.clientX - r.left, y: ev.clientY - r.top, moved: false, alt: ev.altKey };
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    if (y >= TL.capTop - 4 && S.capCues.length) {
+      const t = x2t(x);
+      const cue = capCueAt(t, y);
+      if (cue) {
+        const bx = t2x(cue.start), bw = Math.max(3, t2x(cue.end) - bx);
+        const mode = (x - bx <= 5) ? "l" : (bx + bw - x <= 5) ? "r" : "move";
+        S.capDrag = { id: cue.id, mode, x0: x, y0: y, moved: false,
+                      start0: cue.start, end0: cue.end, track0: cue.track };
+        return;
+      }
+    }
+    S.drag = { x0: x, x1: x, y, moved: false, alt: ev.altKey };
+  });
+
+  cv.addEventListener("dblclick", (ev) => {
+    if (!S.project) return;
+    const r = cv.getBoundingClientRect();
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    if (y < TL.capTop - 4) return;
+    const cue = capCueAt(x2t(x), y);
+    if (!cue) return;
+    S.capSel = cue.id;
+    $("player").currentTime = seekIntoCue(cue.start, cue.end);
+    layoutCapOverlay();
+    startOverlayCaptionEdit();
+    draw();
   });
 
   window.addEventListener("mousemove", (ev) => {
@@ -1531,6 +1781,32 @@ function bindTimeline() {
     const r = cv.getBoundingClientRect();
     const x = ev.clientX - r.left;
     S.hoverT = (x >= 0 && x <= r.width) ? x2t(x) : null;
+    if (S.capDrag) {
+      const d = S.capDrag;
+      const cue = S.capCues.find((c) => c.id === d.id);
+      if (cue) {
+        if (Math.abs(x - d.x0) > 3 || Math.abs((ev.clientY - r.top) - d.y0) > 3)
+          d.moved = true;
+        if (d.moved) {
+          const dur = S.duration || 0;
+          if (d.mode === "move") {
+            const len = d.end0 - d.start0;
+            let ns = capSnap(d.start0 + (x2t(x) - x2t(d.x0)), cue.id);
+            ns = Math.max(0, Math.min(dur - len, ns));
+            cue.start = Math.round(ns * 1000) / 1000;
+            cue.end = Math.round((ns + len) * 1000) / 1000;
+          } else if (d.mode === "l") {
+            let ns = capSnap(x2t(x), cue.id);
+            cue.start = Math.round(Math.max(0, Math.min(d.end0 - 0.1, ns)) * 1000) / 1000;
+          } else {
+            let ne = capSnap(x2t(x), cue.id);
+            cue.end = Math.round(Math.min(dur || ne, Math.max(d.start0 + 0.1, ne)) * 1000) / 1000;
+          }
+          cue.track = Math.max(0, Math.min(31,
+            Math.floor(((ev.clientY - r.top) - TL.capTop) / TL.laneH)));
+        }
+      }
+    }
     if (S.drag) {
       S.drag.x1 = Math.max(0, Math.min(r.width, x));
       if (Math.abs(S.drag.x1 - S.drag.x0) > 4) S.drag.moved = true;
@@ -1539,6 +1815,21 @@ function bindTimeline() {
   });
 
   window.addEventListener("mouseup", () => {
+    if (S.capDrag) {
+      const d = S.capDrag;
+      S.capDrag = null;
+      const cue = S.capCues.find((c) => c.id === d.id);
+      if (cue) {
+        if (!d.moved) {
+          S.capSel = (S.capSel === cue.id) ? null : cue.id;
+          renderList(); layoutCapOverlay(); draw();
+          return;
+        }
+        cue.track = capFirstFreeLane(cue.start, cue.end, cue.track, cue.id);
+        commitCaptions();
+      }
+      return;
+    }
     if (!S.drag) return;
     const d = S.drag;
     S.drag = null;
@@ -1729,8 +2020,7 @@ async function doExport() {
         subtitles_path: $("dSubPath").value.trim() || null,
         caption_mode: $("xCaptions").value,
         caption_style: ["burn", "both"].includes($("xCaptions").value)
-          ? { x: CAPPOS.x, y: CAPPOS.y, size_pct: CAPPOS.size,
-              align: CAPPOS.align, box_w: CAPPOS.box_w } : {},
+          ? { ...CAPPOS } : {},
       }),
     });
     S.job = job;
@@ -1910,6 +2200,7 @@ function bindUI() {
   window.addEventListener("resize", draw);
   bindChecklistDrag();
   bindTimeline();
+  bindCapToolbar();
   bindPlayer();
 }
 

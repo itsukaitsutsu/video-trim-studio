@@ -30,7 +30,8 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vts import captionmap as captionmap_mod    # noqa: E402
+from vts import captionmap as captionmap_mod
+from vts import captions as captions_mod    # noqa: E402
 from vts import detect as detect_mod          # noqa: E402
 from vts import export as export_mod         # noqa: E402
 from vts import media as media_mod           # noqa: E402
@@ -61,6 +62,11 @@ class Project:
         self.sections: list[dict] = []
         self.cues: list[dict] = []
         self.silences: list[tuple[float, float]] = []
+        # Caption timeline store (cues with id/track/style); empty until a
+        # detect run seeds it from the subtitle file.
+        self.captions: list[dict] = []
+        self.caption_path: str | None = None
+        self.detect_min_section_ms = 120
         self.waveform: list[int] = []
         self.thumbs: dict = {}
         self.uploaded = False
@@ -153,7 +159,12 @@ class ExportRequest(BaseModel):
     caption_style: dict = {}      # {x, y, size_pct} from the preview overlay
 
 
+class CaptionsUpdateRequest(BaseModel):
+    cues: list[dict] = []
+
+
 class SubtitleEditRequest(BaseModel):
+    cue_id: str | None = None
     """Inline edit of one caption row in the section list."""
     path: str
     start: float
@@ -415,7 +426,12 @@ def detect(req: DetectRequest):
     proj.sections = [s.to_dict() for s in sections]
     proj.cues = cues
     proj.silences = silences
+    proj.detect_min_section_ms = int(req.min_section_ms)
+    proj.captions = captions_mod.from_parsed(cues)
+    proj.caption_path = (os.path.abspath(os.path.expanduser(req.subtitles_path))
+                         if req.subtitles_path else None)
     return {
+        "captions": proj.captions,
         "sections": proj.sections,
         "summary": detect_mod.summary(sections),
         "silence_count": len(silences),
@@ -641,8 +657,12 @@ def export(req: ExportRequest):
             raise HTTPException(404, f"Subtitle file not found: {sp}")
         if not sp.lower().endswith((".srt", ".vtt")):
             raise HTTPException(400, "Captions must come from an .srt or .vtt file.")
-        cues = detect_mod.parse_subtitles(
-            Path(sp).read_text(encoding="utf-8-sig", errors="replace"))
+        if (proj is not None and proj.captions and proj.caption_path
+                and os.path.samefile(sp, proj.caption_path)):
+            cues = [dict(c) for c in proj.captions]   # carry per-cue styles
+        else:
+            cues = detect_mod.parse_subtitles(
+                Path(sp).read_text(encoding="utf-8-sig", errors="replace"))
         kept = export_mod.kept_segments(float(proj.info["duration"]), dels)
         remapped = captionmap_mod.remap_cues(cues, kept)
         srt_out = os.path.splitext(output)[0] + ".srt"
@@ -657,15 +677,14 @@ def export(req: ExportRequest):
                 # exact layout by burning a positioned ASS instead of the plain
                 # .srt (which libass would pin to the bottom edge).
                 vinfo = proj.info.get("video") or {}
+                dw, dh = media_mod.display_size(vinfo)
                 fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
                 os.close(fd)
                 captionmap_mod.write_ass(
-                    remapped, ass_path,
-                    int(vinfo.get("width") or 1280), int(vinfo.get("height") or 720),
-                    x=float(style.get("x", 0.5)), y=float(style.get("y", 0.88)),
-                    size_pct=float(style.get("size_pct", 5.5)),
-                    align=str(style.get("align", "center")),
-                    box_w=float(style.get("box_w", 0.0)))
+                    remapped, ass_path, dw, dh,
+                    style={k: style[k] for k in
+                           ("x", "y", "size_pct", "align", "box_w")
+                           if k in style})
                 burn_source = ass_path
             opts["burn_srt"] = burn_source
             opts["_burn_ass_cleanup"] = ass_path
@@ -790,6 +809,31 @@ def caption_save_cues(job_id: str, req: CaptionCuesRequest):
     return state
 
 
+def _persist_captions(proj) -> None:
+    """Rewrite the subtitle sidecar from the store and rebuild sections."""
+    cues = captions_mod.to_plain(proj.captions)
+    if proj.caption_path and os.path.isfile(proj.caption_path):
+        low = proj.caption_path.lower()
+        if low.endswith(".vtt"):
+            caption_mod.write_vtt(cues, proj.caption_path)
+        elif low.endswith(".srt"):
+            caption_mod.write_srt(cues, proj.caption_path)
+    sections = detect_mod.build_sections(
+        float(proj.info["duration"]), proj.silences, cues,
+        proj.detect_min_section_ms)
+    proj.sections = [sec.to_dict() for sec in sections]
+
+
+@app.post("/api/captions/update")
+def captions_update(req: CaptionsUpdateRequest):
+    """Save the whole timeline: timing, tracks, text and per-cue styles."""
+    proj = need_project()
+    proj.captions = captions_mod.normalize(
+        req.cues, float(proj.info["duration"]))
+    _persist_captions(proj)
+    return {"cues": proj.captions, "sections": proj.sections}
+
+
 @app.post("/api/subtitles/edit")
 def subtitles_edit(req: SubtitleEditRequest):
     """Save an inline caption edit back into the .srt/.vtt file.
@@ -797,6 +841,7 @@ def subtitles_edit(req: SubtitleEditRequest):
     A caption row in the section list can cover several cues (a pause inside a
     long sentence splits it), so every cue overlapping the row's time range
     gets the new text. The file is rewritten in its own format."""
+    proj = PROJECT   # optional: the store only matters when a project is open
     path = os.path.abspath(os.path.expanduser(str(req.path).strip().strip('"')))
     if not os.path.isfile(path):
         raise HTTPException(404, f"Subtitle file not found: {path}")
@@ -805,6 +850,25 @@ def subtitles_edit(req: SubtitleEditRequest):
         raise HTTPException(400, "Only .srt and .vtt files can be saved back.")
     if not (req.end > req.start):
         raise HTTPException(400, "end must be after start.")
+    text = " ".join(str(req.text).split())
+    if (proj is not None and proj.captions and proj.caption_path
+            and os.path.samefile(path, proj.caption_path)):
+        # The timeline store is the source of truth: edit it, then rewrite
+        # the file + sections from it (keeps list/timeline/burn in sync).
+        eps = 1e-6
+        updated = 0
+        for cue in proj.captions:
+            if req.cue_id and cue["id"] != req.cue_id:
+                continue
+            if not req.cue_id and not (
+                    cue["start"] < req.end - eps and cue["end"] > req.start + eps):
+                continue
+            cue["text"] = text
+            updated += 1
+        _persist_captions(proj)
+        return {"path": path, "updated": updated,
+                "total": len(proj.captions), "sections": proj.sections,
+                "captions": proj.captions}
     try:
         raw = Path(path).read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:

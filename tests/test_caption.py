@@ -903,7 +903,7 @@ def test_export_caption_controls_are_wired():
                    "updateCaptionExportInfo", "job.captions"):
         assert needle in js, f"{needle} missing from app.js"
     assert 'id="xCaptions"' in html and 'id="xCapInfo"' in html
-    assert "app.js?v=14" in html
+    assert "app.js?v=15" in html
 
 
 # ---------------------------------------------------------------------------
@@ -915,11 +915,12 @@ def test_write_ass_places_every_cue_at_the_chosen_point(tmp_path):
     cmap_mod.write_ass(
         [{"start": 0.5, "end": 2.25, "text": "hello world"},
          {"start": 3.0, "end": 4.0, "text": ""}],        # empty cue skipped
-        out, width=1280, height=720, x=0.5, y=0.5, size_pct=10.0)
+        out, width=1280, height=720,
+        style={"x": 0.5, "y": 0.5, "size_pct": 10.0})
     body = out.read_text(encoding="utf-8")
     assert "PlayResX: 1280" in body and "PlayResY: 720" in body
-    assert "{\\an5\\pos(640,360)}hello world" in body
-    assert "Fontsize" not in body or ",Arial,72," in body   # size lives in the style
+    assert "{\\fs72\\an5\\pos(640,360)}hello world" in body
+    assert ",Arial,12," in body        # per-cue size lives in \fs overrides
     assert body.count("Dialogue:") == 1                   # empty cue dropped
     assert "0:00:00.50,0:00:02.25," in body               # ASS centisecond stamps
 
@@ -927,7 +928,7 @@ def test_write_ass_places_every_cue_at_the_chosen_point(tmp_path):
 def test_write_ass_clamps_and_sanitises(tmp_path):
     out = tmp_path / "cap.ass"
     cmap_mod.write_ass([{"start": -1, "end": 1, "text": "a {tag} b"}],
-                       out, 320, 240, x=5, y=-3, size_pct=99)
+                       out, 320, 240, style={"x": 5, "y": -3, "size_pct": 99})
     body = out.read_text(encoding="utf-8")
     assert "\\pos(320,0)" in body                         # clamped to the frame
     assert "{tag}" not in body and "a (tag) b" in body    # tags neutralised
@@ -991,7 +992,7 @@ def test_caption_overlay_is_wired_between_html_and_js():
     for needle in ("capOverlay", "capBox", "capBoxText", "guideV", "guideH",
                    "capStyleRow", "capFontSize", "capPosReset", "capPosInfo"):
         assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
-    assert "app.js?v=14" in html
+    assert "app.js?v=15" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1039,7 +1040,7 @@ def test_upload_handler_points_the_path_at_the_saved_file():
     js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
     assert 'data.saved_path' in js                    # path filled from the upload
     assert '$("dSubPath").value = "";' not in js.split("dSubFile", 1)[1].split("};", 1)[0]
-    assert "app.js?v=14" in open(os.path.join(root, "static", "index.html"),
+    assert "app.js?v=15" in open(os.path.join(root, "static", "index.html"),
                                  encoding="utf-8").read()
 
 
@@ -1059,17 +1060,19 @@ def test_write_ass_alignment_and_box_width(tmp_path):
     text = "this caption is long enough to wrap into two lines"
     cues = [{"start": 1.0, "end": 2.0, "text": text}]
     out = tmp_path / "align.ass"
-    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=10.0,
-                       align="left", box_w=0.5)
+    cmap_mod.write_ass(cues, out, 1000, 1000, style={
+                           "x": 0.5, "y": 0.5, "size_pct": 10.0,
+                           "align": "left", "box_w": 0.5})
     body = out.read_text(encoding="utf-8")
     assert body.count("Dialogue:") >= 2                  # wrapped to >= 2 lines
-    assert "{\\an4\\pos(250," in body                    # left edge of the box
-    assert "{\\an5\\pos(" not in body and "{\\an6\\pos(" not in body
+    assert "\\an4\\pos(250," in body                    # left edge of the box
+    assert "\\an5\\pos(" not in body and "\\an6\\pos(" not in body
 
-    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=10.0,
-                       align="right", box_w=0.5)
+    cmap_mod.write_ass(cues, out, 1000, 1000, style={
+                           "x": 0.5, "y": 0.5, "size_pct": 10.0,
+                           "align": "right", "box_w": 0.5})
     body = out.read_text(encoding="utf-8")
-    assert "{\\an6\\pos(750," in body                    # right edge
+    assert "\\an6\\pos(750," in body                    # right edge
 
 
 
@@ -1105,7 +1108,7 @@ def test_alignment_and_resize_controls_are_wired():
     assert "justify_char" not in js and "justify_char" not in html  # JC mode removed
     for needle in ("capAlign", "cap-handle", ">J<"):
         assert needle in html, f"{needle} missing from index.html"
-    assert "app.js?v=14" in html
+    assert "app.js?v=15" in html
 
 
 def test_write_ass_justify_flushes_both_edges(tmp_path):
@@ -1116,17 +1119,18 @@ def test_write_ass_justify_flushes_both_edges(tmp_path):
     cues = [{"start": 1.0, "end": 2.0, "text": text}]
     out = tmp_path / "justify.ass"
     # fs = 40 px, char 22 px, box 800 px (100..900), 36 chars/line
-    cmap_mod.write_ass(cues, out, 1000, 1000, x=0.5, y=0.5, size_pct=4.0,
-                       align="justify", box_w=0.8)
+    cmap_mod.write_ass(cues, out, 1000, 1000, style={
+                           "x": 0.5, "y": 0.5, "size_pct": 4.0,
+                           "align": "justify", "box_w": 0.8})
     events = [l for l in out.read_text(encoding="utf-8").splitlines()
               if l.startswith("Dialogue:")]
     assert len(events) == 8          # 7 words placed + 1 left-aligned last line
     first = events[0].split(",,")[-1]
-    assert first.startswith("{\\an4\\pos(100,") and first.endswith("}this")
+    assert first.startswith("{\\fs40\\an4\\pos(100,") and first.endswith("}this")
     seventh = events[6].split(",,")[-1]   # "wrap" (88 px) ends at the right edge
-    assert seventh.startswith("{\\an4\\pos(812,") and seventh.endswith("}wrap")
+    assert seventh.startswith("{\\fs40\\an4\\pos(812,") and seventh.endswith("}wrap")
     last = events[7].split(",,")[-1]      # final line left-aligned, not centred
-    assert last.startswith("{\\an4\\pos(100,") and last.endswith("}into two lines")
+    assert last.startswith("{\\fs40\\an4\\pos(100,") and last.endswith("}into two lines")
 
 def test_resolve_fw_model_prefers_local_folder(tmp_path, monkeypatch):
     import vts.transcribe as t
@@ -1136,3 +1140,46 @@ def test_resolve_fw_model_prefers_local_folder(tmp_path, monkeypatch):
     mdir.mkdir()
     (mdir / "model.bin").write_bytes(b"x")
     assert t.resolve_fw_model("medium") == str(mdir)     # local folder wins
+
+def test_captions_update_stacks_two_cues_and_rewrites_srt(client, tmp_path):
+    video = tmp_path / "stack.mp4"
+    _make_clip(video, 5)
+    srt = tmp_path / "stack.srt"
+    srt.write_text("1\n00:00:00,500 --> 00:00:02,000\njudul atas\n\n",
+                   encoding="utf-8")
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    det = client.post("/api/detect", json={
+        "subtitles_path": str(srt), "use_cues": True, "detect_silence": False})
+    assert det.status_code == 200, det.text
+    store = det.json()["captions"]
+    assert len(store) == 1 and store[0]["track"] == 0
+
+    top, bottom = store[0], dict(store[0])
+    top.update({"text": "JUDUL", "track": 0,
+                "style": {"x": 0.5, "y": 0.15, "size_pct": 6,
+                          "align": "center", "box_w": 0.6}})
+    bottom.update({"id": "bottom1", "start": 0.5, "end": 2.0, "text": "subtitle",
+                   "track": 1,
+                   "style": {"x": 0.5, "y": 0.85, "size_pct": 4.5,
+                             "align": "center", "box_w": 0.6}})
+    res = client.post("/api/captions/update", json={"cues": [bottom, top]})
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert [c["id"] for c in body["cues"]] == [top["id"], "bottom1"]  # sorted
+    # sidecar rewritten with both cues
+    import vts.detect as dmod
+    on_disk = dmod.parse_subtitles(srt.read_text(encoding="utf-8"))
+    assert [c["text"] for c in on_disk] == ["JUDUL", "subtitle"]
+    # sections see the caption range
+    assert any(sec["kind"] == "caption" for sec in body["sections"])
+
+    # burn both stacked captions in one frame
+    out = tmp_path / "stack.clean.mp4"
+    res = client.post("/api/export", json={
+        "deletions": [[3.5, 4.5]], "output": str(out),
+        "opts": {"mode": "reencode", "codec": "libx264"},
+        "subtitles_path": str(srt), "caption_mode": "burn"})
+    assert res.status_code == 200, res.text
+    done = _wait_job(client, res.json()["id"])
+    assert done["state"] == "done", done.get("error")
+    assert out.is_file()
