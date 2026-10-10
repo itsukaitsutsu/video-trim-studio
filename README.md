@@ -7,6 +7,7 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 ## What it does
 
 - Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
+- Rearrange the video, timeline, list, and right-side tool panels by dragging their grip handles between the two docked columns. Other panels resize from all four edges; the Timeline card keeps top/bottom panel handles, while a centered bottom grip resizes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Ctrl+wheel scrolls through tracks when needed. The layout and viewport height are saved in this browser; **Reset layout** restores the defaults.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
@@ -241,7 +242,7 @@ lanes below them (like CapCut / Kdenlive):
 - The block, the preview boxes, the timeline list and the burn all update together
   after each edit. Timeline edits are saved with the project, not written back
   to the subtitle file (see Captions).
-- Ctrl+wheel zooms; drag on empty space to rubber-band select clips and captions.
+- Ctrl+wheel scrolls vertically through V1/T tracks when they overflow the view; when there is no vertical overflow, it zooms the time scale. Horizontal wheel (or Shift+wheel) scrolls an overwide stage. Drag on empty space to rubber-band select clips and captions.
 
 ### Editable captions
 

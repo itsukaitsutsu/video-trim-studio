@@ -56,6 +56,411 @@ function fmtBytes(n) {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
 
+const WORKSPACE_STORAGE_KEY = "video-trim-studio.workspace.v1";
+const DEFAULT_WORKSPACE_LAYOUT = {
+  main: ["video", "timeline", "list"],
+  side: ["detect", "caption", "export-settings", "export"],
+};
+
+function workspacePanelMap(root) {
+  return new Map([...root.querySelectorAll("[data-workspace-panel]")]
+    .map((panel) => [panel.dataset.workspacePanel, panel]));
+}
+
+function clampWorkspaceSize(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function clearWorkspacePanelSize(panel) {
+  panel.style.width = "";
+  panel.style.height = "";
+  panel.style.marginLeft = "";
+  panel.style.marginTop = "";
+  panel.style.alignSelf = "";
+  panel.style.flex = "";
+  panel.classList.remove("workspace-panel-resized");
+}
+
+function applyWorkspacePanelSize(panel, size) {
+  if (!size || typeof size !== "object") {
+    clearWorkspacePanelSize(panel);
+    return;
+  }
+  const parentWidth = panel.parentElement?.clientWidth || Number(size.width) || 320;
+  const minWidth = Math.min(180, parentWidth);
+  let marginLeft = Number(size.marginLeft);
+  if (!Number.isFinite(marginLeft)) marginLeft = 0;
+  marginLeft = clampWorkspaceSize(marginLeft, 0, Math.max(0, parentWidth - minWidth));
+  let width = Number(size.width);
+  if (!Number.isFinite(width)) width = parentWidth - marginLeft;
+  width = clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth - marginLeft));
+
+  const minHeight = 120;
+  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  let height = Number(size.height);
+  if (!Number.isFinite(height)) height = panel.getBoundingClientRect().height;
+  height = clampWorkspaceSize(height, minHeight, maxHeight);
+  let marginTop = Number(size.marginTop);
+  if (!Number.isFinite(marginTop)) marginTop = 0;
+  marginTop = clampWorkspaceSize(marginTop, 0, maxHeight);
+
+  panel.style.width = `${width}px`;
+  panel.style.height = `${height}px`;
+  panel.style.marginLeft = `${marginLeft}px`;
+  panel.style.marginTop = `${marginTop}px`;
+  panel.style.alignSelf = "flex-start";
+  panel.style.flex = "0 0 auto";
+  panel.classList.add("workspace-panel-resized");
+}
+
+function applyTimelinePanelSize(panel, size) {
+  clearWorkspacePanelSize(panel);
+  if (!size || typeof size !== "object") return;
+  const minHeight = 120;
+  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  const height = Number(size.height);
+  const marginTop = Number(size.marginTop);
+  if (!Number.isFinite(height) && !Number.isFinite(marginTop)) return;
+  if (Number.isFinite(height)) panel.style.height = `${clampWorkspaceSize(height, minHeight, maxHeight)}px`;
+  if (Number.isFinite(marginTop)) panel.style.marginTop = `${clampWorkspaceSize(marginTop, 0, maxHeight)}px`;
+  panel.style.alignSelf = "stretch";
+  panel.style.flex = "0 0 auto";
+  panel.classList.add("workspace-panel-resized");
+}
+
+function applyTimelineViewportHeight(height) {
+  const viewport = $("timelineViewport");
+  if (!viewport) return;
+  const savedHeight = Number(height);
+  if (!Number.isFinite(savedHeight) || savedHeight <= 0) {
+    viewport.style.height = "";
+    viewport.scrollTop = 0;
+    viewport.scrollLeft = 0;
+    return;
+  }
+  const minHeight = 80;
+  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  viewport.style.height = `${clampWorkspaceSize(savedHeight, minHeight, maxHeight)}px`;
+}
+
+function bindTimelineViewportResize() {
+  const handle = $("timelineViewportResize");
+  const viewport = $("timelineViewport");
+  if (!handle || !viewport) return;
+  let active = null;
+
+  const finish = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const state = active;
+    active = null;
+    handle.classList.remove("resizing");
+    try { handle.releasePointerCapture(event.pointerId); } catch (_) { /* capture may already be lost */ }
+    document.body.style.cursor = state.bodyCursor;
+    document.body.style.userSelect = state.bodyUserSelect;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    saveWorkspaceLayout();
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  const move = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const minHeight = 80;
+    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    viewport.style.height = `${clampWorkspaceSize(active.height + event.clientY - active.y, minHeight, maxHeight)}px`;
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    active = {
+      pointerId: event.pointerId, y: event.clientY,
+      height: viewport.getBoundingClientRect().height,
+      bodyCursor: document.body.style.cursor,
+      bodyUserSelect: document.body.style.userSelect,
+    };
+    handle.classList.add("resizing");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    try { handle.setPointerCapture(event.pointerId); } catch (_) { /* window listeners still handle mouse input */ }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
+
+function applyWorkspaceLayout(layout) {
+  const root = $("workspace");
+  if (!root) return;
+  const panels = workspacePanelMap(root);
+  const columns = {
+    main: root.querySelector('[data-workspace-column="main"]'),
+    side: root.querySelector('[data-workspace-column="side"]'),
+  };
+  const ordered = { main: [], side: [] };
+  const used = new Set();
+
+  for (const column of ["main", "side"]) {
+    const ids = layout && Array.isArray(layout[column]) ? layout[column] : [];
+    for (const id of ids) {
+      if (panels.has(id) && !used.has(id)) {
+        ordered[column].push(id);
+        used.add(id);
+      }
+    }
+  }
+  for (const [id, panel] of panels) {
+    if (used.has(id)) continue;
+    const column = panel.dataset.defaultColumn === "side" ? "side" : "main";
+    ordered[column].push(id);
+  }
+
+  for (const column of ["main", "side"]) {
+    if (!columns[column]) continue;
+    for (const id of ordered[column]) columns[column].appendChild(panels.get(id));
+  }
+  for (const [id, panel] of panels) {
+    const size = layout?.sizes?.[id];
+    if (id === "timeline") {
+      // Ignore legacy left/right sizes from older Timeline-card layouts; the
+      // Timeline card panel handles remain separate from viewport-height sizing.
+      applyTimelinePanelSize(panel, size);
+    } else {
+      applyWorkspacePanelSize(panel, size);
+    }
+  }
+  applyTimelineViewportHeight(layout?.timelineViewportHeight);
+}
+
+function readWorkspaceLayout() {
+  try { return JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY) || "null"); }
+  catch (_) { return null; }
+}
+
+function saveWorkspaceLayout() {
+  const root = $("workspace");
+  if (!root) return;
+  const layout = {};
+  for (const column of ["main", "side"]) {
+    const host = root.querySelector(`[data-workspace-column="${column}"]`);
+    layout[column] = host
+      ? [...host.children].filter((panel) => panel.hasAttribute("data-workspace-panel"))
+        .map((panel) => panel.dataset.workspacePanel)
+      : [];
+  }
+  layout.sizes = {};
+  for (const [id, panel] of workspacePanelMap(root)) {
+    const size = {};
+    const properties = id === "timeline"
+      ? ["height", "marginTop"] : ["width", "height", "marginLeft", "marginTop"];
+    for (const property of properties) {
+      const value = parseFloat(panel.style[property]);
+      if (Number.isFinite(value)) size[property] = value;
+    }
+    if (Object.keys(size).length) layout.sizes[id] = size;
+  }
+  const timelineViewportHeight = parseFloat($("timelineViewport")?.style.height || "");
+  if (Number.isFinite(timelineViewportHeight)) layout.timelineViewportHeight = timelineViewportHeight;
+  try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(layout)); }
+  catch (_) { /* Keep the current arrangement for this page if storage is unavailable. */ }
+}
+
+function clearWorkspaceDropMarkers(root) {
+  root.querySelectorAll(".workspace-drop-before, .workspace-drop-after")
+    .forEach((panel) => panel.classList.remove("workspace-drop-before", "workspace-drop-after"));
+  root.querySelectorAll(".workspace-drop-active")
+    .forEach((column) => column.classList.remove("workspace-drop-active"));
+}
+
+function addWorkspaceResizeHandles(root) {
+  for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
+    const edges = panel.dataset.workspacePanel === "timeline"
+      ? ["top", "bottom"] : ["left", "right", "top", "bottom"];
+    for (const edge of edges) {
+      if (panel.querySelector(`:scope > [data-resize-edge="${edge}"]`)) continue;
+      const handle = document.createElement("div");
+      handle.className = `workspace-resize-handle resize-${edge}`;
+      handle.dataset.resizeEdge = edge;
+      handle.setAttribute("role", "separator");
+      handle.setAttribute("aria-orientation", edge === "left" || edge === "right" ? "vertical" : "horizontal");
+      handle.title = `Drag the ${edge} edge to resize this panel`;
+      panel.appendChild(handle);
+    }
+  }
+}
+
+function bindWorkspaceResize(root) {
+  let active = null;
+
+  const finish = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const state = active;
+    active = null;
+    state.handle.classList.remove("resizing");
+    try { state.handle.releasePointerCapture(event.pointerId); } catch (_) { /* capture may already be lost */ }
+    document.body.style.cursor = state.bodyCursor;
+    document.body.style.userSelect = state.bodyUserSelect;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    saveWorkspaceLayout();
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  const move = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const dx = event.clientX - active.x;
+    const dy = event.clientY - active.y;
+    const parentWidth = active.parent.clientWidth;
+    const minWidth = Math.min(180, parentWidth);
+    const minHeight = 120;
+    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    let width = active.width;
+    let height = active.height;
+    let marginLeft = active.marginLeft;
+    let marginTop = active.marginTop;
+
+    if (active.edge === "right") {
+      width = clampWorkspaceSize(active.width + dx, minWidth,
+        Math.max(minWidth, parentWidth - marginLeft));
+    } else if (active.edge === "left") {
+      marginLeft = clampWorkspaceSize(active.marginLeft + dx, 0,
+        Math.max(0, parentWidth - minWidth));
+      width = clampWorkspaceSize(active.width - dx, minWidth,
+        Math.max(minWidth, parentWidth - marginLeft));
+    } else if (active.edge === "bottom") {
+      height = clampWorkspaceSize(active.height + dy, minHeight, maxHeight);
+    } else if (active.edge === "top") {
+      height = clampWorkspaceSize(active.height - dy, minHeight, maxHeight);
+      marginTop = clampWorkspaceSize(active.marginTop + active.height - height, 0, maxHeight);
+    }
+
+    if (active.panel.dataset.workspacePanel === "timeline") {
+      active.panel.style.height = `${height}px`;
+      active.panel.style.marginTop = `${marginTop}px`;
+      active.panel.style.alignSelf = "stretch";
+      active.panel.style.flex = "0 0 auto";
+    } else {
+      active.panel.style.width = `${width}px`;
+      active.panel.style.height = `${height}px`;
+      active.panel.style.marginLeft = `${marginLeft}px`;
+      active.panel.style.marginTop = `${marginTop}px`;
+      active.panel.style.alignSelf = "flex-start";
+      active.panel.style.flex = "0 0 auto";
+    }
+    active.panel.classList.add("workspace-panel-resized");
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  root.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest(".workspace-resize-handle");
+    if (!handle) return;
+    const panel = handle.closest("[data-workspace-panel]");
+    if (!panel || !panel.parentElement) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const computed = getComputedStyle(panel);
+    active = {
+      handle, panel, parent: panel.parentElement, edge: handle.dataset.resizeEdge,
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      width: panel.getBoundingClientRect().width,
+      height: panel.getBoundingClientRect().height,
+      marginLeft: parseFloat(computed.marginLeft) || 0,
+      marginTop: parseFloat(computed.marginTop) || 0,
+      bodyCursor: document.body.style.cursor,
+      bodyUserSelect: document.body.style.userSelect,
+    };
+    handle.classList.add("resizing");
+    document.body.style.cursor = active.edge === "left" || active.edge === "right" ? "col-resize" : "row-resize";
+    document.body.style.userSelect = "none";
+    try { handle.setPointerCapture(event.pointerId); } catch (_) { /* window listeners still handle mouse input */ }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
+
+function bindWorkspaceDocking() {
+  const root = $("workspace");
+  if (!root) return;
+  applyWorkspaceLayout(readWorkspaceLayout());
+  addWorkspaceResizeHandles(root);
+  bindWorkspaceResize(root);
+  bindTimelineViewportResize();
+  let draggedPanel = null;
+
+  root.addEventListener("dragstart", (event) => {
+    const handle = event.target.closest(".workspace-drag-handle");
+    const panel = handle && handle.closest("[data-workspace-panel]");
+    if (!panel || !event.dataTransfer) return;
+    draggedPanel = panel;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", panel.dataset.workspacePanel);
+    panel.classList.add("workspace-dragging");
+  });
+
+  root.addEventListener("dragover", (event) => {
+    if (!draggedPanel) return;
+    const column = event.target.closest("[data-workspace-column]");
+    if (!column) return;
+    event.preventDefault();
+    clearWorkspaceDropMarkers(root);
+    const target = event.target.closest("[data-workspace-panel]");
+    if (target && target !== draggedPanel && target.parentElement === column) {
+      const before = event.clientY < target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2;
+      target.classList.add(before ? "workspace-drop-before" : "workspace-drop-after");
+    } else if (target !== draggedPanel) {
+      column.classList.add("workspace-drop-active");
+    }
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  });
+
+  root.addEventListener("drop", (event) => {
+    if (!draggedPanel) return;
+    const column = event.target.closest("[data-workspace-column]");
+    if (!column) return;
+    event.preventDefault();
+    const previousColumn = draggedPanel.parentElement;
+    const target = event.target.closest("[data-workspace-panel]");
+    if (target && target !== draggedPanel && target.parentElement === column) {
+      const rect = target.getBoundingClientRect();
+      const after = event.clientY >= rect.top + rect.height / 2;
+      column.insertBefore(draggedPanel, after ? target.nextSibling : target);
+    } else if (target !== draggedPanel) {
+      column.appendChild(draggedPanel);
+    }
+    if (previousColumn !== column) {
+      draggedPanel.style.width = "";
+      draggedPanel.style.marginLeft = "";
+      draggedPanel.style.alignSelf = "";
+      draggedPanel.style.flex = "";
+      if (!draggedPanel.style.height && !draggedPanel.style.marginTop) {
+        draggedPanel.classList.remove("workspace-panel-resized");
+      }
+    }
+    draggedPanel.classList.remove("workspace-dragging");
+    draggedPanel = null;
+    clearWorkspaceDropMarkers(root);
+    saveWorkspaceLayout();
+    window.dispatchEvent(new Event("resize"));
+  });
+
+  root.addEventListener("dragend", () => {
+    if (draggedPanel) draggedPanel.classList.remove("workspace-dragging");
+    draggedPanel = null;
+    clearWorkspaceDropMarkers(root);
+  });
+
+  const reset = $("workspaceReset");
+  if (reset) reset.onclick = () => {
+    applyWorkspaceLayout(DEFAULT_WORKSPACE_LAYOUT);
+    saveWorkspaceLayout();
+    window.dispatchEvent(new Event("resize"));
+  };
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, {
     headers: opts.body && !(opts.body instanceof FormData)
@@ -1177,6 +1582,7 @@ function pollJob(id) {
 /* ------------------------------------------------------------------- boot */
 
 (async function boot() {
+  bindWorkspaceDocking();
   bindUI();
   syncQualityRows();
   await loadEnv();

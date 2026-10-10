@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=19">
+<link rel="stylesheet" href="/static/style.css?v=27">
 </head>
 <body>
 <header>
@@ -12,9 +12,10 @@
     <span class="logo">&#9986;</span>
     <div>
       <h1>Video Trim Studio</h1>
-      <p class="sub">Detect sections &rarr; edit the timeline (split, move, copy, delete, undo) &rarr; export the same format as the source</p>
+      <p class="sub">Detect sections &rarr; edit the timeline &rarr; export the same format as the source &middot; drag panel handles to rearrange (saved automatically)</p>
     </div>
   </div>
+  <button id="workspaceReset" class="ghost mini" title="Restore the default panel layout">Reset layout</button>
   <div class="env" id="env">checking ffmpeg&hellip;</div>
 </header>
 
@@ -28,9 +29,10 @@
   <span id="fileMeta" class="filemeta"></span>
 </section>
 
-<main>
-  <div class="col-main">
-    <div class="player-wrap">
+<main id="workspace" class="workspace">
+  <div class="col-main workspace-column" data-workspace-column="main">
+    <div class="player-wrap" data-workspace-panel="video" data-default-column="main">
+      <div class="workspace-panel-head"><strong>Video preview</strong><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Video preview panel" title="Drag to move panel">⠿</button></div>
       <video id="player" preload="metadata" disableremoteplayback></video>
       <div id="gapShade" hidden></div>
       <div id="capOverlay" hidden>
@@ -53,10 +55,11 @@
       </div>
     </div>
 
-    <div class="timeline-card">
+    <div class="timeline-card" data-workspace-panel="timeline" data-default-column="main">
       <div class="tl-head">
         <strong>Timeline</strong>
-        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline panel" title="Drag to move panel">⠿</button>
+        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = scroll tracks if needed, otherwise zoom</span>
         <span class="spacer"></span>
         <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
         <button class="mini" id="zoomIn" title="Zoom in">+</button>
@@ -76,9 +79,14 @@
         <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
         <span id="tlStatus" class="dim small"></span>
       </div>
-      <div class="timeline-stage">
-        <div id="trackLabels" class="track-labels" aria-label="Timeline track labels"></div>
-        <canvas id="timeline" height="132"></canvas>
+      <div id="timelineViewportWrap" class="timeline-viewport-wrap">
+        <div id="timelineViewport" class="timeline-viewport">
+          <div id="timelineStage" class="timeline-stage">
+            <div id="trackLabels" class="track-labels" aria-label="Timeline track labels"></div>
+            <canvas id="timeline" height="132"></canvas>
+          </div>
+        </div>
+        <div id="timelineViewportResize" class="timeline-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize timeline viewing area" title="Drag up or down to add or remove empty timeline viewing space; track sizes stay the same"></div>
       </div>
       <div class="legend">
         <span><i class="sw" style="background:#2b4f6b"></i>video clip</span>
@@ -89,8 +97,9 @@
       </div>
     </div>
 
-    <div class="list-card">
+    <div class="list-card" data-workspace-panel="list" data-default-column="main">
       <div class="list-tools">
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline list panel" title="Drag to move panel">⠿</button>
         <button class="chip on" data-kind="caption">caption</button>
         <button class="chip on" data-kind="silence">silence</button>
         <button class="chip on" data-kind="other">other</button>
@@ -117,9 +126,9 @@
     </div>
   </div>
 
-  <aside class="col-side">
-    <div class="card">
-      <h2>1 &middot; Detect sections</h2>
+  <aside class="col-side workspace-column" data-workspace-column="side">
+    <div class="card" data-workspace-panel="detect" data-default-column="side">
+      <h2 class="workspace-panel-heading"><span>1 &middot; Detect sections</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Detect sections panel" title="Drag to move panel">⠿</button></h2>
       <label class="chk"><input type="checkbox" id="dSilence" checked> Detect silence (ffmpeg silencedetect)</label>
       <div class="row"><label>Threshold (dB)</label><input id="dThresh" type="number" value="-45" step="1"></div>
       <div class="row"><label>Min silence (ms)</label><input id="dMinSilence" type="number" value="800" step="50"></div>
@@ -138,8 +147,8 @@
       <div id="detectInfo" class="dim small"></div>
     </div>
 
-    <div class="card">
-      <h2>2 &middot; Auto-caption</h2>
+    <div class="card" data-workspace-panel="caption" data-default-column="side">
+      <h2 class="workspace-panel-heading"><span>2 &middot; Auto-caption</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Auto-caption panel" title="Drag to move panel">⠿</button></h2>
       <div class="dim small caption-lead">
         Transcribe this video with faster-whisper, then feed the captions straight into detection.
       </div>
@@ -229,8 +238,8 @@
       </div>
     </div>
 
-    <div class="card">
-      <h2>3 &middot; Export settings</h2>
+    <div class="card" data-workspace-panel="export-settings" data-default-column="side">
+      <h2 class="workspace-panel-heading"><span>3 &middot; Export settings</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Export settings panel" title="Drag to move panel">⠿</button></h2>
       <div class="row"><label>Mode</label>
         <select id="xMode">
           <option value="reencode">Re-encode (frame accurate)</option>
@@ -299,8 +308,8 @@
       <button id="resetOpts" class="ghost block small">Reset everything to source values</button>
     </div>
 
-    <div class="card">
-      <h2>4 &middot; Export</h2>
+    <div class="card" data-workspace-panel="export" data-default-column="side">
+      <h2 class="workspace-panel-heading"><span>4 &middot; Export</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Export panel" title="Drag to move panel">⠿</button></h2>
       <div class="tally">
         <div><span class="dim">source</span><b id="tSrc">--:--</b></div>
         <div><span class="dim">removing</span><b id="tCut" class="cut">--:--</b></div>
@@ -330,8 +339,7 @@
 </div>
 
 <script src="/static/timeline-model.js?v=2"></script>
-<script src="/static/timeline.js?v=5"></script>
-<script src="/static/app.js?v=17"></script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a47cceb0df0433d1',t:'MTc5MTU0Mjg0OA=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4bc70e2c01a94c73b74392e4234840661791215815920" integrity="sha512-L0ha0OXavK/8okipN9F8BtP84dg9DUhPERbBXzwI6dgTA55d2+yweo3pn5CSFYs45/r8md2+xvUPtTdvTNRfjA==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f","spa":2}' crossorigin="anonymous"></script>
+<script src="/static/timeline.js?v=10"></script>
+<script src="/static/app.js?v=26"></script>
 </body>
 </html>

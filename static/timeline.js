@@ -119,9 +119,18 @@ function syncTrackLabels(height) {
       captions;
     renderedTrackLabelCount = count;
   }
-  rail.style.height = `${height}px`;
+  const viewport = $("timelineViewport");
+  const visibleHeight = viewport?.style.height ? viewport.clientHeight : 0;
+  rail.style.height = `${Math.max(height, visibleHeight)}px`;
+  if (viewport) rail.style.transform = `translateX(${viewport.scrollLeft}px)`;
   const stage = rail.parentElement;
   if (stage) stage.style.gridTemplateColumns = `${TL.labelW}px minmax(0, 1fr)`;
+}
+
+function syncTrackLabelScroll() {
+  const viewport = $("timelineViewport");
+  const rail = $("trackLabels");
+  if (viewport && rail) rail.style.transform = `translateX(${viewport.scrollLeft}px)`;
 }
 
 function canvasGeo() {
@@ -542,6 +551,12 @@ function applyMarquee(d) {
 
 function bindTimeline() {
   const cv = $("timeline");
+  const viewport = $("timelineViewport");
+  if (viewport && viewport.dataset.trackRailScrollBound !== "true") {
+    viewport.addEventListener("scroll", syncTrackLabelScroll, { passive: true });
+    viewport.dataset.trackRailScrollBound = "true";
+    syncTrackLabelScroll();
+  }
 
   cv.addEventListener("mousedown", (ev) => {
     if (!S.project) return;
@@ -672,11 +687,23 @@ function bindTimeline() {
     refresh(true);
   });
 
-  cv.addEventListener("wheel", (ev) => {
+  viewport.addEventListener("wheel", (ev) => {
     if (!S.project) return;
+    const verticalOverflows = viewport.scrollHeight > viewport.clientHeight + 1;
+    if (ev.ctrlKey && verticalOverflows && ev.deltaY) {
+      ev.preventDefault();
+      viewport.scrollTop += ev.deltaY;
+      return;
+    }
     ev.preventDefault();
     const r = cv.getBoundingClientRect();
     const anchor = x2t(ev.clientX - r.left);
+    const stageOverflows = viewport.scrollWidth > viewport.clientWidth + 1;
+    if (!(ev.ctrlKey || ev.metaKey) && stageOverflows && (ev.deltaX || ev.shiftKey)) {
+      viewport.scrollLeft += ev.deltaX || ev.deltaY;
+      syncTrackLabelScroll();
+      return;
+    }
     if (ev.ctrlKey || ev.metaKey) {
       const factor = ev.deltaY > 0 ? 1.25 : 0.8;
       const span = Math.min(Math.max(contentEnd(), 1), Math.max(0.2, S.view.span * factor));

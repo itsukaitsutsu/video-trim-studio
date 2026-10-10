@@ -399,3 +399,120 @@ def test_startup_reopens_saved_video_when_project_is_missing(browser_page):
         "name => S.project && S.project.info.name === name", arg=saved_name, timeout=30000)
     assert page.locator("#pathInput").input_value() == saved_path
     assert not page_errors, page_errors
+
+
+def test_workspace_panels_can_resize_dock_and_persist(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+
+    timeline = page.locator('[data-workspace-panel="timeline"]')
+    assert timeline.locator(".resize-left, .resize-right").count() == 0
+    for edge in ["top", "bottom"]:
+        assert timeline.locator(f".resize-{edge}").count() == 1
+    detect_panel = page.locator('[data-workspace-panel="detect"]')
+    for edge in ["left", "right", "top", "bottom"]:
+        assert detect_panel.locator(f".resize-{edge}").count() == 1
+
+    def drag_handle(edge, dx, dy):
+        handle = timeline.locator(f".resize-{edge}")
+        handle.scroll_into_view_if_needed()
+        box = handle.bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + dx, y + dy, steps=5)
+        page.mouse.up()
+
+    old = timeline.bounding_box()
+    drag_handle("top", 0, 14)
+    assert timeline.bounding_box()["height"] < old["height"]
+    old = timeline.bounding_box()
+    drag_handle("bottom", 0, -14)
+    assert timeline.bounding_box()["height"] < old["height"]
+    saved_height = timeline.bounding_box()["height"]
+
+    detect = page.locator('[data-workspace-panel="detect"]')
+    timeline.locator('[aria-label="Move Timeline panel"]').drag_to(
+        detect, target_position={"x": 24, "y": 5})
+    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "side"
+    side_order = page.locator('[data-workspace-column="side"]').evaluate(
+        "column => [...column.children].map(panel => panel.dataset.workspacePanel)")
+    assert side_order.index("timeline") < side_order.index("detect")
+
+    # Rearrangement is remembered across a refresh, and the header control
+    # returns every workspace panel to the initial two-column arrangement.
+    page.reload()
+    page.wait_for_function("S.project && S.project.info")
+    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "side"
+    assert abs(timeline.bounding_box()["height"] - saved_height) < 1
+    page.click("#workspaceReset")
+    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "main"
+    main_order = page.locator('[data-workspace-column="main"]').evaluate(
+        "column => [...column.children].map(panel => panel.dataset.workspacePanel)")
+    assert main_order == ["video", "timeline", "list"]
+    assert not page_errors, page_errors
+
+
+def test_timeline_view_bottom_handle_adds_empty_space_and_scrolls_tracks(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.click("#workspaceReset")
+
+    card = page.locator('[data-workspace-panel="timeline"]')
+    wrap = page.locator("#timelineViewportWrap")
+    viewport = page.locator("#timelineViewport")
+    stage = page.locator("#timelineStage")
+    rail = page.locator("#trackLabels")
+    canvas = page.locator("#timeline")
+    handle = page.locator("#timelineViewportResize")
+    assert handle.count() == 1
+    assert card.locator(".resize-left, .resize-right").count() == 0
+    card_width = card.bounding_box()["width"]
+    stage_height_before = stage.bounding_box()["height"]
+    viewport_height_before = viewport.bounding_box()["height"]
+    canvas_height_before = canvas.bounding_box()["height"]
+    row_heights_before = [
+        rail.locator(".track-name.video").bounding_box()["height"],
+        rail.locator(".track-name.caption").first.bounding_box()["height"],
+    ]
+    wrap_box = wrap.bounding_box()
+    handle_box = handle.bounding_box()
+    assert abs(handle_box["y"] + handle_box["height"] - wrap_box["y"] - wrap_box["height"] + 1) < 2
+    assert abs(handle_box["x"] + handle_box["width"] / 2 - wrap_box["x"] - wrap_box["width"] / 2) < 2
+
+    handle.scroll_into_view_if_needed()
+    box = handle.bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x, y + 100, steps=6)
+    page.mouse.up()
+
+    assert viewport.bounding_box()["height"] > viewport_height_before + 70
+    assert stage.bounding_box()["height"] > stage_height_before + 70
+    assert abs(canvas.bounding_box()["height"] - canvas_height_before) < 1
+    assert abs(rail.locator(".track-name.video").bounding_box()["height"] - row_heights_before[0]) < 1
+    assert abs(rail.locator(".track-name.caption").first.bounding_box()["height"] - row_heights_before[1]) < 1
+    assert abs(card.bounding_box()["width"] - card_width) < 1
+
+    page.reload()
+    page.wait_for_function("S.project && S.project.info")
+    assert abs(viewport.bounding_box()["height"] - (viewport_height_before + 100)) < 3
+    assert abs(canvas.bounding_box()["height"] - canvas_height_before) < 1
+    assert abs(card.bounding_box()["width"] - card_width) < 1
+
+    # More tracks overflow the saved view; Ctrl+wheel scrolls the V/T rows,
+    # rather than stretching the rows or zooming the time scale.
+    page.evaluate("S.tl = { ...S.tl, lanes: 8 }; draw();")
+    assert viewport.evaluate("el => el.scrollHeight > el.clientHeight")
+    page.locator("#timeline").evaluate("""canvas => canvas.dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true, cancelable: true, ctrlKey: true, deltaY: 80,
+      clientX: canvas.getBoundingClientRect().left + 10,
+      clientY: canvas.getBoundingClientRect().top + 10,
+    }))""")
+    assert viewport.evaluate("el => el.scrollTop > 0")
+
+    page.evaluate("S.tl = { ...S.tl, lanes: 1 }; draw();")
+    page.click("#workspaceReset")
+    assert abs(stage.bounding_box()["height"] - stage_height_before) < 1
+    assert not page_errors, page_errors
