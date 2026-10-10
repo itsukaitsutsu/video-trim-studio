@@ -32,6 +32,12 @@ const S = {
   get capCues() { return this.tl.caps; },
 };
 
+const PREVIEW_ZOOM_LEVELS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3, 4];
+const PREVIEW_VIEW = {
+  zoom: 1, panX: 0, panY: 0, baseW: 0, baseH: 0,
+  viewW: 0, viewH: 0, viewportHeight: null, initialized: false, drag: null,
+};
+
 const KIND_COLOR = { caption: "#1f6feb", silence: "#9e6a03", other: "#6e7681" };
 
 /* ------------------------------------------------------------------ utils */
@@ -116,11 +122,17 @@ function applyWorkspacePanelSize(panel, size) {
 function applyTimelinePanelSize(panel, size) {
   clearWorkspacePanelSize(panel);
   if (!size || typeof size !== "object") return;
+  const parentWidth = panel.parentElement?.clientWidth || Number(size.width) || 320;
+  const minWidth = Math.min(180, parentWidth);
+  const width = Number(size.width);
   const minHeight = 120;
   const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
   const height = Number(size.height);
   const marginTop = Number(size.marginTop);
-  if (!Number.isFinite(height) && !Number.isFinite(marginTop)) return;
+  if (![width, height, marginTop].some(Number.isFinite)) return;
+  if (Number.isFinite(width)) {
+    panel.style.width = `${clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth))}px`;
+  }
   if (Number.isFinite(height)) panel.style.height = `${clampWorkspaceSize(height, minHeight, maxHeight)}px`;
   if (Number.isFinite(marginTop)) panel.style.marginTop = `${clampWorkspaceSize(marginTop, 0, maxHeight)}px`;
   panel.style.alignSelf = "stretch";
@@ -141,6 +153,21 @@ function applyTimelineViewportHeight(height) {
   const minHeight = 80;
   const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
   viewport.style.height = `${clampWorkspaceSize(savedHeight, minHeight, maxHeight)}px`;
+}
+
+function applyPreviewViewportHeight(height) {
+  const viewport = $("previewViewport");
+  if (!viewport) return;
+  const savedHeight = Number(height);
+  if (!Number.isFinite(savedHeight) || savedHeight <= 0) {
+    PREVIEW_VIEW.viewportHeight = null;
+    viewport.style.height = "";
+    return;
+  }
+  const minHeight = 160;
+  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(savedHeight, minHeight, maxHeight);
+  viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;
 }
 
 function bindTimelineViewportResize() {
@@ -191,6 +218,116 @@ function bindTimelineViewportResize() {
   });
 }
 
+function bindPreviewViewportResize() {
+  const handle = $("previewViewportResize");
+  const viewport = $("previewViewport");
+  if (!handle || !viewport) return;
+  let active = null;
+
+  const finish = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const state = active;
+    active = null;
+    handle.classList.remove("resizing");
+    try { handle.releasePointerCapture(event.pointerId); } catch (_) { /* capture may already be lost */ }
+    document.body.style.cursor = state.bodyCursor;
+    document.body.style.userSelect = state.bodyUserSelect;
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", finish);
+    window.removeEventListener("pointercancel", finish);
+    saveWorkspaceLayout();
+    window.dispatchEvent(new Event("resize"));
+  };
+
+  const move = (event) => {
+    if (!active || event.pointerId !== active.pointerId) return;
+    const minHeight = 160;
+    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(
+      active.height + event.clientY - active.y, minHeight, maxHeight);
+    viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;
+    layoutPreviewZoom();
+  };
+
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    active = {
+      pointerId: event.pointerId, y: event.clientY,
+      height: viewport.getBoundingClientRect().height,
+      bodyCursor: document.body.style.cursor,
+      bodyUserSelect: document.body.style.userSelect,
+    };
+    PREVIEW_VIEW.viewportHeight = active.height;
+    handle.classList.add("resizing");
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    try { handle.setPointerCapture(event.pointerId); } catch (_) { /* window listeners still handle mouse input */ }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  });
+}
+
+function workspaceGridMetrics(root) {
+  const computed = getComputedStyle(root);
+  const paddingLeft = parseFloat(computed.paddingLeft) || 0;
+  const paddingRight = parseFloat(computed.paddingRight) || 0;
+  const gap = parseFloat(computed.columnGap) || 0;
+  const contentLeft = root.getBoundingClientRect().left + paddingLeft;
+  const trackWidth = Math.max(0, root.clientWidth - paddingLeft - paddingRight - gap);
+  return { contentLeft, trackWidth, gap };
+}
+
+function setWorkspaceSideWidth(root, requestedWidth) {
+  const { trackWidth } = workspaceGridMetrics(root);
+  const minMain = Math.min(320, trackWidth);
+  const minSide = Math.min(220, Math.max(0, trackWidth - minMain));
+  const maxSide = Math.max(minSide, trackWidth - minMain);
+  const width = clampWorkspaceSize(requestedWidth, minSide, maxSide);
+  root.style.setProperty("--workspace-side-width", `${width}px`);
+  return width;
+}
+
+function workspaceColumnsAreSideBySide(root) {
+  if (window.matchMedia && window.matchMedia("(max-width: 1080px)").matches) return false;
+  const mainColumn = root.querySelector('[data-workspace-column="main"]');
+  const sideColumn = root.querySelector('[data-workspace-column="side"]');
+  if (!mainColumn || !sideColumn) return false;
+  const mainRect = mainColumn.getBoundingClientRect();
+  const sideRect = sideColumn.getBoundingClientRect();
+  return mainRect.width > 0 && sideRect.width > 0 &&
+    Math.abs(mainRect.top - sideRect.top) < 2 && sideRect.left >= mainRect.right - 2;
+}
+
+function clearWorkspacePanelWidthOverrides(root) {
+  for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
+    panel.style.width = "";
+    panel.style.marginLeft = "";
+    panel.style.alignSelf = "";
+    panel.style.flex = "";
+    if (!panel.style.height && !panel.style.marginTop)
+      panel.classList.remove("workspace-panel-resized");
+  }
+}
+
+function isSharedWorkspaceEdge(root, panel, edge) {
+  const columnId = panel.parentElement?.dataset.workspaceColumn;
+  return workspaceColumnsAreSideBySide(root) &&
+    ((edge === "right" && columnId === "main") || (edge === "left" && columnId === "side"));
+}
+
+function refreshWorkspaceResizeHandleTitles(root) {
+  for (const handle of root.querySelectorAll(".workspace-resize-handle")) {
+    const panel = handle.closest("[data-workspace-panel]");
+    if (!panel) continue;
+    const edge = handle.dataset.resizeEdge;
+    handle.title = isSharedWorkspaceEdge(root, panel, edge)
+      ? "Drag to resize both workspace columns"
+      : `Drag the ${edge} edge to resize this panel`;
+  }
+}
+
 function applyWorkspaceLayout(layout) {
   const root = $("workspace");
   if (!root) return;
@@ -221,17 +358,22 @@ function applyWorkspaceLayout(layout) {
     if (!columns[column]) continue;
     for (const id of ordered[column]) columns[column].appendChild(panels.get(id));
   }
+  const savedSideWidth = Number(layout?.columnWidths?.side);
+  if (Number.isFinite(savedSideWidth)) setWorkspaceSideWidth(root, savedSideWidth);
+  else root.style.removeProperty("--workspace-side-width");
+
   for (const [id, panel] of panels) {
     const size = layout?.sizes?.[id];
     if (id === "timeline") {
-      // Ignore legacy left/right sizes from older Timeline-card layouts; the
-      // Timeline card panel handles remain separate from viewport-height sizing.
+      // Panel width/height sizing remains separate from the Timeline viewport's
+      // inner height control.
       applyTimelinePanelSize(panel, size);
     } else {
       applyWorkspacePanelSize(panel, size);
     }
   }
   applyTimelineViewportHeight(layout?.timelineViewportHeight);
+  applyPreviewViewportHeight(layout?.previewViewportHeight);
 }
 
 function readWorkspaceLayout() {
@@ -254,13 +396,17 @@ function saveWorkspaceLayout() {
   for (const [id, panel] of workspacePanelMap(root)) {
     const size = {};
     const properties = id === "timeline"
-      ? ["height", "marginTop"] : ["width", "height", "marginLeft", "marginTop"];
+      ? ["width", "height", "marginTop"] : ["width", "height", "marginLeft", "marginTop"];
     for (const property of properties) {
       const value = parseFloat(panel.style[property]);
       if (Number.isFinite(value)) size[property] = value;
     }
     if (Object.keys(size).length) layout.sizes[id] = size;
   }
+  const sideWidth = parseFloat(getComputedStyle(root).getPropertyValue("--workspace-side-width"));
+  if (Number.isFinite(sideWidth)) layout.columnWidths = { side: sideWidth };
+  if (Number.isFinite(PREVIEW_VIEW.viewportHeight))
+    layout.previewViewportHeight = PREVIEW_VIEW.viewportHeight;
   const timelineViewportHeight = parseFloat($("timelineViewport")?.style.height || "");
   if (Number.isFinite(timelineViewportHeight)) layout.timelineViewportHeight = timelineViewportHeight;
   try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(layout)); }
@@ -277,7 +423,7 @@ function clearWorkspaceDropMarkers(root) {
 function addWorkspaceResizeHandles(root) {
   for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
     const edges = panel.dataset.workspacePanel === "timeline"
-      ? ["top", "bottom"] : ["left", "right", "top", "bottom"];
+      ? ["right", "top", "bottom"] : ["left", "right", "top", "bottom"];
     for (const edge of edges) {
       if (panel.querySelector(`:scope > [data-resize-edge="${edge}"]`)) continue;
       const handle = document.createElement("div");
@@ -285,10 +431,10 @@ function addWorkspaceResizeHandles(root) {
       handle.dataset.resizeEdge = edge;
       handle.setAttribute("role", "separator");
       handle.setAttribute("aria-orientation", edge === "left" || edge === "right" ? "vertical" : "horizontal");
-      handle.title = `Drag the ${edge} edge to resize this panel`;
       panel.appendChild(handle);
     }
   }
+  refreshWorkspaceResizeHandleTitles(root);
 }
 
 function bindWorkspaceResize(root) {
@@ -313,6 +459,15 @@ function bindWorkspaceResize(root) {
     if (!active || event.pointerId !== active.pointerId) return;
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
+    if (active.resizeColumns) {
+      const metrics = workspaceGridMetrics(root);
+      const dividerX = event.clientX - (active.edge === "left" ? metrics.gap : 0);
+      const mainWidth = dividerX - metrics.contentLeft;
+      setWorkspaceSideWidth(root, metrics.trackWidth - mainWidth);
+      clearWorkspacePanelWidthOverrides(root);
+      window.dispatchEvent(new Event("resize"));
+      return;
+    }
     const parentWidth = active.parent.clientWidth;
     const minWidth = Math.min(180, parentWidth);
     const minHeight = 120;
@@ -338,8 +493,12 @@ function bindWorkspaceResize(root) {
     }
 
     if (active.panel.dataset.workspacePanel === "timeline") {
-      active.panel.style.height = `${height}px`;
-      active.panel.style.marginTop = `${marginTop}px`;
+      if (active.edge === "right") {
+        active.panel.style.width = `${width}px`;
+      } else {
+        active.panel.style.height = `${height}px`;
+        active.panel.style.marginTop = `${marginTop}px`;
+      }
       active.panel.style.alignSelf = "stretch";
       active.panel.style.flex = "0 0 auto";
     } else {
@@ -359,11 +518,13 @@ function bindWorkspaceResize(root) {
     if (!handle) return;
     const panel = handle.closest("[data-workspace-panel]");
     if (!panel || !panel.parentElement) return;
+    const edge = handle.dataset.resizeEdge;
+    const resizeColumns = isSharedWorkspaceEdge(root, panel, edge);
     event.preventDefault();
     event.stopPropagation();
     const computed = getComputedStyle(panel);
     active = {
-      handle, panel, parent: panel.parentElement, edge: handle.dataset.resizeEdge,
+      handle, panel, parent: panel.parentElement, edge, resizeColumns,
       pointerId: event.pointerId, x: event.clientX, y: event.clientY,
       width: panel.getBoundingClientRect().width,
       height: panel.getBoundingClientRect().height,
@@ -389,6 +550,13 @@ function bindWorkspaceDocking() {
   addWorkspaceResizeHandles(root);
   bindWorkspaceResize(root);
   bindTimelineViewportResize();
+  bindPreviewViewportResize();
+  window.addEventListener("resize", () => {
+    const sideWidth = parseFloat(getComputedStyle(root).getPropertyValue("--workspace-side-width"));
+    if (workspaceColumnsAreSideBySide(root) && Number.isFinite(sideWidth))
+      setWorkspaceSideWidth(root, sideWidth);
+    refreshWorkspaceResizeHandleTitles(root);
+  });
   let draggedPanel = null;
 
   root.addEventListener("dragstart", (event) => {
@@ -594,6 +762,7 @@ function setupPreview(preview) {
   if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
   previewFallbackTried = false;
   const p = $("player");
+  resetPreviewZoom();
   const mode = (preview && preview.mode) || "direct";
 
   if (mode === "proxy" && !(preview && preview.ready)) {
@@ -752,16 +921,182 @@ async function browseTo(path) {
 // thirds and centre (like CapCut); on release the position is stored and sent
 // with the export, which burns a positioned ASS instead of the plain .srt.
 
+function clampPreviewPan(value, viewSize, stageSize, zoom) {
+  const spare = viewSize - stageSize * zoom;
+  return Math.max(Math.min(0, spare), Math.min(Math.max(0, spare), value));
+}
+
+function paintPreviewZoom() {
+  const viewport = $("previewViewport"), stage = $("previewStage");
+  if (!viewport || !stage) return;
+  const z = PREVIEW_VIEW.zoom;
+  stage.style.transform = `matrix(${z}, 0, 0, ${z}, ${PREVIEW_VIEW.panX}, ${PREVIEW_VIEW.panY})`;
+  viewport.classList.toggle("is-zoomed", z > 1.001);
+  const canPan = PREVIEW_VIEW.baseW * z > PREVIEW_VIEW.viewW + 1 ||
+    PREVIEW_VIEW.baseH * z > PREVIEW_VIEW.viewH + 1;
+  viewport.classList.toggle("pan-available", canPan);
+  $("videoZoomLevel").textContent = `${Math.round(z * 100)}%`;
+  $("videoZoomOut").disabled = z <= PREVIEW_ZOOM_LEVELS[0] + 1e-3;
+  $("videoZoomIn").disabled = z >= PREVIEW_ZOOM_LEVELS[PREVIEW_ZOOM_LEVELS.length - 1] - 1e-3;
+}
+
+function layoutPreviewZoom() {
+  const viewport = $("previewViewport"), stage = $("previewStage"), video = $("player");
+  if (!viewport || !stage || !video) return;
+  const viewBox = viewport.getBoundingClientRect();
+  const viewW = viewport.clientWidth || viewBox.width;
+  if (!viewW) return;
+  const sourceW = video.videoWidth || 16, sourceH = video.videoHeight || 9;
+  const maxH = Math.max(120, window.innerHeight * 0.46);
+  const fitScale = Math.min(viewW / sourceW, maxH / sourceH);
+  const baseW = Math.max(1, sourceW * fitScale);
+  const baseH = Math.max(1, sourceH * fitScale);
+
+  let focusX = 0.5, focusY = 0.5;
+  if (PREVIEW_VIEW.initialized && PREVIEW_VIEW.baseW && PREVIEW_VIEW.baseH) {
+    focusX = ((PREVIEW_VIEW.viewW / 2 - PREVIEW_VIEW.panX) /
+      PREVIEW_VIEW.zoom) / PREVIEW_VIEW.baseW;
+    focusY = ((PREVIEW_VIEW.viewH / 2 - PREVIEW_VIEW.panY) /
+      PREVIEW_VIEW.zoom) / PREVIEW_VIEW.baseH;
+    focusX = Math.max(0, Math.min(1, focusX));
+    focusY = Math.max(0, Math.min(1, focusY));
+  }
+
+  PREVIEW_VIEW.baseW = baseW;
+  PREVIEW_VIEW.baseH = baseH;
+  video.style.width = "100%";
+  video.style.height = "100%";
+  stage.style.width = `${baseW}px`;
+  stage.style.height = `${baseH}px`;
+  if (Number.isFinite(PREVIEW_VIEW.viewportHeight)) {
+    const minHeight = 160;
+    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(
+      PREVIEW_VIEW.viewportHeight, minHeight, maxHeight);
+    viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;
+  } else {
+    viewport.style.height = `${baseH}px`;
+  }
+  const nextViewW = viewport.clientWidth || viewW;
+  const nextViewH = viewport.clientHeight || baseH;
+  PREVIEW_VIEW.viewW = nextViewW;
+  PREVIEW_VIEW.viewH = nextViewH;
+  PREVIEW_VIEW.panX = nextViewW / 2 - focusX * baseW * PREVIEW_VIEW.zoom;
+  PREVIEW_VIEW.panY = nextViewH / 2 - focusY * baseH * PREVIEW_VIEW.zoom;
+  PREVIEW_VIEW.panX = clampPreviewPan(PREVIEW_VIEW.panX, nextViewW, baseW, PREVIEW_VIEW.zoom);
+  PREVIEW_VIEW.panY = clampPreviewPan(PREVIEW_VIEW.panY, nextViewH, baseH, PREVIEW_VIEW.zoom);
+  PREVIEW_VIEW.initialized = true;
+  paintPreviewZoom();
+  layoutCapOverlay();
+}
+
+// Wheel zoom supplies a viewport-local anchor so the point under the pointer
+// stays fixed, like Timeline zoom; buttons default to the viewport centre.
+function setPreviewZoom(zoom, anchorX = null, anchorY = null) {
+  const viewport = $("previewViewport");
+  if (!viewport) return;
+  const oldZoom = PREVIEW_VIEW.zoom;
+  const x = Number.isFinite(anchorX)
+    ? clampWorkspaceSize(anchorX, 0, PREVIEW_VIEW.viewW) : PREVIEW_VIEW.viewW / 2;
+  const y = Number.isFinite(anchorY)
+    ? clampWorkspaceSize(anchorY, 0, PREVIEW_VIEW.viewH) : PREVIEW_VIEW.viewH / 2;
+  const focusX = (x - PREVIEW_VIEW.panX) / oldZoom;
+  const focusY = (y - PREVIEW_VIEW.panY) / oldZoom;
+  PREVIEW_VIEW.zoom = zoom;
+  PREVIEW_VIEW.panX = x - focusX * zoom;
+  PREVIEW_VIEW.panY = y - focusY * zoom;
+  PREVIEW_VIEW.panX = clampPreviewPan(PREVIEW_VIEW.panX, PREVIEW_VIEW.viewW, PREVIEW_VIEW.baseW, zoom);
+  PREVIEW_VIEW.panY = clampPreviewPan(PREVIEW_VIEW.panY, PREVIEW_VIEW.viewH, PREVIEW_VIEW.baseH, zoom);
+  paintPreviewZoom();
+}
+
+function resetPreviewZoom() {
+  PREVIEW_VIEW.zoom = 1;
+  PREVIEW_VIEW.panX = 0;
+  PREVIEW_VIEW.panY = 0;
+  PREVIEW_VIEW.initialized = false;
+  layoutPreviewZoom();
+}
+
+function stepPreviewZoom(direction, anchorX = null, anchorY = null) {
+  let nearest = 0;
+  for (let i = 1; i < PREVIEW_ZOOM_LEVELS.length; i++) {
+    if (Math.abs(PREVIEW_ZOOM_LEVELS[i] - PREVIEW_VIEW.zoom) <
+        Math.abs(PREVIEW_ZOOM_LEVELS[nearest] - PREVIEW_VIEW.zoom)) nearest = i;
+  }
+  const next = Math.max(0, Math.min(PREVIEW_ZOOM_LEVELS.length - 1, nearest + direction));
+  setPreviewZoom(PREVIEW_ZOOM_LEVELS[next], anchorX, anchorY);
+}
+
+function bindVideoZoom() {
+  const viewport = $("previewViewport");
+  const player = $("player");
+  $("videoZoomOut").onclick = () => stepPreviewZoom(-1);
+  $("videoZoomIn").onclick = () => stepPreviewZoom(1);
+  $("videoZoomFit").onclick = () => setPreviewZoom(1);
+  viewport.addEventListener("wheel", (event) => {
+    if (!event.ctrlKey || !event.deltaY) return;
+    event.preventDefault();
+    const bounds = viewport.getBoundingClientRect();
+    const anchorX = clampWorkspaceSize(
+      event.clientX - bounds.left, 0, viewport.clientWidth || bounds.width);
+    const anchorY = clampWorkspaceSize(
+      event.clientY - bounds.top, 0, viewport.clientHeight || bounds.height);
+    stepPreviewZoom(event.deltaY < 0 ? 1 : -1, anchorX, anchorY);
+  }, { passive: false });
+
+  player.addEventListener("loadedmetadata", layoutPreviewZoom);
+  window.addEventListener("resize", layoutPreviewZoom);
+  layoutPreviewZoom();
+
+  viewport.addEventListener("pointerdown", (event) => {
+    const hasOverflow = PREVIEW_VIEW.baseW * PREVIEW_VIEW.zoom > PREVIEW_VIEW.viewW + 1 ||
+      PREVIEW_VIEW.baseH * PREVIEW_VIEW.zoom > PREVIEW_VIEW.viewH + 1;
+    if (!hasOverflow || event.button !== 0 ||
+        event.target.closest("#capBox, .cap-handle")) return;
+    event.preventDefault();
+    PREVIEW_VIEW.drag = {
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      panX: PREVIEW_VIEW.panX, panY: PREVIEW_VIEW.panY,
+    };
+    viewport.classList.add("panning");
+    try { viewport.setPointerCapture(event.pointerId); } catch (_) { /* window events still handle mouse input */ }
+  });
+  viewport.addEventListener("pointermove", (event) => {
+    const drag = PREVIEW_VIEW.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    PREVIEW_VIEW.panX = clampPreviewPan(
+      drag.panX + event.clientX - drag.x, PREVIEW_VIEW.viewW,
+      PREVIEW_VIEW.baseW, PREVIEW_VIEW.zoom);
+    PREVIEW_VIEW.panY = clampPreviewPan(
+      drag.panY + event.clientY - drag.y, PREVIEW_VIEW.viewH,
+      PREVIEW_VIEW.baseH, PREVIEW_VIEW.zoom);
+    paintPreviewZoom();
+  });
+  const finishPan = (event) => {
+    const drag = PREVIEW_VIEW.drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    PREVIEW_VIEW.drag = null;
+    viewport.classList.remove("panning");
+    try { viewport.releasePointerCapture(event.pointerId); } catch (_) { /* already released */ }
+  };
+  viewport.addEventListener("pointerup", finishPan);
+  viewport.addEventListener("pointercancel", finishPan);
+}
+
 function videoContentRect() {
-  // The <video> box can letterbox its picture; return the real frame rect
-  // relative to .player-wrap so the overlay maps 1:1 onto the burned video.
-  const video = $("player"), wrap = video.parentElement;
+  // Return the unzoomed frame coordinates inside the transformed preview stage.
+  // The caption overlay is a sibling in that stage, so both scale together and
+  // the overlay remains aligned with the actual video image at every zoom.
+  const video = $("player"), stage = video.parentElement;
   const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
-  const vb = video.getBoundingClientRect(), wb = wrap.getBoundingClientRect();
-  const scale = Math.min(vb.width / vw, vb.height / vh);
+  const vb = video.getBoundingClientRect(), sb = stage.getBoundingClientRect();
+  const zoom = Math.max(0.01, PREVIEW_VIEW.zoom || 1);
+  const boxW = vb.width / zoom, boxH = vb.height / zoom;
+  const scale = Math.min(boxW / vw, boxH / vh);
   const w = vw * scale, h = vh * scale;
-  return { x: vb.left - wb.left + (vb.width - w) / 2,
-           y: vb.top - wb.top + (vb.height - h) / 2, w, h };
+  return { x: (vb.left - sb.left) / zoom + (boxW - w) / 2,
+           y: (vb.top - sb.top) / zoom + (boxH - h) / 2, w, h };
 }
 
 function capActiveCuesAt(t) {
@@ -773,11 +1108,45 @@ function capActiveCue() {
   return act.find((c) => c.id === S.capSel) || act[0] || null;
 }
 
-// The position tools edit the selected on-screen caption; when no caption is
-// on screen they edit the document default (also used for brand-new cues).
+function ensureCueCaptionStyle(cue) {
+  if (!cue.style || typeof cue.style !== "object") cue.style = { ...CAPPOS };
+  return cue.style;
+}
+
+function capApplyToAll() {
+  return !!$("capApplyAll")?.checked;
+}
+
+// Get the active cue's style (or the document default when the playhead is
+// between cues). Actual edits go through applyCaptionStylePatch so Apply to all
+// updates every timeline caption, on every track, not just this preview cue.
 function capStyleTarget() {
   const cue = capActiveCue();
-  return cue ? cue.style : CAPPOS;
+  return cue ? ensureCueCaptionStyle(cue) : CAPPOS;
+}
+
+function applyCaptionStylePatch(patch, activeCue = capActiveCue()) {
+  if (capApplyToAll()) {
+    // Use the active caption's complete layout as the shared base, then apply
+    // the current change. This keeps position, box width, size and alignment
+    // consistent together, and also updates the default for new captions.
+    const shared = {
+      ...CAPPOS,
+      ...(activeCue && activeCue.style && typeof activeCue.style === "object"
+        ? activeCue.style : {}),
+      ...patch,
+    };
+    Object.assign(CAPPOS, shared);
+    for (const cue of S.capCues) cue.style = { ...shared };
+  } else if (activeCue) {
+    Object.assign(ensureCueCaptionStyle(activeCue), patch);
+  } else {
+    Object.assign(CAPPOS, patch);
+  }
+}
+
+function captionStyleEditTouchesTimeline(activeCue = capActiveCue()) {
+  return !!activeCue || (capApplyToAll() && S.capCues.length > 0);
 }
 
 function styleCapBoxEl(el, st, r) {
@@ -804,7 +1173,7 @@ function layoutCapOverlay() {
   overlay.style.height = `${r.h}px`;
 
   const active = S.capCues.length ? capActiveCue() : null;
-  const st = active ? active.style : CAPPOS;
+  const st = active ? ensureCueCaptionStyle(active) : CAPPOS;
 
   // Static siblings: the OTHER captions sharing this frame, each rendered in
   // its own stored style so stacked captions preview exactly as burned.
@@ -814,7 +1183,7 @@ function layoutCapOverlay() {
       if (c === active) continue;
       const d = document.createElement("div");
       d.className = "cap-static";
-      styleCapBoxEl(d, c.style, r);
+      styleCapBoxEl(d, ensureCueCaptionStyle(c), r);
       d.textContent = c.text || "";
       overlay.appendChild(d);
     }
@@ -901,19 +1270,21 @@ function bindCaptionResize() {
       handle.setPointerCapture(ev.pointerId);
       handle.classList.add("active");
       const overlay = $("capOverlay");
-      const st = capStyleTarget();
+      const targetCue = capActiveCue();
+      const st = targetCue ? ensureCueCaptionStyle(targetCue) : CAPPOS;
+      const commitOnFinish = captionStyleEditTouchesTimeline(targetCue);
       const move = (e) => {
         const r = overlay.getBoundingClientRect();
         if (!r.width) return;
         const cx = st.x * r.width;
         const half = Math.abs((e.clientX - r.left) - cx);
-        st.box_w = Math.min(0.98, Math.max(0.12, (2 * half) / r.width));
+        applyCaptionStylePatch({ box_w: Math.min(0.98, Math.max(0.12, (2 * half) / r.width)) }, targetCue);
         layoutCapOverlay();
       };
       const up = (e) => {
         handle.releasePointerCapture?.(e.pointerId);
         handle.classList.remove("active");
-        if (st !== CAPPOS) commitCaptions();
+        if (commitOnFinish) commitCaptions();
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", up);
         handle.removeEventListener("pointercancel", up);
@@ -934,7 +1305,8 @@ function bindCaptionOverlay() {
     ev.preventDefault();
     box.setPointerCapture(ev.pointerId);
     box.classList.add("dragging");
-    const st = capStyleTarget();
+    const targetCue = capActiveCue();
+    const commitOnFinish = captionStyleEditTouchesTimeline(targetCue);
     const move = (e) => {
       const r = overlay.getBoundingClientRect();
       if (!r.width || !r.height) return;
@@ -947,16 +1319,13 @@ function bindCaptionOverlay() {
       $("guideH").hidden = sy === null;
       if (sx !== null) { $("guideV").style.left = `${sx * 100}%`; nx = sx; }
       if (sy !== null) { $("guideH").style.top = `${sy * 100}%`; ny = sy; }
-      st.x = nx; st.y = ny;
-      box.style.left = `${nx * 100}%`;
-      box.style.top = `${ny * 100}%`;
-      $("capPosInfo").textContent =
-        `x ${Math.round(nx * 100)}% \u00b7 y ${Math.round(ny * 100)}%`;
+      applyCaptionStylePatch({ x: nx, y: ny }, targetCue);
+      layoutCapOverlay(); // repositions the other simultaneous caption previews too
     };
     const up = (e) => {
       box.releasePointerCapture?.(e.pointerId);
       box.classList.remove("dragging");
-      if (st !== CAPPOS) commitCaptions();
+      if (commitOnFinish) commitCaptions();
       $("guideV").hidden = true;
       $("guideH").hidden = true;
       box.removeEventListener("pointermove", move);
@@ -970,28 +1339,32 @@ function bindCaptionOverlay() {
   });
 
   $("capFontSize").addEventListener("input", () => {
-    capStyleTarget().size_pct =
-      Number($("capFontSize").value) || CAPPOS_DEFAULT.size_pct;
+    const targetCue = capActiveCue();
+    applyCaptionStylePatch({
+      size_pct: Number($("capFontSize").value) || CAPPOS_DEFAULT.size_pct,
+    }, targetCue);
     layoutCapOverlay();
   });
   $("capFontSize").addEventListener("change", () => {
-    if (capStyleTarget() !== CAPPOS) commitCaptions();
+    if (captionStyleEditTouchesTimeline()) commitCaptions();
   });
   $("capPosReset").onclick = () => {
-    const st = capStyleTarget();
-    Object.assign(st, CAPPOS_DEFAULT);
+    const targetCue = capActiveCue();
+    const commit = captionStyleEditTouchesTimeline(targetCue);
+    applyCaptionStylePatch({ ...CAPPOS_DEFAULT }, targetCue);
     $("capFontSize").value = String(CAPPOS_DEFAULT.size_pct);
     syncAlignButtons();
     layoutCapOverlay();
-    if (st !== CAPPOS) commitCaptions();
+    if (commit) commitCaptions();
   };
   document.querySelectorAll(".capAlign").forEach((b) => {
     b.addEventListener("click", () => {
-      const st = capStyleTarget();
-      st.align = b.dataset.align;
+      const targetCue = capActiveCue();
+      const commit = captionStyleEditTouchesTimeline(targetCue);
+      applyCaptionStylePatch({ align: b.dataset.align }, targetCue);
       syncAlignButtons();
       layoutCapOverlay();
-      if (st !== CAPPOS) commitCaptions();
+      if (commit) commitCaptions();
     });
   });
   bindCaptionResize();
@@ -1013,6 +1386,29 @@ function bindCaptionOverlay() {
 
 const CAP = { job: null, timer: null, poll: 700, editorSig: null,
               fwStatus: null, wcpp: null };
+const TRANSLATION_MODEL_PRIORITY = [
+  "medium", "large-v3", "small", "base", "tiny", "large-v2", "large-v1",
+];
+
+function isTranslationUnsupportedModel(model) {
+  return ["turbo", "large-v3-turbo"].includes(String(model || "").toLowerCase());
+}
+
+function translationFallbackModel(select) {
+  if (!select) return "";
+  const options = [...select.options].map((o) => o.value).filter(Boolean);
+  for (const name of TRANSLATION_MODEL_PRIORITY) {
+    if (options.includes(name)) return name;
+  }
+  return options.find((name) => !isTranslationUnsupportedModel(name)) || "";
+}
+
+function translationModelReady() {
+  if (!$("cTranslate").checked) return true;
+  const select = engineIsWcpp() ? $("wModel") : $("cModel");
+  return !!select.value && !isTranslationUnsupportedModel(select.value);
+}
+
 // Caption burn position: normalised centre of the box on the frame.
 const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size_pct: 5.5, align: "center", box_w: 0.7 };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
@@ -1024,10 +1420,20 @@ function fillCaptionCard(caption) {
   if (!caption) return;
   const model = $("cModel"), lang = $("cLang"), dev = $("cDevice"), comp = $("cCompute");
   fillSelect(model, caption.models.map((m) => m.name), "medium");
-  // Annotate the model list with size + note for the tooltip.
+  // Turbo is multilingual for transcription, but its training omitted the
+  // speech-to-English translation task. Make that limitation visible in the
+  // model list as well as the tooltip.
   caption.models.forEach((m, i) => {
-    if (model.options[i]) model.options[i].title = `${m.size} — ${m.note}`;
+    if (!model.options[i]) return;
+    const turbo = isTranslationUnsupportedModel(m.name);
+    model.options[i].textContent = m.name + (turbo ? " — transcription only" : "");
+    model.options[i].title = `${m.size} — ${m.note}`;
   });
+  // These controls can be re-filled after Re-check, so assign (rather than
+  // add) handlers to avoid duplicate events.
+  $("cTranslate").onchange = () => { updateTranslationUI(); syncCapButton(); };
+  model.onchange = () => { updateTranslationUI(); syncCapButton(); };
+  $("wModel").onchange = () => { updateTranslationUI(); syncCapButton(); };
   fillSelect(lang, caption.languages.map((l) => l.code), "auto");
   caption.languages.forEach((l, i) => {
     if (lang.options[i]) lang.options[i].textContent = `${l.code} — ${l.name}`;
@@ -1065,17 +1471,63 @@ function engineIsWcpp() {
   return $("cEngine") && $("cEngine").value === "whispercpp";
 }
 
+function updateTranslationUI() {
+  const hint = $("translateHint");
+  if (!hint || !$("cTranslate")) return;
+  if (!$("cTranslate").checked) {
+    hint.textContent = "Translates non-English speech into English; English speech stays English. Turbo models are transcription-only, so checking this option will switch to a compatible model when available.";
+    return;
+  }
+
+  const wcpp = engineIsWcpp();
+  const select = wcpp ? $("wModel") : $("cModel");
+  let model = select.value;
+  let switchedFrom = "";
+  if (isTranslationUnsupportedModel(model)) {
+    const fallback = translationFallbackModel(select);
+    if (fallback) {
+      switchedFrom = model;
+      select.value = fallback;
+      model = fallback;
+    }
+  }
+
+  if (!model) {
+    hint.textContent = wcpp
+      ? "No whisper.cpp model is installed. Download a translation-capable model (medium recommended, or large-v3) with Get model, then select it here."
+      : "Choose a translation-capable model such as medium or large-v3.";
+    return;
+  }
+  if (isTranslationUnsupportedModel(model)) {
+    hint.textContent = wcpp
+      ? "Turbo cannot translate. Download a translation-capable model (medium recommended, or large-v3) with Get model, then select it here."
+      : "Turbo cannot translate. Choose medium or large-v3 for English translation.";
+    return;
+  }
+
+  if (switchedFrom) {
+    hint.textContent = wcpp
+      ? `${switchedFrom} cannot translate; switched to installed ${model}.`
+      : `${switchedFrom} cannot translate; switched to ${model}. faster-whisper may download this model the first time.`;
+  } else {
+    hint.textContent = "For non-English speech, Whisper will output English captions. English speech remains English.";
+  }
+}
+
 function renderWcppPanel() {
   const w = CAP.wcpp;
   if (!w) return;
   const wModel = $("wModel"), wDl = $("wDlSelect");
+  const previousModel = wModel.value;
   wModel.textContent = "";
   (w.models || []).forEach((m) => {
     const o = document.createElement("option");
     o.value = m.name;
-    o.textContent = `${m.name} (${Math.round(m.size_bytes / 1048576)} MB on disk)`;
+    o.textContent = `${m.name}${isTranslationUnsupportedModel(m.name) ? " — transcription only" : ""} (${Math.round(m.size_bytes / 1048576)} MB on disk)`;
     wModel.appendChild(o);
   });
+  if (previousModel && [...wModel.options].some((o) => o.value === previousModel))
+    wModel.value = previousModel;
   if (!wModel.options.length) {
     const o = document.createElement("option");
     o.value = ""; o.textContent = "no GGML models yet - download one below";
@@ -1084,7 +1536,8 @@ function renderWcppPanel() {
   wDl.textContent = "";
   (w.catalog || []).filter((c) => !c.present).forEach((c) => {
     const o = document.createElement("option");
-    o.value = c.name; o.textContent = `${c.name} (${c.size})`;
+    o.value = c.name;
+    o.textContent = `${c.name}${isTranslationUnsupportedModel(c.name) ? " — transcription only" : ""} (${c.size})`;
     wDl.appendChild(o);
   });
   $("wDlBtn").disabled = !wDl.options.length;
@@ -1099,20 +1552,26 @@ function renderWcppPanel() {
     '- Vulkan runs on Windows and Linux. Source: ' +
     '<a href="https://github.com/ggml-org/whisper.cpp" target="_blank" ' +
     'rel="noopener">ggml-org/whisper.cpp</a>';
+  updateTranslationUI();
 }
 
 function syncCapButton() {
   const btn = $("capBtn");
+  const translationReady = translationModelReady();
   if (engineIsWcpp()) {
     const w = CAP.wcpp || {};
-    const ok = !!w.available && (w.models || []).length > 0;
+    const hasModel = (w.models || []).length > 0;
+    const ok = !!w.available && hasModel && translationReady;
     btn.disabled = !ok;
-    btn.textContent = ok ? "Transcribe with whisper.cpp"
-      : (!w.available ? "whisper-cli not found" : "download a GGML model first");
+    btn.textContent = !translationReady ? "download a translation-capable model"
+      : (ok ? "Transcribe with whisper.cpp"
+        : (!w.available ? "whisper-cli not found" : "download a GGML model first"));
   } else {
     const st = CAP.fwStatus || { available: false };
-    btn.disabled = !st.available;
-    btn.textContent = st.available ? "Transcribe to captions" : "Auto-caption unavailable";
+    const ok = !!st.available && translationReady;
+    btn.disabled = !ok;
+    btn.textContent = !translationReady ? "choose a translation-capable model"
+      : (st.available ? "Transcribe to captions" : "Auto-caption unavailable");
   }
 }
 
@@ -1121,6 +1580,7 @@ function updateEngineUI() {
   $("wcppPanel").hidden = !wcpp;
   ["rowFwModel", "rowFwDevice", "rowFwCompute"].forEach((id) => { $(id).hidden = wcpp; });
   $("fwOnlyChecks").hidden = wcpp;
+  updateTranslationUI();
   syncCapButton();
   $("capNote").textContent = wcpp
     ? "whisper.cpp engine - uses the Vulkan GPU backend when the binary is built with it"
@@ -1220,6 +1680,8 @@ function resetCaptionCard() {
   $("capBtn").disabled = !available;
   $("capBtn").textContent = available ? "Transcribe to captions" : "Auto-caption unavailable";
   $("cOutDir").value = "";
+  updateTranslationUI();
+  syncCapButton();
 }
 
 async function startCaption() {
@@ -1583,6 +2045,7 @@ function pollJob(id) {
 
 (async function boot() {
   bindWorkspaceDocking();
+  bindVideoZoom();
   bindUI();
   syncQualityRows();
   await loadEnv();

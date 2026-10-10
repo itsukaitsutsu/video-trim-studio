@@ -61,6 +61,19 @@ def test_ui_catalog_shape():
     assert ui["status"]["available"] in (True, False)
     assert all({"code", "name"} == set(l) for l in ui["languages"])
     assert all({"name", "size", "note"} == set(m) for m in ui["models"])
+    models = {m["name"]: m for m in ui["models"]}
+    assert "not trained for translation" in models["large-v3-turbo"]["note"]
+    assert "not trained for translation" in models["turbo"]["note"]
+
+
+def test_translation_ui_warns_about_turbo_and_has_a_dynamic_hint():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    js = _frontend_js(root)
+    html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
+    assert "updateTranslationUI" in js
+    assert "translationFallbackModel" in js
+    assert "transcription only" in js
+    assert 'id="translateHint"' in html
 
 
 def test_status_points_at_the_install_command_when_missing(monkeypatch):
@@ -143,6 +156,21 @@ def test_start_reports_a_missing_video(whisper_present, tmp_path):
         cap_mod.start_caption(str(tmp_path / "nope.mp4"), {})
 
 
+@pytest.mark.parametrize("engine,model", [
+    ("faster-whisper", "large-v3-turbo"),
+    ("faster-whisper", "turbo"),
+    ("whispercpp", "large-v3-turbo"),
+])
+def test_start_rejects_turbo_for_translation(engine, model, tmp_path):
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"x")
+    with pytest.raises(cap_mod.CaptionError, match="not trained for translation"):
+        cap_mod.start_caption(str(video), {
+            "engine": engine, "model": model,
+            "translate_to_english": True,
+        })
+
+
 # ---------------------------------------------------------------------------
 # Jobs: snapshots, cancellation, pruning
 # ---------------------------------------------------------------------------
@@ -157,6 +185,26 @@ def test_job_snapshot_is_json_safe_and_masks_internals():
     assert snap["segment_count"] == 1
     assert snap["tail"] == [{"t": "00:00:01,000", "text": "hi"}]
     assert snap["state"] == "running"
+
+
+def test_translate_option_reaches_faster_whisper_task(monkeypatch, tmp_path):
+    video = tmp_path / "speech.mp4"
+    video.write_bytes(b"test")
+    seen = {}
+    monkeypatch.setattr(cap_mod, "extract_audio", lambda *args, **kwargs: None)
+
+    def fake_transcribe_step(wav_path, job, **kwargs):
+        seen.update(kwargs)
+        return [], {"task": kwargs["task"]}
+
+    monkeypatch.setattr(cap_mod, "transcribe_step", fake_transcribe_step)
+    job = cap_mod._new_job("caption", str(video))
+    cap_mod._run(job, str(video), {
+        "model": "medium", "language": "auto",
+        "translate_to_english": True, "output_dir": str(tmp_path),
+    })
+    assert job["state"] == "done", job.get("error")
+    assert seen["task"] == "translate"
 
 
 def test_cancel_sets_the_flag_and_is_reflected_in_the_note():
@@ -912,7 +960,7 @@ def test_export_caption_controls_are_wired():
                    "updateCaptionExportInfo", "job.captions"):
         assert needle in js, f"{needle} missing from app.js"
     assert 'id="xCaptions"' in html and 'id="xCapInfo"' in html
-    assert "app.js?v=15" in html
+    assert "app.js?v=" in html
 
 
 # ---------------------------------------------------------------------------
@@ -996,12 +1044,25 @@ def test_caption_overlay_is_wired_between_html_and_js():
     js = _frontend_js(root)
     html = open(os.path.join(root, "static", "index.html"), encoding="utf-8").read()
     for needle in ("CAPPOS", "capOverlay", "capBox", "bindCaptionOverlay",
-                   "caption_style", "videoContentRect", "guideV", "SNAP_X"):
+                   "caption_style", "videoContentRect", "guideV", "SNAP_X",
+                   "applyCaptionStylePatch", "captionStyleEditTouchesTimeline",
+                   "PREVIEW_ZOOM_LEVELS", "bindVideoZoom", "layoutPreviewZoom",
+                   "bindPreviewViewportResize", "applyPreviewViewportHeight"):
         assert needle in js, f"{needle} missing from app.js"
     for needle in ("capOverlay", "capBox", "capBoxText", "guideV", "guideH",
-                   "capStyleRow", "capFontSize", "capPosReset", "capPosInfo"):
+                   "capStyleRow", "capFontSize", "capPosReset", "capPosInfo",
+                   "capApplyAll", "previewViewport", "previewStage", "videoZoomOut",
+                   "videoZoomFit", "videoZoomIn", "videoZoomLevel",
+                   "previewViewportResize"):
         assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
-    assert "app.js?v=15" in html
+    timeline_start = html.index('data-workspace-panel="timeline"')
+    apply_all_pos = html.index('id="capApplyAll"')
+    cap_add_pos = html.index('id="capAdd"')
+    list_start = html.index('data-workspace-panel="list"')
+    style_row_pos = html.index('id="capStyleRow"')
+    assert timeline_start < apply_all_pos < cap_add_pos < list_start < style_row_pos
+    assert "capApplyAllHint" not in html and "capApplyAllHint" not in js
+    assert "app.js?v=" in html and "style.css?v=" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1049,7 +1110,7 @@ def test_upload_handler_points_the_path_at_the_saved_file():
     js = _frontend_js(root)
     assert 'data.saved_path' in js                    # path filled from the upload
     assert '$("dSubPath").value = "";' not in js.split("dSubFile", 1)[1].split("};", 1)[0]
-    assert "app.js?v=15" in open(os.path.join(root, "static", "index.html"),
+    assert "app.js?v=" in open(os.path.join(root, "static", "index.html"),
                                  encoding="utf-8").read()
 
 
@@ -1117,13 +1178,13 @@ def test_alignment_and_resize_controls_are_wired():
     assert "justify_char" not in js and "justify_char" not in html  # JC mode removed
     for needle in ("capAlign", "cap-handle", ">J<"):
         assert needle in html, f"{needle} missing from index.html"
-    assert "app.js?v=15" in html
+    assert "app.js?v=" in html
 
 
 def test_write_ass_justify_flushes_both_edges(tmp_path):
     """Justify = every line but the last spans the full box width: first word
     on the left edge, last word ending on the right edge (each word gets its
-    own \pos, because libass itself cannot justify)."""
+    own \\pos, because libass itself cannot justify)."""
     text = "this caption is long enough to wrap into two lines"
     cues = [{"start": 1.0, "end": 2.0, "text": text}]
     out = tmp_path / "justify.ass"

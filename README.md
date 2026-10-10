@@ -7,7 +7,8 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 ## What it does
 
 - Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
-- Rearrange the video, timeline, list, and right-side tool panels by dragging their grip handles between the two docked columns. Other panels resize from all four edges; the Timeline card keeps top/bottom panel handles, while a centered bottom grip resizes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Ctrl+wheel scrolls through tracks when needed. The layout and viewport height are saved in this browser; **Reset layout** restores the defaults.
+- Rearrange the video, timeline, list, and right-side tool panels by dragging their grip handles between the two docked columns. On wide layouts, the inner edges (right edge of a main-column panel or left edge of a side-column panel) resize the shared column divider: shrinking the main column moves the side panels left and widens them, keeping each column's panels stacked and aligned. Outer edges resize individual panels; other panels have four handles, while Timeline has right/top/bottom. On narrow layouts, the columns stack and edge handles resize individual panels. The Video preview's centered inner bottom grip resizes only its viewing window; the normal outer panel handle remains separate. The Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. The layout and viewport heights are saved in this browser; **Reset layout** restores the defaults.
+- Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
@@ -126,9 +127,9 @@ automatic download entirely.
 
 | Option | Notes |
 | --- | --- |
-| **Model** | `tiny`/`base` are fast, `medium` is the balanced default, `large-v3` is the most accurate and slow on CPU, `large-v3-turbo` is nearly as accurate and much faster (multilingual, incl. Indonesian). |
+| **Model** | `tiny`/`base` are fast, `medium` is the balanced default, `large-v3` is the most accurate and slow on CPU. `large-v3-turbo` is fast for transcription, but it is **not trained for translation**. |
 | **Language** | 99 codes plus *Auto-detect*. `id`, `ms`, `jw`, `en`, … |
-| **Translate to English** | Any spoken language into English subtitles (Whisper's `translate` task). |
+| **Translate to English** | Translates non-English speech into English subtitles (Whisper's `translate` task); English speech stays English. Use `medium` or `large-v3`, not `turbo`. |
 | **Device / compute type** | `auto` uses CUDA when CTranslate2 sees a GPU, otherwise CPU `int8`. An RX 6600 XT is CUDA-less, so it runs on CPU; low-VRAM CUDA setups can pick `int8_float16`. |
 | **VAD** | Silero voice-activity filter; skips silence, reduces hallucinations, faster. |
 | **Word timestamps** | Adds per-word timings to the JSON (about 10% slower). |
@@ -199,8 +200,9 @@ whisper.cpp's Vulkan backend instead.
    to its full path. The card's status line confirms when it's found.
 3. **Get a GGML model:** use the card's Download button, or put
    `ggml-<name>.bin` into `work/whisper-models/` yourself (links in
-   `MODEL-DOWNLOAD.md`). Recommended: `ggml-large-v3-turbo.bin` for daily use,
-   `ggml-large-v3.bin` for max accuracy.
+   `MODEL-DOWNLOAD.md`). Recommended: `ggml-large-v3-turbo.bin` for daily
+   transcription, `ggml-medium.bin` or `ggml-large-v3.bin` for speech-to-English
+   translation (Turbo is not trained for translation).
 4. **Engine → whisper.cpp**, pick the model, transcribe. When the GPU is doing
    the work the job output mentions Vulkan and the app reports
    `backend: vulkan`; Task Manager's GPU meter should climb. A binary built
@@ -234,15 +236,18 @@ lanes below them (like CapCut / Kdenlive):
   selection at the playhead, **delete** (Delete) removes it and leaves a gap, and
   **ripple delete** (Shift+Delete) also closes the gap. **snap** sticks drags to
   the playhead and neighbouring edges.
-- Every caption keeps its **own position/size/alignment**: select it and the
-  drag/resize/align/font tools (and the draggable preview box) edit just that
-  caption. The preview shows all captions on the current frame at once, in
-  their own styles, and the export burns exactly that (one positioned ASS
-  Dialogue per caption - overlaps included).
+- Caption layout controls are in the export card when **burn captions** is
+  enabled; the **Apply to all captions** checkbox is in the Timeline toolbar
+  beside **+ caption**. It is on by default: moving/resizing the preview box, changing
+  size/alignment, or resetting copies the active caption's full layout to every
+  timeline caption across T1, T2, and other tracks; new captions use that layout
+  too. Turn it off to edit only the caption at the playhead. The preview shows
+  overlapping captions together, and the export burns the saved per-caption
+  styles (one positioned ASS Dialogue per caption).
 - The block, the preview boxes, the timeline list and the burn all update together
   after each edit. Timeline edits are saved with the project, not written back
   to the subtitle file (see Captions).
-- Ctrl+wheel scrolls vertically through V1/T tracks when they overflow the view; when there is no vertical overflow, it zooms the time scale. Horizontal wheel (or Shift+wheel) scrolls an overwide stage. Drag on empty space to rubber-band select clips and captions.
+- Alt+wheel scrolls vertically through V1/T tracks when they overflow the view. Ctrl+wheel also scrolls tracks when they overflow; when they fit, it zooms the time scale. Horizontal wheel (or Shift+wheel) scrolls an overwide stage. Drag on empty space to rubber-band select clips and captions.
 
 ### Editable captions
 

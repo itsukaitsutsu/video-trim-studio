@@ -85,7 +85,9 @@ h1 { margin: 0; font-size: 17px; letter-spacing: .2px; }
 .workspace-column.workspace-drop-active { outline: 1px dashed var(--accent-2); outline-offset: -4px; border-radius: 6px; }
 
 main {
-  display: grid; grid-template-columns: minmax(0, 1fr) 340px;
+  --workspace-side-width: 340px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, var(--workspace-side-width));
   gap: 14px; padding: 14px 18px; align-items: start;
 }
 .col-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -93,7 +95,37 @@ main {
 
 .player-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; position: relative; }
 video { width: 100%; max-height: 46vh; background: #000; border-radius: 4px; display: block; }
+.preview-viewport-wrap { position: relative; width: 100%; padding-bottom: 10px; box-sizing: border-box; }
+.preview-viewport {
+  position: relative; width: 100%; min-height: 160px;
+  overflow: hidden; background: #000; border-radius: 4px;
+  touch-action: none; user-select: none;
+}
+.preview-viewport-resize {
+  position: absolute; bottom: 1px; left: 50%; transform: translateX(-50%); z-index: 10;
+  width: 48px; height: 8px; border-radius: 5px;
+  background: transparent; cursor: row-resize;
+  touch-action: none; user-select: none; transition: background-color .12s;
+}
+.preview-viewport-resize::after {
+  content: ""; position: absolute; left: 14px; right: 14px; top: 3px; height: 2px;
+  border-radius: 2px; background: #66778b;
+}
+.preview-viewport-resize:hover, .preview-viewport-resize.resizing { background: var(--accent-2); }
+.preview-viewport-resize:hover::after, .preview-viewport-resize.resizing::after { background: #fff; }
+.preview-stage {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0;
+  background: #000; will-change: transform;
+}
+#player {
+  position: absolute; inset: 0; width: 100%; height: 100%; max-height: none;
+  object-fit: contain; background: #000; border-radius: 0;
+}
+.preview-viewport.pan-available { cursor: grab; }
+.preview-viewport.panning { cursor: grabbing; }
 .player-tools { display: flex; align-items: center; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+.preview-zoom-controls { display: flex; align-items: center; gap: 4px; }
+#videoZoomLevel { min-width: 42px; text-align: center; font-variant-numeric: tabular-nums; }
 
 .timeline-card, .list-card, .card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;

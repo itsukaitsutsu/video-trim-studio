@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
                    help=f"Audio language code: id, en, ms, jw, auto, ... (default: {DEFAULT_LANGUAGE})")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help="tiny / base / small / medium / large-v3 / large-v3-turbo "
-                        f"(default: {DEFAULT_MODEL})")
+                        f"(default: {DEFAULT_MODEL}; turbo is transcription-only)")
     p.add_argument("--translate-to-english", action="store_true",
                    default=TRANSLATE_TO_ENGLISH,
                    help="Translate any language to English subtitles")
@@ -114,6 +114,10 @@ def main() -> None:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if (args.translate_to_english
+            and args.model.casefold() in cap.TRANSLATION_UNSUPPORTED_MODELS):
+        print(f"ERROR: {cap.translation_model_error(args.model)}", file=sys.stderr)
+        sys.exit(2)
     if args.model == "large-v3-turbo" and args.language not in ("en", "auto"):
         print("NOTE: large-v3-turbo is weaker on non-English; consider "
               "--model large-v3 for Indonesian.", file=sys.stderr)

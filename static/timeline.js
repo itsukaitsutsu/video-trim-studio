@@ -690,6 +690,14 @@ function bindTimeline() {
   viewport.addEventListener("wheel", (ev) => {
     if (!S.project) return;
     const verticalOverflows = viewport.scrollHeight > viewport.clientHeight + 1;
+    // Alt+wheel is a dedicated vertical-scroll shortcut for the V/T track
+    // stack. If everything already fits, consume the gesture without zooming
+    // or panning the timeline.
+    if (ev.altKey && ev.deltaY) {
+      ev.preventDefault();
+      if (verticalOverflows) viewport.scrollTop += ev.deltaY;
+      return;
+    }
     if (ev.ctrlKey && verticalOverflows && ev.deltaY) {
       ev.preventDefault();
       viewport.scrollTop += ev.deltaY;

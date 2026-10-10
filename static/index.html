@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=27">
+<link rel="stylesheet" href="/static/style.css?v=33">
 </head>
 <body>
 <header>
@@ -33,16 +33,23 @@
   <div class="col-main workspace-column" data-workspace-column="main">
     <div class="player-wrap" data-workspace-panel="video" data-default-column="main">
       <div class="workspace-panel-head"><strong>Video preview</strong><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Video preview panel" title="Drag to move panel">⠿</button></div>
-      <video id="player" preload="metadata" disableremoteplayback></video>
-      <div id="gapShade" hidden></div>
-      <div id="capOverlay" hidden>
-        <div id="guideV" class="cap-guide v" hidden></div>
-        <div id="guideH" class="cap-guide h" hidden></div>
-        <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
-          <div id="capBoxText">Caption preview</div>
-          <div class="cap-handle w" title="Drag to resize the box"></div>
-          <div class="cap-handle e" title="Drag to resize the box"></div>
+      <div class="preview-viewport-wrap">
+        <div id="previewViewport" class="preview-viewport" aria-label="Video preview; Ctrl+wheel zooms around the pointer; drag the hand cursor to pan">
+          <div id="previewStage" class="preview-stage">
+            <video id="player" preload="metadata" disableremoteplayback></video>
+            <div id="gapShade" hidden></div>
+            <div id="capOverlay" hidden>
+              <div id="guideV" class="cap-guide v" hidden></div>
+              <div id="guideH" class="cap-guide h" hidden></div>
+              <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
+                <div id="capBoxText">Caption preview</div>
+                <div class="cap-handle w" title="Drag to resize the box"></div>
+                <div class="cap-handle e" title="Drag to resize the box"></div>
+              </div>
+            </div>
+          </div>
         </div>
+        <div id="previewViewportResize" class="preview-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize video preview viewing area" title="Drag up or down to resize the video viewing area"></div>
       </div>
       <div id="previewInfo" class="dim small" hidden></div>
       <div class="player-tools">
@@ -52,6 +59,13 @@
         <span id="timecode" style="font-family:ui-monospace,monospace"></span>
         <span class="dim small" title="Press Space to play or pause when focus is not in a form control">Space: play/pause</span>
         <span id="playInfo" class="dim"></span>
+        <span class="spacer"></span>
+        <div class="preview-zoom-controls" aria-label="Preview zoom controls">
+          <button id="videoZoomOut" class="mini" title="Zoom out of the video preview" aria-label="Zoom out">&minus;</button>
+          <button id="videoZoomFit" class="mini" title="Fit video to preview" aria-label="Fit video">fit</button>
+          <button id="videoZoomIn" class="mini" title="Zoom in to the video preview" aria-label="Zoom in">+</button>
+          <span id="videoZoomLevel" class="dim small" title="Ctrl+wheel to zoom; drag the video to pan when zoomed">100%</span>
+        </div>
       </div>
     </div>
 
@@ -59,7 +73,7 @@
       <div class="tl-head">
         <strong>Timeline</strong>
         <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline panel" title="Drag to move panel">⠿</button>
-        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; ctrl+wheel = scroll tracks if needed, otherwise zoom</span>
+        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; alt+wheel = scroll overflowing tracks &middot; ctrl+wheel = scroll if needed, otherwise zoom</span>
         <span class="spacer"></span>
         <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
         <button class="mini" id="zoomIn" title="Zoom in">+</button>
@@ -74,6 +88,9 @@
         <button class="mini" id="capDel" title="Remove the selection and leave a gap (Delete)">delete</button>
         <button class="mini" id="tlRipple" title="Remove the selection and close the gap (Shift+Delete)">ripple delete</button>
         <span class="spacer"></span>
+        <label class="chk" title="Apply caption position, size, box width and alignment changes to every timeline caption">
+          <input id="capApplyAll" type="checkbox" checked> Apply to all captions
+        </label>
         <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
         <button class="mini" id="tlLane" title="Add a caption lane to stack captions">+ lane</button>
         <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
@@ -176,6 +193,7 @@
         <div class="row"><label>Language</label><select id="cLang"></select></div>
         <div class="row" id="rowFwDevice"><label>Device</label><select id="cDevice"></select></div>
         <label class="chk"><input type="checkbox" id="cTranslate"> translate to English (any language &rarr; English)</label>
+        <div id="translateHint" class="dim small translation-hint" aria-live="polite">Translates non-English speech into English; English speech stays English. Turbo models are transcription-only, so checking this option will switch to a compatible model when available.</div>
         <details class="adv">
           <summary>Advanced options</summary>
           <div class="row" id="rowFwCompute"><label>Compute type</label><select id="cCompute"></select></div>
@@ -258,7 +276,7 @@
       <div class="row"><label></label><span id="xCapInfo" class="dim small"></span></div>
       <div class="row" id="capStyleRow" hidden><label>Caption box</label>
         <span class="grow cap-style-tools">
-          <span class="dim small">drag the caption over the preview &middot; drag the box edges to resize</span>
+          <span class="dim small">drag the caption over the preview &middot; drag the box edges to resize &middot; apply-to-all is in Timeline</span>
           <span class="cap-align-group" title="Text alignment inside the box">
             <button class="mini capAlign" data-align="left" title="Align left">L</button>
             <button class="mini capAlign on" data-align="center" title="Align centre">C</button>
@@ -339,7 +357,7 @@
 </div>
 
 <script src="/static/timeline-model.js?v=2"></script>
-<script src="/static/timeline.js?v=10"></script>
-<script src="/static/app.js?v=26"></script>
+<script src="/static/timeline.js?v=11"></script>
+<script src="/static/app.js?v=35"></script>
 </body>
 </html>

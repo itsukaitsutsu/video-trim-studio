@@ -152,12 +152,26 @@ MODELS: dict[str, dict] = {
     "base": {"size": "142 MB", "note": "quick"},
     "small": {"size": "466 MB", "note": "good balance for CPU"},
     "medium": {"size": "~1.5 GB", "note": "recommended default"},
-    "large-v3-turbo": {"size": "~1.5 GB", "note": "fast, near-large accuracy (multilingual)"},
-    "turbo": {"size": "~1.5 GB", "note": "alias of large-v3-turbo"},
+    "large-v3-turbo": {"size": "~1.5 GB", "note": "fast transcription; not trained for translation"},
+    "turbo": {"size": "~1.5 GB", "note": "alias of large-v3-turbo; not trained for translation"},
     "large-v1": {"size": "~2.9 GB", "note": "older"},
     "large-v2": {"size": "~2.9 GB", "note": "older"},
     "large-v3": {"size": "~2.9 GB", "note": "max accuracy, slow on CPU"},
 }
+
+# The Turbo checkpoint was fine-tuned for transcription, not speech-to-English
+# translation. It returns speech in its original language even when the caller
+# requests the translate task. Keep this guard common to both engines.
+TRANSLATION_UNSUPPORTED_MODELS = frozenset({"turbo", "large-v3-turbo"})
+
+
+def translation_model_error(model_name: str) -> str:
+    return (
+        f"Whisper model '{model_name}' (Turbo) is not trained for translation "
+        "and returns the original language even when translation is requested. Choose a "
+        "translation-capable model such as 'medium' or 'large-v3'."
+    )
+
 
 # Generic per-language hints (names, punctuation style) - no per-video tuning.
 DEFAULT_PROMPTS = {
@@ -763,10 +777,13 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
     language = opts.get("language") or "auto"
     if language not in LANGUAGES:
         raise CaptionError(f"Unknown language code '{language}'.")
+    model = str(opts.get("model") or "medium")
+    if (opts.get("translate_to_english")
+            and model.casefold() in TRANSLATION_UNSUPPORTED_MODELS):
+        raise CaptionError(translation_model_error(model))
     if engine == "whispercpp":
         # AMD-GPU/CPU engine: validate the external binary + GGML model.
         from vts import whispercpp as wcpp
-        model = opts.get("model") or "medium"
         if not wcpp.find_cli():
             raise CaptionError(
                 "whisper-cli not found. Build whisper.cpp (with -DGGML_VULKAN=ON "
@@ -782,7 +799,6 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
             raise CaptionError(
                 "faster-whisper is not installed, so auto-captioning is unavailable.\n"
                 "Install it with:  python -m pip install faster-whisper")
-        model = opts.get("model") or "medium"
         if model not in MODELS:
             raise CaptionError(f"Unknown model '{model}'. Choose one of: "
                                f"{', '.join(MODELS)}")
