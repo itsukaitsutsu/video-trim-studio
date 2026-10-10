@@ -17,7 +17,7 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
-- **Frame-accurate re-encode** is the default. Stream copy stays fast for a single end-trim; cuts that need a seek or segment join automatically re-encode to prevent audio/video timestamp drift.
+- **Stream copy** is the default for speed when the edit permits it. Cuts needing a seek or segment join automatically re-encode to prevent audio/video timestamp drift. Burning captions always requires re-encoding; choose **Re-encode (frame accurate)** explicitly when that precision is preferred.
 - GPU encoder is preferred if the local FFmpeg build exposes it; otherwise it uses a CPU encoder. If hardware decoding fails, it retries with CPU decoding; if the hardware encoder itself fails, it retries with a matching CPU encoder when available.
 - No account, cloud API, or network service required. Your media stays on your PC when you run it locally.
 

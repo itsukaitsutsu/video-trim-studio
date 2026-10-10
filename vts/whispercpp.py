@@ -210,6 +210,10 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
     q: "queue.Queue[str | None]" = queue.Queue()
     threading.Thread(target=_reader, daemon=True).start()
 
+    # Keep the beginning as well as the tail: CLI argument/model errors are
+    # usually printed before the long help text, so tail-only diagnostics hide
+    # the useful line (especially for video-specific failures).
+    first_log: list[str] = []
     tail_log: list[str] = []
     try:
         while True:
@@ -226,6 +230,8 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
                 continue
             if line is None:
                 break
+            if len(first_log) < 15:
+                first_log.append(line)
             tail_log.append(line)
             if len(tail_log) > 40:
                 tail_log.pop(0)
@@ -268,9 +274,13 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
 
     srt_path = out_base + ".srt"
     if rc != 0 or not os.path.exists(srt_path):
+        details = "\n".join(first_log)
+        tail = "\n".join(tail_log[-8:])
+        if tail and tail not in details:
+            details += "\n...\n" + tail
         raise CaptionError(
-            f"whisper-cli exited with code {rc}. Last output:\n"
-            + "\n".join(tail_log[-15:]))
+            f"whisper-cli exited with code {rc}. Diagnostic output "
+            f"(beginning first, then final lines):\n{details or '(no output)'}")
 
     segments = parse_srt(Path(srt_path).read_text(encoding="utf-8", errors="replace"))
     elapsed = time.time() - job["started"]

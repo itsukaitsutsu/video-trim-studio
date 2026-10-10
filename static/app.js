@@ -1155,12 +1155,41 @@ function styleCapBoxEl(el, st, r) {
   el.style.fontSize = `${Math.max(10, r.h * st.size_pct / 100)}px`;
   el.style.width = `${Math.max(0.08, st.box_w) * r.w}px`;
   el.style.textAlign = st.align === "justify" ? "left" : st.align;
+  el.style.fontFamily = `\"${String(st.font || "Arial").replace(/[\"\\\\]/g, "") || "Arial"}\", Arial, sans-serif`;
+  el.style.fontWeight = st.bold === false ? "400" : "700";
+  el.style.fontStyle = st.italic ? "italic" : "normal";
+  el.style.textDecoration = `${st.underline ? "underline " : ""}${st.strike ? "line-through" : ""}`.trim() || "none";
+  el.style.letterSpacing = `${Number(st.tracking) || 0}em`;
+  if (Number(st.box_h) > 0) {
+    el.style.height = `${Number(st.box_h) * r.h}px`; el.style.display = "flex"; el.style.alignItems = "center";
+  } else { el.style.height = "auto"; el.style.display = "block"; }
+  el.style.lineHeight = String(Math.min(3, Math.max(0.7, Number(st.leading) || 1.25)));
+  const rgba = (hex, opacity) => {
+    const h = /^#[0-9a-f]{6}$/i.test(hex || "") ? hex : "#000000";
+    return `rgba(${parseInt(h.slice(1,3),16)},${parseInt(h.slice(3,5),16)},${parseInt(h.slice(5,7),16)},${Math.min(100,Math.max(0,Number(opacity)||0))/100})`;
+  };
+  const sourceH = $("player")?.videoHeight || 1080;
+  const scale = r.h / sourceH;
+  el.style.color = rgba(st.fill || "#ffffff", st.fill_opacity ?? 100);
+  el.style.webkitTextStroke = `${Math.max(0, Number(st.stroke_width) || 0) * scale}px ${rgba(st.stroke || "#000000", st.stroke_opacity ?? 100)}`;
+  el.style.setProperty("--cap-bg", rgba(st.background || "#000000", st.background_opacity ?? 0));
+  const angle = (Number(st.shadow_angle) || 0) * Math.PI / 180;
+  const dist = Math.max(0, Number(st.shadow_distance) || 0) * scale;
+  const spread = Math.max(0, Number(st.shadow_size) || 0) * scale;
+  const blur = Math.max(0, Number(st.shadow_blur) || 0) * scale;
+  const shadow = rgba(st.shadow || "#000000", st.shadow_opacity ?? 0);
+  const shadows = [`${Math.cos(angle)*dist}px ${Math.sin(angle)*dist}px ${blur}px ${shadow}`];
+  if (spread > 0) for (let deg = 0; deg < 360; deg += 45) {
+    const a = deg * Math.PI / 180;
+    shadows.push(`${Math.cos(angle)*dist + Math.cos(a)*spread}px ${Math.sin(angle)*dist + Math.sin(a)*spread}px ${blur}px ${shadow}`);
+  }
+  el.style.textShadow = shadows.join(", ");
 }
 
 function layoutCapOverlay() {
   const overlay = $("capOverlay");
   if (!overlay) return;
-  const armed = ["burn", "both"].includes($("xCaptions").value) && !!S.project;
+  const armed = (["burn", "both"].includes($("xCaptions").value) || $("cBurn")?.checked) && !!S.project;
   overlay.hidden = !armed;
   if (!armed) return;
   const t = playheadTime();
@@ -1183,8 +1212,17 @@ function layoutCapOverlay() {
       if (c === active) continue;
       const d = document.createElement("div");
       d.className = "cap-static";
-      styleCapBoxEl(d, ensureCueCaptionStyle(c), r);
-      d.textContent = c.text || "";
+      const cueStyle = ensureCueCaptionStyle(c);
+      styleCapBoxEl(d, cueStyle, r);
+      const cueFontPx = Math.max(10, r.h * cueStyle.size_pct / 100);
+      const cueMaxChars = Math.floor((cueStyle.box_w * r.w) /
+        Math.max(1, cueFontPx * (CHAR_FACTOR + (Number(cueStyle.tracking) || 0))));
+      for (const lineText of wrapText(c.text || "", cueMaxChars)) {
+        const row = document.createElement("div"); row.className = "cap-line";
+        row.style.textAlign = cueStyle.align === "justify" ? "left" : cueStyle.align;
+        const label = document.createElement("span"); label.className = "cap-line-label";
+        label.textContent = lineText; row.appendChild(label); d.appendChild(row);
+      }
       overlay.appendChild(d);
     }
   }
@@ -1193,7 +1231,7 @@ function layoutCapOverlay() {
   styleCapBoxEl(box, st, r);
   if (active) $("capBoxText").dataset.raw = active.text || "";
   const fontPx = Math.max(10, r.h * st.size_pct / 100);
-  const maxChars = Math.floor((st.box_w * r.w) / (fontPx * CHAR_FACTOR));
+  const maxChars = Math.floor((st.box_w * r.w) / Math.max(1, fontPx * (CHAR_FACTOR + (Number(st.tracking) || 0))));
   renderCaptionLines(
     wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars),
     st.align);
@@ -1204,29 +1242,57 @@ function layoutCapOverlay() {
             : (S.capCues.length ? " \u00b7 default (no caption on screen)" : ""));
   if (document.activeElement !== $("capFontSize"))
     $("capFontSize").value = String(st.size_pct);
+  const styleControlValues = {
+    capFontFamily: st.font || "Arial", capTracking: st.tracking ?? 0,
+    capLineSpacing: st.leading ?? 1.25, capBold: st.bold !== false,
+    capItalic: !!st.italic, capUnderline: !!st.underline, capStrike: !!st.strike,
+    capFill: st.fill || "#ffffff", capFillEnabled: Number(st.fill_opacity ?? 100) > 0,
+    capFillOpacity: st.fill_opacity ?? 100, capStroke: st.stroke || "#000000",
+    capStrokeEnabled: Number(st.stroke_opacity ?? 100) > 0 && Number(st.stroke_width ?? 2) > 0,
+    capStrokeWidth: st.stroke_width ?? 2, capStrokeOpacity: st.stroke_opacity ?? 100,
+    capStrokePosition: st.stroke_position || "outer", capBackground: st.background || "#000000",
+    capBackgroundEnabled: Number(st.background_opacity || 0) > 0,
+    capBackgroundOpacity: st.background_opacity ?? 72, capShadow: st.shadow || "#000000",
+    capShadowEnabled: Number(st.shadow_opacity || 0) > 0, capShadowOpacity: st.shadow_opacity ?? 75,
+    capShadowAngle: st.shadow_angle ?? 135, capShadowDistance: st.shadow_distance ?? 3,
+    capShadowSize: st.shadow_size ?? 6, capShadowBlur: st.shadow_blur ?? 12,
+    capX: Math.round((st.x ?? .5) * 100), capY: Math.round((st.y ?? .92) * 100),
+    capWidth: Math.round((st.box_w ?? .88) * 100), capHeight: Math.round((st.box_h ?? 0) * 100),
+  };
+  for (const [id, value] of Object.entries(styleControlValues)) {
+    const input = $(id);
+    if (input && document.activeElement !== input) {
+      if (input.type === "checkbox") input.checked = !!value;
+      else input.value = String(value);
+    }
+  }
+  if ($("capFontSizeValue")) $("capFontSizeValue").textContent = String(Math.round(1080 * (st.size_pct || 4.5) / 100));
+  if ($("capFillOpacityValue")) $("capFillOpacityValue").textContent = String(st.fill_opacity ?? 100);
+  if ($("capBackgroundOpacityValue")) $("capBackgroundOpacityValue").textContent = String(st.background_opacity ?? 72);
+  if ($("capShadowOpacityValue")) $("capShadowOpacityValue").textContent = String(st.shadow_opacity ?? 75);
+  if ($("capShadowAngleValue")) $("capShadowAngleValue").textContent = `${st.shadow_angle ?? 135}°`;
+  if ($("capShadowDistanceValue")) $("capShadowDistanceValue").textContent = String(st.shadow_distance ?? 3);
+  if ($("capShadowSizeValue")) $("capShadowSizeValue").textContent = String(st.shadow_size ?? 6);
+  if ($("capShadowBlurValue")) $("capShadowBlurValue").textContent = String(st.shadow_blur ?? 12);
+  document.querySelectorAll(".capZone").forEach((b) => b.classList.toggle("on",
+    Math.abs(Number(b.dataset.x) - (st.x ?? .5)) < .06 && Math.abs(Number(b.dataset.y) - (st.y ?? .92)) < .06));
+  const fs = st.bold !== false && st.italic ? "bold-italic" : st.bold !== false ? "bold" : st.italic ? "italic" : "regular";
+  if ($("capFontStyle") && document.activeElement !== $("capFontStyle")) $("capFontStyle").value = fs;
   syncAlignButtons();
 }
 
 function renderCaptionLines(lines, align) {
-  // CSS text-align:justify is unreliable here (our lines end in forced
-  // breaks), so justify is rendered the same way the burn does it: words
-  // placed across the full box width, last line left-aligned.
   const container = $("capBoxText");
-  if (align === "justify" && lines.length > 1) {
-    container.textContent = "";
-    lines.forEach((ln, i) => {
-      const row = document.createElement("div");
-      row.className = "cap-line";
-      row.style.justifyContent = i < lines.length - 1 ? "space-between" : "flex-start";
-      ln.split(" ").forEach((w) => {
-        const sp = document.createElement("span");
-        sp.textContent = w;
-        row.appendChild(sp);
-      });
-      container.appendChild(row);
-    });
-  } else {
-    container.textContent = lines.join("\n");
+  container.replaceChildren();
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.className = "cap-line";
+    row.style.textAlign = align === "justify" ? "left" : align;
+    const label = document.createElement("span");
+    label.className = "cap-line-label";
+    label.textContent = line;
+    row.appendChild(label);
+    container.appendChild(row);
   }
 }
 
@@ -1256,8 +1322,19 @@ function captionTextAt(t) {
 
 
 function syncAlignButtons() {
-  document.querySelectorAll(".capAlign").forEach((b) =>
-    b.classList.toggle("on", b.dataset.align === capStyleTarget().align));
+  const st = capStyleTarget();
+  const align = st.align || "center";
+  document.querySelectorAll(".capAlign").forEach((b) => b.classList.toggle("on", b.dataset.align === align));
+  for (const [id, key] of [["capBold", "bold"], ["capItalic", "italic"], ["capUnderline", "underline"], ["capStrike", "strike"]])
+    $(id)?.classList.toggle("on", !!st[key]);
+}
+
+function toggleCaptionFlag(key) {
+  const cue = capActiveCue(), commit = captionStyleEditTouchesTimeline(cue);
+  const st = cue ? ensureCueCaptionStyle(cue) : CAPPOS;
+  applyCaptionStylePatch({ [key]: !st[key] }, cue);
+  layoutCapOverlay(); syncAlignButtons();
+  if (commit) commitCaptions();
 }
 
 function bindCaptionResize() {
@@ -1367,6 +1444,56 @@ function bindCaptionOverlay() {
       if (commit) commitCaptions();
     });
   });
+  const styleInputs = {
+    capFontFamily: ["font", "text"], capTracking: ["tracking", "number"],
+    capLineSpacing: ["leading", "number"], capFill: ["fill", "text"],
+    capFillOpacity: ["fill_opacity", "number"], capStroke: ["stroke", "text"],
+    capStrokeWidth: ["stroke_width", "number"], capStrokeOpacity: ["stroke_opacity", "number"],
+    capStrokePosition: ["stroke_position", "text"], capBackground: ["background", "text"],
+    capBackgroundOpacity: ["background_opacity", "number"], capShadow: ["shadow", "text"],
+    capShadowOpacity: ["shadow_opacity", "number"], capShadowAngle: ["shadow_angle", "number"],
+    capShadowDistance: ["shadow_distance", "number"], capShadowSize: ["shadow_size", "number"],
+    capShadowBlur: ["shadow_blur", "number"], capX: ["x", "percent"], capY: ["y", "percent"],
+    capWidth: ["box_w", "percent"], capHeight: ["box_h", "percent"],
+  };
+  for (const [id, [key, type]] of Object.entries(styleInputs)) {
+    const input = $(id); if (!input) continue;
+    const update = () => {
+      const cue = capActiveCue();
+      const value = type === "number" ? Number(input.value) : type === "percent" ? Number(input.value) / 100 : input.value;
+      applyCaptionStylePatch({ [key]: value }, cue);
+      layoutCapOverlay();
+    };
+    input.addEventListener("input", update);
+    input.addEventListener("change", () => { if (captionStyleEditTouchesTimeline()) commitCaptions(); });
+  }
+  const toggleOpacity = (id, key) => $(id)?.addEventListener("change", () => {
+    const cue = capActiveCue(), st = cue ? ensureCueCaptionStyle(cue) : CAPPOS;
+    const val = $(id).checked ? (Number(st[key] || 0) || 100) : 0;
+    const commit = captionStyleEditTouchesTimeline(cue);
+    applyCaptionStylePatch({ [key]: val }, cue); layoutCapOverlay();
+    if (commit) commitCaptions();
+  });
+  toggleOpacity("capFillEnabled", "fill_opacity");
+  toggleOpacity("capStrokeEnabled", "stroke_opacity");
+  toggleOpacity("capBackgroundEnabled", "background_opacity");
+  toggleOpacity("capShadowEnabled", "shadow_opacity");
+  $("capFontStyle")?.addEventListener("change", () => {
+    const v = $("capFontStyle").value, cue = capActiveCue();
+    const commit = captionStyleEditTouchesTimeline(cue);
+    applyCaptionStylePatch({ bold: v === "bold" || v === "bold-italic", italic: v === "italic" || v === "bold-italic" }, cue);
+    layoutCapOverlay(); if (commit) commitCaptions();
+  });
+  $("capBold")?.addEventListener("click", () => toggleCaptionFlag("bold"));
+  $("capItalic")?.addEventListener("click", () => toggleCaptionFlag("italic"));
+  $("capUnderline")?.addEventListener("click", () => toggleCaptionFlag("underline"));
+  $("capStrike")?.addEventListener("click", () => toggleCaptionFlag("strike"));
+  document.querySelectorAll(".capZone").forEach((b) => b.addEventListener("click", () => {
+    const cue = capActiveCue(), commit = captionStyleEditTouchesTimeline(cue);
+    applyCaptionStylePatch({ x: Number(b.dataset.x), y: Number(b.dataset.y) }, cue);
+    layoutCapOverlay(); if (commit) commitCaptions();
+  }));
+  $("cBurn")?.addEventListener("change", layoutCapOverlay);
   bindCaptionResize();
   $("capBox").addEventListener("dblclick", (ev) => {
     ev.preventDefault();                       // no word-select/focus side effects
@@ -1410,7 +1537,14 @@ function translationModelReady() {
 }
 
 // Caption burn position: normalised centre of the box on the frame.
-const CAPPOS_DEFAULT = { x: 0.5, y: 0.88, size_pct: 5.5, align: "center", box_w: 0.7 };
+const CAPPOS_DEFAULT = { x: 0.5, y: 0.92, size_pct: 4.5, align: "center", box_w: 0.88,
+  anchor: "bottom", margin: 0.08,
+  font: "Lucida Console", tracking: 0, leading: 1.25, bold: false, italic: false,
+  underline: false, strike: false, fill: "#ffffff", fill_opacity: 100,
+  stroke: "#000000", stroke_width: 1, stroke_opacity: 0, stroke_position: "outer",
+  background: "#000000", background_opacity: 0,
+  shadow: "#000000", shadow_opacity: 100, shadow_angle: 135,
+  shadow_distance: 3, shadow_size: 6, shadow_blur: 12, box_h: 0 };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
 // it, which is what keeps the preview and the burn in sync.
 const CHAR_FACTOR = 0.55;
@@ -1654,6 +1788,7 @@ function captionOptions() {
     beam_size: Number($("cBeam").value) || 1,
     initial_prompt: $("cPrompt").value.trim() || null,
     output_dir: $("cOutDir").value.trim() || null,
+    caption_style: { ...CAPPOS },
   };
   if (opts.engine === "whispercpp") opts.model = $("wModel").value;
   return opts;

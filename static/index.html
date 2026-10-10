@@ -256,12 +256,60 @@
       </div>
     </div>
 
+    <section class="card text-style-panel" data-workspace-panel="caption-style" data-default-column="side">
+      <h2 class="workspace-panel-heading"><span>Text</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Text panel" title="Drag to move panel">⠿</button></h2>
+      <details open>
+        <summary>Text</summary>
+        <div class="style-panel-content">
+          <div class="style-row"><select id="capFontFamily" aria-label="Font family">
+            <option>Arial</option><option>Arial Black</option><option>Segoe UI</option><option>Verdana</option><option>Tahoma</option><option>Georgia</option><option>Times New Roman</option><option>Courier New</option><option>Lucida Console</option>
+          </select><select id="capFontStyle" aria-label="Font style"><option value="regular">Regular</option><option value="bold">Bold</option><option value="italic">Italic</option><option value="bold-italic">Bold Italic</option></select></div>
+          <div class="style-row style-format-icons">
+            <button class="style-icon" id="capBold" title="Bold"><b>B</b></button><button class="style-icon" id="capItalic" title="Italic"><i>I</i></button><button class="style-icon" id="capUnderline" title="Underline"><u>U</u></button><button class="style-icon" id="capStrike" title="Strikethrough"><s>S</s></button><span class="style-spacer"></span>
+            <label>Size <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="4.5"><output id="capFontSizeValue">48</output></label>
+          </div>
+          <div class="style-row style-align-icons" aria-label="Text alignment">
+            <button class="style-icon capAlign" data-align="left" title="Align left">≡</button><button class="style-icon capAlign" data-align="center" title="Center">☰</button><button class="style-icon capAlign" data-align="right" title="Align right">≡</button><button class="style-icon capAlign" data-align="justify" title="Justify">▤</button>
+          </div>
+          <div class="style-row style-metrics"><label>Tracking <input id="capTracking" type="number" min="-0.2" max="1" step="0.01" value="0"></label><label>Leading <input id="capLineSpacing" type="number" min="0.7" max="3" step="0.05" value="1.25"></label></div>
+        </div>
+      </details>
+      <details open>
+        <summary>Align and Transform</summary>
+        <div class="style-panel-content transform-grid">
+          <div class="zone-wrap"><span class="dim small">Zone</span><div class="zone-grid" role="group" aria-label="Caption anchor zone">
+            <button class="capZone" data-x="0.08" data-y="0.08" title="Top left"></button><button class="capZone" data-x="0.5" data-y="0.08" title="Top centre"></button><button class="capZone" data-x="0.92" data-y="0.08" title="Top right"></button>
+            <button class="capZone" data-x="0.08" data-y="0.5" title="Middle left"></button><button class="capZone" data-x="0.5" data-y="0.5" title="Centre"></button><button class="capZone" data-x="0.92" data-y="0.5" title="Middle right"></button>
+            <button class="capZone" data-x="0.08" data-y="0.92" title="Bottom left"></button><button class="capZone" data-x="0.5" data-y="0.92" title="Bottom centre"></button><button class="capZone" data-x="0.92" data-y="0.92" title="Bottom right"></button>
+          </div></div>
+          <label>X <input id="capX" type="number" min="0" max="100" step="1">%</label><label>Y <input id="capY" type="number" min="0" max="100" step="1">%</label>
+          <label>W <input id="capWidth" type="number" min="5" max="100" step="1">%</label><label>H <input id="capHeight" type="number" min="0" max="100" step="1" placeholder="Auto">%</label>
+        </div>
+      </details>
+      <details open>
+        <summary>Appearance <span class="dim small">⚙</span></summary>
+        <div class="style-panel-content appearance-controls">
+          <div class="appearance-row"><b>Fill</b><label class="appearance-color"><input id="capFillEnabled" type="checkbox" checked><input id="capFill" type="color" value="#ffffff"></label><input id="capFillOpacity" type="range" min="0" max="100" value="100"><output id="capFillOpacityValue">100</output></div>
+          <div class="appearance-row"><b>Stroke</b><label class="appearance-color"><input id="capStrokeEnabled" type="checkbox"><input id="capStroke" type="color" value="#000000"></label><input id="capStrokeWidth" type="number" min="0" max="20" step="0.5" value="2"><select id="capStrokePosition"><option value="outer">Outer</option><option value="center">Center</option><option value="inner">Inner</option></select><input id="capStrokeOpacity" type="range" min="0" max="100" value="100"></div>
+          <div class="appearance-row"><b>Background</b><label class="appearance-color"><input id="capBackgroundEnabled" type="checkbox"><input id="capBackground" type="color" value="#000000"></label><input id="capBackgroundOpacity" type="range" min="0" max="100" value="72"><output id="capBackgroundOpacityValue">72</output></div>
+          <div class="appearance-row shadow-row"><b>Shadow</b><label class="appearance-color"><input id="capShadowEnabled" type="checkbox"><input id="capShadow" type="color" value="#000000"></label>
+            <label>Opacity<input id="capShadowOpacity" type="range" min="0" max="100" value="75"><output id="capShadowOpacityValue">75</output></label>
+            <label>Angle<input id="capShadowAngle" type="range" min="0" max="359" value="135"><output id="capShadowAngleValue">135°</output></label>
+            <label>Distance<input id="capShadowDistance" type="range" min="0" max="30" step="0.5" value="3"><output id="capShadowDistanceValue">3</output></label>
+            <label>Size<input id="capShadowSize" type="range" min="0" max="20" step="0.5" value="6"><output id="capShadowSizeValue">6</output></label>
+            <label>Blur<input id="capShadowBlur" type="range" min="0" max="20" step="0.5" value="12"><output id="capShadowBlurValue">12</output></label>
+          </div>
+        </div>
+        <div class="row"><button id="capPosReset" class="mini">Reset style</button><span id="capPosInfo" class="dim small"></span></div>
+      </details>
+    </section>
+
     <div class="card" data-workspace-panel="export-settings" data-default-column="side">
       <h2 class="workspace-panel-heading"><span>3 &middot; Export settings</span><button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Export settings panel" title="Drag to move panel">⠿</button></h2>
       <div class="row"><label>Mode</label>
         <select id="xMode">
           <option value="reencode">Re-encode (frame accurate)</option>
-          <option value="copy">Stream copy (fast for end-trims; other cuts re-encode for sync)</option>
+          <option value="copy" selected>Stream copy (fast when possible; other cuts may re-encode for sync)</option>
         </select>
       </div>
       <div class="row"><label>Output file</label><span class="grow"><input id="xOutput" type="text" spellcheck="false"></span></div>
@@ -274,22 +322,7 @@
         </select>
       </div>
       <div class="row"><label></label><span id="xCapInfo" class="dim small"></span></div>
-      <div class="row" id="capStyleRow" hidden><label>Caption box</label>
-        <span class="grow cap-style-tools">
-          <span class="dim small">drag the caption over the preview &middot; drag the box edges to resize &middot; apply-to-all is in Timeline</span>
-          <span class="cap-align-group" title="Text alignment inside the box">
-            <button class="mini capAlign" data-align="left" title="Align left">L</button>
-            <button class="mini capAlign on" data-align="center" title="Align centre">C</button>
-            <button class="mini capAlign" data-align="right" title="Align right">R</button>
-            <button class="mini capAlign" data-align="justify" title="Justify: lines flush both box edges, extra space between words; last line left">J</button>
-          </span>
-          <label class="mini-label">size
-            <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="5.5">
-          </label>
-          <button id="capPosReset" class="mini">reset</button>
-          <span id="capPosInfo" class="dim small"></span>
-        </span>
-      </div>
+      <div class="row" id="capStyleRow" hidden><label>Caption style</label><span class="dim small">Edit captions in the Text panel.</span></div>
       <div id="reencodeOpts">
         <div class="row"><label>Video codec</label><select id="xCodec"></select></div>
         <div class="row"><label>Quality</label>

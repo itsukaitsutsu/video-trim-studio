@@ -521,29 +521,39 @@ def load_wav_float32(wav_path: str):
     return np.frombuffer(frames, dtype="<i2").astype("float32") / 32768.0
 
 
-def burn_subtitles(video: str, srt_path: str, out_path: str) -> None:
-    """Render captions into a new video file (hardsubs). Source untouched.
-
-    ffmpeg runs with its working directory set to the subtitle's folder and is
-    handed a bare filename, which sidesteps the Windows drive-colon escaping
-    rules that `-vf subtitles=` normally needs. FFmpeg's default autorotate
-    still applies, so a phone clip keeps its baked orientation.
-    """
+def burn_subtitles(video: str, cues: list[dict], out_path: str,
+                   style: dict | None = None) -> None:
+    """Render styled captions into a new video file. The source is untouched."""
     check_ffmpeg()
-    folder = os.path.dirname(os.path.abspath(srt_path)) or "."
-    name = os.path.basename(srt_path).replace("\\", "/").replace("'", r"\'")
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-           "-i", os.path.abspath(video),
-           "-vf", f"subtitles='{name}'",
-           "-c:a", "copy",
-           "-map_metadata", "0",
-           os.path.abspath(out_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
-                          errors="replace", cwd=folder)
-    if proc.returncode != 0 or not os.path.exists(out_path):
-        raise CaptionError(
-            "ffmpeg subtitle burn-in failed (ffmpeg needs libass; standard in "
-            "most builds):\n" + (proc.stderr or "")[-2000:])
+    from vts.ffprobe import probe
+    from vts.captionmap import write_ass
+
+    folder = os.path.dirname(os.path.abspath(out_path)) or "."
+    info = probe(video)
+    v = info.get("video") or {}
+    width, height = int(v.get("width") or 1920), int(v.get("height") or 1080)
+    if int(v.get("rotation") or 0) % 180:
+        width, height = height, width
+    fd, ass_path = tempfile.mkstemp(prefix="vts_caption_style_", suffix=".ass", dir=folder)
+    os.close(fd)
+    try:
+        write_ass(cues, ass_path, width, height, style=style or {})
+        name = os.path.basename(ass_path).replace("\\", "/").replace("'", r"\'")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-i", os.path.abspath(video),
+               "-vf", f"subtitles='{name}'",
+               "-c:a", "copy", "-map_metadata", "0", os.path.abspath(out_path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", cwd=folder)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            raise CaptionError(
+                "ffmpeg subtitle burn-in failed (ffmpeg needs libass; standard in "
+                "most builds):\\n" + (proc.stderr or "")[-2000:])
+    finally:
+        try:
+            os.unlink(ass_path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -674,7 +684,10 @@ def _run(job: dict, source: str, opts: dict) -> None:
         job["stage"] = "audio"
         job["note"] = "extracting 16 kHz mono audio"
         tmpdir = tempfile.mkdtemp(prefix="vts_caption_")
-        wav_path = os.path.join(tmpdir, f"{stem}.16k.wav")
+        # whisper.cpp on Windows may fail to open Unicode paths (its error
+        # output shows non-ASCII characters as '?'). Use a stable ASCII-only
+        # temporary filename; the source basename is not needed for inference.
+        wav_path = os.path.join(tmpdir, "audio.16k.wav")
         extract_audio(source, wav_path, normalize=bool(opts.get("normalize_audio")))
 
         if opts.get("keep_audio"):
@@ -730,7 +743,7 @@ def _run(job: dict, source: str, opts: dict) -> None:
             job["stage"] = "burn"
             burned = os.path.join(output_dir, f"{stem}.captioned.mp4")
             job["note"] = "burning subtitles into a new video file"
-            burn_subtitles(source, srt_path, burned)
+            burn_subtitles(source, segments, burned, opts.get("caption_style"))
             job["outputs"]["video"] = burned
 
         job["meta"] = meta

@@ -223,6 +223,7 @@ class CaptionRequest(BaseModel):
     initial_prompt: str | None = None
     keep_audio: bool = False
     burn: bool = False
+    caption_style: dict = {}
     output_dir: str | None = None
 
 
