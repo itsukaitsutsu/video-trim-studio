@@ -2193,3 +2193,28 @@ function pollJob(id) {
   }
   draw();
 })();
+
+$("filmcraftBtn")?.addEventListener("click", async () => {
+  if (!S.project) return alert("Open a video first.");
+  
+  const videoPath = S.project.info.path;
+  const srtPath = S.project.sidecar_subtitles || "";
+
+  $("filmcraftBtn").disabled = true;
+  $("filmcraftBtn").textContent = "Launching FilmCraft...";
+
+  try {
+    const res = await fetch("/api/send-to-filmcraft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_path: videoPath, srt_path: srtPath })
+    });
+    const data = await res.json();
+    alert(data.message || data.error);
+  } catch (err) {
+    alert("Failed to connect to backend: " + err.message);
+  } finally {
+    $("filmcraftBtn").disabled = false;
+    $("filmcraftBtn").textContent = "🎬 Send to FilmCraft (.exe)";
+  }
+});

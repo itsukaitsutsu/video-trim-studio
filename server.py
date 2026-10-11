@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import string
+import subprocess
 import sys
 import tempfile
 import threading
@@ -53,26 +54,27 @@ LAST_PROJECT_FILE = WORK_DIR / "last_project.txt"
 app = FastAPI(title="Video Trim Studio", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.route('/api/send-to-filmcraft', methods=['POST'])
-def send_to_filmcraft_api():
-  data = request.json or {}
-  video_path = data.get('video_path')
-  srt_path = data.get('srt_path')
+@app.post("/api/send-to-filmcraft")
+async def send_to_filmcraft_api(request: Request):
+  data = await request.json()
+  video_path = data.get("video_path")
+  srt_path = data.get("srt_path")
 
   if not video_path or not os.path.exists(video_path):
-    return jsonify({'ok': False, 'error': 'Video file not found'}), 400
+    return JSONResponse(
+        status_code=400, content={"ok": False, "error": "Video file not found"}
+    )
 
   try:
-    # Run the bridge script in background
-    subprocess.Popen([
-        sys.executable,
-        'send_to_filmcraft.py',
-        video_path,
-        srt_path or '',
-    ])
-    return jsonify({'ok': True, 'message': 'FilmCraft launched successfully!'})
+    bridge_script = str(BASE_DIR / "send_to_filmcraft.py")
+    subprocess.Popen(
+        [sys.executable, bridge_script, video_path, srt_path or ""]
+    )
+    return {"ok": True, "message": "FilmCraft launched successfully!"}
   except Exception as e:
-    return jsonify({'ok': False, 'error': str(e)}), 500
+    return JSONResponse(
+        status_code=500, content={"ok": False, "error": str(e)}
+    )
 # ---------------------------------------------------------------------------
 # Single active project (this is a local, single-user tool)
 # ---------------------------------------------------------------------------
