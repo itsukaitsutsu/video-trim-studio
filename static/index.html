@@ -18,7 +18,24 @@
   <button id="workspaceReset" class="ghost mini" title="Restore the default panel layout">Reset layout</button>
   <div class="env" id="env">checking ffmpeg&hellip;</div>
 </header>
+<button id="btnFilmCraft" class="btn btn-purple" onclick="sendToFilmCraft()">
+  🎬 Send to FilmCraft (.exe)
+</button>
 
+<script>
+function sendToFilmCraft() {
+  fetch('/api/send-to-filmcraft', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      video_path: currentVideoPath,
+      srt_path: currentSrtPath
+    })
+  }).then(res => res.json()).then(data => {
+    alert(data.message || data.error);
+  });
+}
+</script>
 <section class="openbar">
   <input id="pathInput" type="text" placeholder="Path to video, e.g. C:\Videos\clip.mp4  (or browse)" spellcheck="false">
   <button id="browseBtn" class="ghost">Browse&hellip;</button>
