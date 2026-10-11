@@ -62,11 +62,90 @@ function fmtBytes(n) {
   return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
 
-const WORKSPACE_STORAGE_KEY = "video-trim-studio.workspace.v1";
-const DEFAULT_WORKSPACE_LAYOUT = {
-  main: ["video", "timeline", "list"],
-  side: ["detect", "caption", "caption-style", "export-settings", "export"],
+const WORKSPACE_STORAGE_KEY = "video-trim-studio.workspace.v3";
+const WORKSPACE_STORAGE_KEY_V2 = "video-trim-studio.workspace.v2";
+const WORKSPACE_STORAGE_KEY_V1 = "video-trim-studio.workspace.v1";
+const WORKSPACE_ZONES = ["left", "center", "right", "bottom"];
+// Premiere-style units: project/program are single cards; inspector and the
+// bottom timeline unit are tabbed (mockup: #inspTabs / #botTabs).
+const UNIT_TABS_BASE = {
+  inspector: ["clip", "text", "export"],
+  timeline: ["tl", "list"],
 };
+const TAB_UNIT_BASE = {
+  clip: "inspector", text: "inspector", export: "inspector",
+  tl: "timeline", list: "timeline",
+};
+// Live copies: grouping (drop a unit onto another) adds member tabs at runtime.
+let UNIT_TABS = { ...UNIT_TABS_BASE };
+let TAB_UNIT = { ...TAB_UNIT_BASE };
+const TAB_TITLES = {
+  clip: "Clip", text: "Text", export: "Export", tl: "Timeline", list: "List",
+};
+const UNIT_TITLES = {
+  project: "Project", program: "Program Monitor",
+  inspector: "Inspector", timeline: "Timeline",
+};
+const DEFAULT_UNIT_ZONE = {
+  project: "left", program: "center", inspector: "right", timeline: "bottom",
+};
+const DEFAULT_WORKSPACE_LAYOUT = {
+  zones: {
+    left: ["project"],
+    center: ["program"],
+    right: ["inspector"],
+    bottom: ["timeline"],
+  },
+  win: {
+    project: true, program: true, inspector: true, timeline: true,
+    clip: true, text: true, export: true,
+    tl: true, list: true,
+  },
+  activeTab: { inspector: "clip", timeline: "tl" },
+  host: {},
+  zoneSizes: {},
+  sizes: {},
+};
+const WINDOW_MENU = [
+  ["project", "Project"],
+  ["program", "Program Monitor"],
+  "sep",
+  ["clip", "Clip"],
+  ["text", "Text"],
+  ["export", "Export"],
+  "sep",
+  ["tl", "Timeline"],
+  ["list", "List"],
+  "sep",
+];
+// Live workspace state; zones/sizes refresh from the DOM on save.
+let WS = null;
+
+function unitEl(unit) {
+  return document.querySelector(`[data-workspace-panel="${unit}"]`);
+}
+
+function tabBtn(unit, tab) {
+  const root = unitEl(unit);
+  return root ? root.querySelector(`[data-wintab="${tab}"]`) : null;
+}
+
+function tabPage(unit, tab) {
+  const root = unitEl(unit);
+  return root ? root.querySelector(`[data-tabpage="${tab}"]`) : null;
+}
+
+function unitIsVisible(unit) {
+  const el = unitEl(unit);
+  return !!el && el.style.display !== "none";
+}
+
+function zoneHasVisibleUnit(zone) {
+  const host = zoneEl(zone);
+  if (!host) return false;
+  return [...host.children].some((el) =>
+    el.hasAttribute("data-workspace-panel") && el.style.display !== "none");
+}
 
 function workspacePanelMap(root) {
   return new Map([...root.querySelectorAll("[data-workspace-panel]")]
@@ -269,153 +348,476 @@ function bindPreviewViewportResize() {
   });
 }
 
-function workspaceGridMetrics(root) {
-  const computed = getComputedStyle(root);
-  const paddingLeft = parseFloat(computed.paddingLeft) || 0;
-  const paddingRight = parseFloat(computed.paddingRight) || 0;
-  const gap = parseFloat(computed.columnGap) || 0;
-  const contentLeft = root.getBoundingClientRect().left + paddingLeft;
-  const trackWidth = Math.max(0, root.clientWidth - paddingLeft - paddingRight - gap);
-  return { contentLeft, trackWidth, gap };
+function zoneEl(zone) {
+  return document.querySelector(`[data-workspace-column="${zone}"]`);
 }
 
-function setWorkspaceSideWidth(root, requestedWidth) {
-  const { trackWidth } = workspaceGridMetrics(root);
-  const minMain = Math.min(320, trackWidth);
-  const minSide = Math.min(220, Math.max(0, trackWidth - minMain));
-  const maxSide = Math.max(minSide, trackWidth - minMain);
-  const width = clampWorkspaceSize(requestedWidth, minSide, maxSide);
-  root.style.setProperty("--workspace-side-width", `${width}px`);
-  return width;
-}
-
-function workspaceColumnsAreSideBySide(root) {
-  if (window.matchMedia && window.matchMedia("(max-width: 1080px)").matches) return false;
-  const mainColumn = root.querySelector('[data-workspace-column="main"]');
-  const sideColumn = root.querySelector('[data-workspace-column="side"]');
-  if (!mainColumn || !sideColumn) return false;
-  const mainRect = mainColumn.getBoundingClientRect();
-  const sideRect = sideColumn.getBoundingClientRect();
-  return mainRect.width > 0 && sideRect.width > 0 &&
-    Math.abs(mainRect.top - sideRect.top) < 2 && sideRect.left >= mainRect.right - 2;
-}
-
-function clearWorkspacePanelWidthOverrides(root) {
-  for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
-    panel.style.width = "";
-    panel.style.marginLeft = "";
-    panel.style.alignSelf = "";
-    panel.style.flex = "";
-    if (!panel.style.height && !panel.style.marginTop)
-      panel.classList.remove("workspace-panel-resized");
-  }
-}
-
-function isSharedWorkspaceEdge(root, panel, edge) {
-  const columnId = panel.parentElement?.dataset.workspaceColumn;
-  return workspaceColumnsAreSideBySide(root) &&
-    ((edge === "right" && columnId === "main") || (edge === "left" && columnId === "side"));
+function setZoneSize(zone, px) {
+  const el = zoneEl(zone);
+  if (!el) return;
+  const limits = { left: [220, 640], right: [240, 720], bottom: [200, 1200] };
+  if (!limits[zone]) return;
+  if (!Number.isFinite(px) || px <= 0) { el.style.flexBasis = ""; return; }
+  el.style.flexBasis = `${clampWorkspaceSize(px, limits[zone][0], limits[zone][1])}px`;
 }
 
 function refreshWorkspaceResizeHandleTitles(root) {
+  // Panel edges resize their own panel; zone widths use the divider grips.
   for (const handle of root.querySelectorAll(".workspace-resize-handle")) {
-    const panel = handle.closest("[data-workspace-panel]");
-    if (!panel) continue;
     const edge = handle.dataset.resizeEdge;
-    handle.title = isSharedWorkspaceEdge(root, panel, edge)
-      ? "Drag to resize both workspace columns"
-      : `Drag the ${edge} edge to resize this panel`;
+    handle.title = `Drag the ${edge} edge to resize this panel`;
   }
+}
+
+function bindZoneDividers() {
+  const binds = [
+    [$("divL"), "left", "x", 1], [$("divR"), "right", "x", -1], [$("divB"), "bottom", "y", -1],
+  ];
+  for (const [handle, zone, axis, dir] of binds) {
+    if (!handle || !zoneEl(zone)) continue;
+    handle.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      const el = zoneEl(zone);
+      const start = axis === "x" ? ev.clientX : ev.clientY;
+      const rect = el.getBoundingClientRect();
+      const base = axis === "x" ? rect.width : rect.height;
+      const move = (e) => {
+        const d = (axis === "x" ? e.clientX : e.clientY) - start;
+        setZoneSize(zone, base + dir * d);
+        window.dispatchEvent(new Event("resize"));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        saveWorkspaceLayout();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+  }
+}
+
+function migrateWorkspaceV1toV2(v1) {
+  // One-time upgrade: the old two-column arrangement maps onto the zones.
+  if (!v1 || typeof v1 !== "object") return null;
+  if (!Array.isArray(v1.main) && !Array.isArray(v1.side)) return null;
+  const zones = { left: ["source"], center: [], right: [], bottom: [] };
+  for (const id of v1.main || []) {
+    if (id === "video") zones.center.push(id);
+    else if (id === "timeline" || id === "list") zones.bottom.push(id);
+    else zones.left.push(id);
+  }
+  for (const id of v1.side || []) zones.right.push(id);
+  return {
+    zones, hidden: [], zoneSizes: {}, sizes: v1.sizes || {},
+    timelineViewportHeight: v1.timelineViewportHeight,
+    previewViewportHeight: v1.previewViewportHeight,
+  };
+}
+
+const V2_PANEL_UNIT = {
+  source: "project", detect: "project", caption: "project",
+  video: "program",
+  clip: "inspector", "caption-style": "inspector",
+  "export-settings": "inspector", export: "inspector",
+  timeline: "timeline", list: "timeline",
+};
+
+function migrateWorkspaceV2toV3(v2) {
+  // One-time upgrade: the ten flat panels fold into the four tabbed units.
+  if (!v2 || typeof v2 !== "object" || !v2.zones || typeof v2.zones !== "object") return null;
+  const zones = { left: [], center: [], right: [], bottom: [] };
+  const seen = new Set();
+  for (const z of WORKSPACE_ZONES) {
+    for (const id of (Array.isArray(v2.zones[z]) ? v2.zones[z] : [])) {
+      const u = V2_PANEL_UNIT[id];
+      if (u && !seen.has(u)) { zones[z].push(u); seen.add(u); }
+    }
+  }
+  for (const u of Object.keys(DEFAULT_UNIT_ZONE)) {
+    if (!seen.has(u)) zones[DEFAULT_UNIT_ZONE[u]].push(u);
+  }
+  const hidden = new Set(Array.isArray(v2.hidden) ? v2.hidden : []);
+  const win = {
+    project: true, program: true, inspector: true, timeline: true,
+    clip: true, text: true, export: true,
+    tl: true, list: true,
+  };
+  if (hidden.has("source") && hidden.has("detect") && hidden.has("caption")) win.project = false;
+  if (hidden.has("video")) win.program = false;
+  if (hidden.has("clip")) win.clip = false;
+  if (hidden.has("caption-style")) win.text = false;
+  if (hidden.has("export-settings") && hidden.has("export")) win.export = false;
+  if (hidden.has("timeline")) win.tl = false;
+  if (hidden.has("list")) win.list = false;
+  const activeTab = { inspector: "clip", timeline: "tl" };
+  for (const unit of Object.keys(UNIT_TABS)) {
+    const vis = UNIT_TABS[unit].filter((t) => win[t]);
+    if (vis.length) activeTab[unit] = vis[0];
+  }
+  const out = {
+    zones, win, activeTab,
+    zoneSizes: (v2.zoneSizes && typeof v2.zoneSizes === "object") ? { ...v2.zoneSizes } : {},
+    sizes: {},
+    timelineViewportHeight: v2.timelineViewportHeight,
+    previewViewportHeight: v2.previewViewportHeight,
+    lanes: v2.lanes,
+  };
+  if (v2.sizes && v2.sizes.timeline) out.sizes.timeline = v2.sizes.timeline;
+  return out;
 }
 
 function applyWorkspaceLayout(layout) {
   const root = $("workspace");
   if (!root) return;
-  const panels = workspacePanelMap(root);
-  const columns = {
-    main: root.querySelector('[data-workspace-column="main"]'),
-    side: root.querySelector('[data-workspace-column="side"]'),
+  const units = workspacePanelMap(root);
+  const zones = {};
+  for (const z of WORKSPACE_ZONES) zones[z] = root.querySelector(`[data-workspace-column="${z}"]`);
+  // Normalize into the live state (never mutate the caller's object).
+  WS = {
+    zones: JSON.parse(JSON.stringify(DEFAULT_WORKSPACE_LAYOUT.zones)),
+    win: { ...DEFAULT_WORKSPACE_LAYOUT.win },
+    activeTab: { ...DEFAULT_WORKSPACE_LAYOUT.activeTab },
+    zoneSizes: {},
+    sizes: {},
+    timelineViewportHeight: layout?.timelineViewportHeight,
+    previewViewportHeight: layout?.previewViewportHeight,
+    lanes: layout?.lanes,
   };
-  const ordered = { main: [], side: [] };
-  const used = new Set();
+  if (layout?.win && typeof layout.win === "object") {
+    for (const k of Object.keys(WS.win)) {
+      if (typeof layout.win[k] === "boolean") WS.win[k] = layout.win[k];
+    }
+  }
+  if (layout?.activeTab && typeof layout.activeTab === "object") {
+    for (const u of Object.keys(WS.activeTab)) {
+      if (UNIT_TABS[u].includes(layout.activeTab[u])) WS.activeTab[u] = layout.activeTab[u];
+    }
+  }
+  if (layout?.zoneSizes && typeof layout.zoneSizes === "object") WS.zoneSizes = { ...layout.zoneSizes };
+  // Group map: member unit -> host unit. Single level only: a host cannot be
+  // a member and a member cannot host.
+  const hostMap = {};
+  const rawHost = layout?.host && typeof layout.host === "object" ? layout.host : {};
+  for (const [m, h] of Object.entries(rawHost)) {
+    if (m !== h && DEFAULT_UNIT_ZONE[m] && DEFAULT_UNIT_ZONE[h]) hostMap[m] = h;
+  }
+  for (const [m, h] of Object.entries(hostMap)) {
+    if (hostMap[h] || Object.values(hostMap).includes(m)) delete hostMap[m];
+  }
+  WS.host = hostMap;
+  if (layout?.sizes && typeof layout.sizes === "object") WS.sizes = { ...layout.sizes };
 
-  for (const column of ["main", "side"]) {
-    const ids = layout && Array.isArray(layout[column]) ? layout[column] : [];
+  teardownGroups();
+  const ordered = { left: [], center: [], right: [], bottom: [] };
+  const used = new Set();
+  for (const z of WORKSPACE_ZONES) {
+    const ids = layout?.zones && Array.isArray(layout.zones[z]) ? layout.zones[z] : [];
     for (const id of ids) {
-      if (panels.has(id) && !used.has(id)) {
-        ordered[column].push(id);
+      if (units.has(id) && !used.has(id)) {
+        ordered[z].push(id);
         used.add(id);
       }
     }
   }
-  for (const [id, panel] of panels) {
+  for (const [id, el] of units) {
     if (used.has(id)) continue;
-    const column = panel.dataset.defaultColumn === "side" ? "side" : "main";
-    ordered[column].push(id);
+    const z = el.dataset.defaultColumn;
+    ordered[WORKSPACE_ZONES.includes(z) ? z : "left"].push(id);
   }
-
-  for (const column of ["main", "side"]) {
-    if (!columns[column]) continue;
-    for (const id of ordered[column]) columns[column].appendChild(panels.get(id));
+  WS.zones = ordered;
+  for (const z of WORKSPACE_ZONES) {
+    if (!zones[z]) continue;
+    for (const id of ordered[z]) zones[z].appendChild(units.get(id));
   }
-  const savedSideWidth = Number(layout?.columnWidths?.side);
-  if (Number.isFinite(savedSideWidth)) setWorkspaceSideWidth(root, savedSideWidth);
-  else root.style.removeProperty("--workspace-side-width");
-
-  for (const [id, panel] of panels) {
-    const size = layout?.sizes?.[id];
+  syncGroupTabs();
+  renderGroups();
+  // Unit sizes.
+  for (const [id, el] of units) {
+    if (WS.host[id]) continue;
+    const size = WS.sizes[id];
     if (id === "timeline") {
       // Panel width/height sizing remains separate from the Timeline viewport's
       // inner height control.
-      applyTimelinePanelSize(panel, size);
+      applyTimelinePanelSize(el, size);
     } else {
-      applyWorkspacePanelSize(panel, size);
+      applyWorkspacePanelSize(el, size);
     }
   }
-  applyTimelineViewportHeight(layout?.timelineViewportHeight);
-  applyPreviewViewportHeight(layout?.previewViewportHeight);
+  // Zone sizes.
+  setZoneSize("left", Number(WS.zoneSizes.left));
+  setZoneSize("right", Number(WS.zoneSizes.right));
+  setZoneSize("bottom", Number(WS.zoneSizes.bottom));
+  // Visibility (Window menu + x buttons): whole units, then tab buttons.
+  renderWorkspaceVisibility();
+  applyTimelineViewportHeight(WS.timelineViewportHeight);
+  applyPreviewViewportHeight(WS.previewViewportHeight);
+  // Timeline lane lock/eye (timeline.js owns the drawing; the state lives on S).
+  const lanes = WS.lanes || {};
+  S.laneHidden = new Set(Array.isArray(lanes.hidden) ? lanes.hidden : []);
+  S.laneLocked = new Set(Array.isArray(lanes.locked) ? lanes.locked : []);
+  laneLabelsDirty();
+}
+
+function renderWorkspaceVisibility() {
+  if (!WS) return;
+  for (const unit of Object.keys(DEFAULT_UNIT_ZONE)) {
+    const el = unitEl(unit);
+    if (!el) continue;
+    const tabs = UNIT_TABS[unit];
+    const vis = tabs ? tabs.filter((t) => WS.win[t]) : [];
+    if (!WS.win[unit] || (tabs && !vis.length)) {
+      el.style.display = "none";
+      continue;
+    }
+    el.style.display = "";
+    if (!tabs) continue;
+    for (const t of tabs) {
+      const btn = tabBtn(unit, t);
+      if (btn) btn.style.display = WS.win[t] ? "" : "none";
+    }
+    // The active tab must be a visible one.
+    if (!WS.win[WS.activeTab[unit]]) WS.activeTab[unit] = vis[0];
+    activateTab(unit, WS.activeTab[unit], false);
+  }
+  refreshWindowMenu();
+  refreshZoneCollapse();
+}
+
+function refreshZoneCollapse() {
+  for (const z of WORKSPACE_ZONES) {
+    const host = zoneEl(z);
+    if (host) host.classList.toggle("zone-empty", !zoneHasVisibleUnit(z));
+  }
+  // Dividers only make sense between two visible zones.
+  const L = zoneHasVisibleUnit("left"), C = zoneHasVisibleUnit("center");
+  const R = zoneHasVisibleUnit("right"), B = zoneHasVisibleUnit("bottom");
+  if ($("divL")) $("divL").style.display = (L && (C || R)) ? "" : "none";
+  if ($("divR")) $("divR").style.display = (R && (L || C)) ? "" : "none";
+  if ($("divB")) $("divB").style.display = (B && (L || C || R)) ? "" : "none";
+}
+
+function afterWorkspaceVisibility() {
+  renderWorkspaceVisibility();
+  saveWorkspaceLayout();
+  // The resize listeners (timeline draw, preview layout, caption overlay)
+  // re-measure whatever just became visible.
+  window.dispatchEvent(new Event("resize"));
+}
+
+function resetWorkspace() {
+  applyWorkspaceLayout(DEFAULT_WORKSPACE_LAYOUT);
+  saveWorkspaceLayout();
+  window.dispatchEvent(new Event("resize"));
+  status("Workspace reset.");
 }
 
 function readWorkspaceLayout() {
-  try { return JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY) || "null"); }
+  try {
+    const saved = JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY) || "null");
+    if (saved && typeof saved === "object" && saved.zones && saved.win) return saved;
+    const v2 = migrateWorkspaceV2toV3(
+      JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY_V2) || "null"));
+    if (v2) return v2;
+    return migrateWorkspaceV2toV3(migrateWorkspaceV1toV2(
+      JSON.parse(localStorage.getItem(WORKSPACE_STORAGE_KEY_V1) || "null")));
+  }
   catch (_) { return null; }
 }
 
 function saveWorkspaceLayout() {
   const root = $("workspace");
-  if (!root) return;
-  const layout = {};
-  for (const column of ["main", "side"]) {
-    const host = root.querySelector(`[data-workspace-column="${column}"]`);
-    layout[column] = host
-      ? [...host.children].filter((panel) => panel.hasAttribute("data-workspace-panel"))
-        .map((panel) => panel.dataset.workspacePanel)
+  if (!root || !WS) return;
+  for (const z of WORKSPACE_ZONES) {
+    const host = root.querySelector(`[data-workspace-column="${z}"]`);
+    WS.zones[z] = host
+      ? [...host.children].filter((el) => el.hasAttribute("data-workspace-panel"))
+        .map((el) => el.dataset.workspacePanel)
       : [];
   }
-  layout.sizes = {};
-  for (const [id, panel] of workspacePanelMap(root)) {
+  WS.sizes = {};
+  for (const [id, el] of workspacePanelMap(root)) {
     const size = {};
     const properties = id === "timeline"
       ? ["width", "height", "marginTop"] : ["width", "height", "marginLeft", "marginTop"];
     for (const property of properties) {
-      const value = parseFloat(panel.style[property]);
+      const value = parseFloat(el.style[property]);
       if (Number.isFinite(value)) size[property] = value;
     }
-    if (Object.keys(size).length) layout.sizes[id] = size;
+    if (Object.keys(size).length) WS.sizes[id] = size;
   }
-  const sideWidth = parseFloat(getComputedStyle(root).getPropertyValue("--workspace-side-width"));
-  if (Number.isFinite(sideWidth)) layout.columnWidths = { side: sideWidth };
+  WS.zoneSizes = {};
+  for (const z of ["left", "right", "bottom"]) {
+    const value = parseFloat(zoneEl(z)?.style.flexBasis || "");
+    if (Number.isFinite(value)) WS.zoneSizes[z] = value;
+  }
   if (Number.isFinite(PREVIEW_VIEW.viewportHeight))
-    layout.previewViewportHeight = PREVIEW_VIEW.viewportHeight;
+    WS.previewViewportHeight = PREVIEW_VIEW.viewportHeight;
+  else delete WS.previewViewportHeight;
   const timelineViewportHeight = parseFloat($("timelineViewport")?.style.height || "");
-  if (Number.isFinite(timelineViewportHeight)) layout.timelineViewportHeight = timelineViewportHeight;
-  try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(layout)); }
+  if (Number.isFinite(timelineViewportHeight)) WS.timelineViewportHeight = timelineViewportHeight;
+  else delete WS.timelineViewportHeight;
+  if ((S.laneHidden && S.laneHidden.size) || (S.laneLocked && S.laneLocked.size)) {
+    WS.lanes = {
+      hidden: [...(S.laneHidden || [])],
+      locked: [...(S.laneLocked || [])],
+    };
+  } else delete WS.lanes;
+  try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(WS)); }
   catch (_) { /* Keep the current arrangement for this page if storage is unavailable. */ }
 }
 
+/* ------------------------------------------------------------ groups */
+
+// The unit (top-level, not a member) that contains el.
+function topUnitOf(el) {
+  let unit = el.closest("[data-workspace-panel]");
+  while (unit && WS && WS.host[unit.dataset.workspacePanel]) {
+    unit = unit.parentElement.closest("[data-workspace-panel]");
+  }
+  return unit;
+}
+
+function workspaceDropTarget(event, dragged) {
+  const hit = event.target.closest("[data-workspace-panel]");
+  if (!hit || dragged.contains(hit)) return null;
+  const top = topUnitOf(hit);
+  if (!top || top === dragged) return null;
+  const name = dragged.dataset.workspacePanel;
+  const topName = top.dataset.workspacePanel;
+  const rect = top.getBoundingClientRect();
+  const rel = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
+  if (rel < 0.2 || rel > 0.8) return { kind: "edge", top, before: rel < 0.5 };
+  const hostsAnyone = Object.values(WS.host).includes(name);
+  if (hostsAnyone || WS.host[name] === topName) return { kind: "none", top };
+  return { kind: "merge", top, topName };
+}
+
+function makeDynTab(host, key) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.setAttribute("role", "tab");
+  btn.setAttribute("aria-selected", "false");
+  btn.dataset.wintab = key;
+  btn.dataset.dynTab = "1";
+  btn.dataset.host = host;
+  btn.draggable = true;
+  btn.textContent = UNIT_TITLES[key] || key;
+  btn.title = "Drag to move this panel out of the group";
+  return btn;
+}
+
+function makeDynPage(key) {
+  const page = document.createElement("div");
+  page.className = "tabpage";
+  page.dataset.tabpage = key;
+  page.dataset.dynPage = "1";
+  page.setAttribute("role", "tabpanel");
+  page.setAttribute("aria-label", UNIT_TITLES[key] || key);
+  return page;
+}
+
+// A plain unit (Project / Program) becomes a group host: its header turns
+// into a tab strip (own title tab first) and its body into one tab page.
+function ensurePlainGroupStrip(hostEl, host) {
+  const head = hostEl.querySelector(":scope > .ws-head");
+  const body = hostEl.querySelector(":scope > .ws-body");
+  if (!head || !body || head.classList.contains("ws-dyn-head")) return;
+  head.classList.add("ws-tabs", "ws-dyn-head");
+  head.setAttribute("role", "tablist");
+  head.insertBefore(makeDynTab(host, host), head.querySelector(":scope > .ws-head-spacer"));
+  const page = makeDynPage(host);
+  page.classList.add("active");
+  while (body.firstChild) page.appendChild(body.firstChild);
+  body.appendChild(page);
+}
+
+function syncGroupTabs() {
+  UNIT_TABS = { ...UNIT_TABS_BASE };
+  TAB_UNIT = { ...TAB_UNIT_BASE };
+  for (const [member, host] of Object.entries(WS.host)) {
+    if (!UNIT_TABS_BASE[host]) {
+      UNIT_TABS[host] = [host];
+      TAB_UNIT[host] = host;
+    }
+    UNIT_TABS[host] = [...UNIT_TABS[host], member];
+    TAB_UNIT[member] = host;
+  }
+}
+
+// Put every grouped unit back into its zone and remove the group chrome, so
+// renderGroups() can rebuild from WS.host (or the zones alone).
+function teardownGroups() {
+  const root = $("workspace");
+  if (!root) return;
+  for (const page of [...root.querySelectorAll("[data-dyn-page]")]) {
+    const body = page.parentElement;
+    const hostEl = body.closest("[data-workspace-panel]");
+    const column = hostEl ? hostEl.parentElement : null;
+    let anchor = hostEl;
+    for (const child of [...page.children]) {
+      if (child.hasAttribute("data-workspace-panel") && column && anchor) {
+        column.insertBefore(child, anchor.nextSibling);
+        anchor = child;
+      } else {
+        body.insertBefore(child, page);
+      }
+    }
+    page.remove();
+  }
+  for (const btn of root.querySelectorAll("[data-dyn-tab]")) btn.remove();
+  for (const head of root.querySelectorAll(".ws-dyn-head")) {
+    head.classList.remove("ws-tabs", "ws-dyn-head");
+    head.removeAttribute("role");
+  }
+  for (const el of root.querySelectorAll(".is-member")) el.classList.remove("is-member");
+}
+
+// Nest each member unit as a tab page inside its host.
+function renderGroups() {
+  const root = $("workspace");
+  if (!root || !WS) return;
+  const byHost = new Map();
+  for (const [member, host] of Object.entries(WS.host)) {
+    if (!byHost.has(host)) byHost.set(host, []);
+    byHost.get(host).push(member);
+  }
+  for (const [host, members] of byHost) {
+    const hostEl = unitEl(host);
+    if (!hostEl) continue;
+    if (!UNIT_TABS_BASE[host]) ensurePlainGroupStrip(hostEl, host);
+    const strip = hostEl.querySelector(":scope > .ws-tabs");
+    const body = hostEl.querySelector(":scope > .ws-body");
+    if (!strip || !body) continue;
+    for (const member of members) {
+      const memEl = unitEl(member);
+      if (!memEl) continue;
+      const page = makeDynPage(member);
+      body.appendChild(page);
+      memEl.classList.add("is-member");
+      memEl.classList.remove("workspace-panel-resized");
+      for (const prop of ["width", "height", "marginLeft", "marginTop", "flex", "flexBasis", "alignSelf"]) {
+        memEl.style[prop] = "";
+      }
+      page.appendChild(memEl);
+      strip.insertBefore(makeDynTab(host, member), strip.querySelector(":scope > .ws-head-spacer"));
+    }
+  }
+}
+
+function commitWorkspaceGroups(message) {
+  teardownGroups();
+  syncGroupTabs();
+  renderGroups();
+  renderWorkspaceVisibility();
+  saveWorkspaceLayout();
+  window.dispatchEvent(new Event("resize"));
+  if (message) status(message);
+}
+
 function clearWorkspaceDropMarkers(root) {
-  root.querySelectorAll(".workspace-drop-before, .workspace-drop-after")
-    .forEach((panel) => panel.classList.remove("workspace-drop-before", "workspace-drop-after"));
+  root.querySelectorAll(".workspace-drop-before, .workspace-drop-after, .workspace-drop-merge")
+    .forEach((panel) => panel.classList.remove("workspace-drop-before", "workspace-drop-after", "workspace-drop-merge"));
   root.querySelectorAll(".workspace-drop-active")
     .forEach((column) => column.classList.remove("workspace-drop-active"));
 }
@@ -459,15 +861,6 @@ function bindWorkspaceResize(root) {
     if (!active || event.pointerId !== active.pointerId) return;
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
-    if (active.resizeColumns) {
-      const metrics = workspaceGridMetrics(root);
-      const dividerX = event.clientX - (active.edge === "left" ? metrics.gap : 0);
-      const mainWidth = dividerX - metrics.contentLeft;
-      setWorkspaceSideWidth(root, metrics.trackWidth - mainWidth);
-      clearWorkspacePanelWidthOverrides(root);
-      window.dispatchEvent(new Event("resize"));
-      return;
-    }
     const parentWidth = active.parent.clientWidth;
     const minWidth = Math.min(180, parentWidth);
     const minHeight = 120;
@@ -519,12 +912,11 @@ function bindWorkspaceResize(root) {
     const panel = handle.closest("[data-workspace-panel]");
     if (!panel || !panel.parentElement) return;
     const edge = handle.dataset.resizeEdge;
-    const resizeColumns = isSharedWorkspaceEdge(root, panel, edge);
     event.preventDefault();
     event.stopPropagation();
     const computed = getComputedStyle(panel);
     active = {
-      handle, panel, parent: panel.parentElement, edge, resizeColumns,
+      handle, panel, parent: panel.parentElement, edge,
       pointerId: event.pointerId, x: event.clientX, y: event.clientY,
       width: panel.getBoundingClientRect().width,
       height: panel.getBoundingClientRect().height,
@@ -549,19 +941,18 @@ function bindWorkspaceDocking() {
   applyWorkspaceLayout(readWorkspaceLayout());
   addWorkspaceResizeHandles(root);
   bindWorkspaceResize(root);
+  bindZoneDividers();
   bindTimelineViewportResize();
   bindPreviewViewportResize();
-  window.addEventListener("resize", () => {
-    const sideWidth = parseFloat(getComputedStyle(root).getPropertyValue("--workspace-side-width"));
-    if (workspaceColumnsAreSideBySide(root) && Number.isFinite(sideWidth))
-      setWorkspaceSideWidth(root, sideWidth);
-    refreshWorkspaceResizeHandleTitles(root);
-  });
+  bindMenuBar();
+  bindUnitTabsAndHide();
   let draggedPanel = null;
 
   root.addEventListener("dragstart", (event) => {
+    const dyn = event.target.closest("[data-dyn-tab]");
     const handle = event.target.closest(".workspace-drag-handle");
-    const panel = handle && handle.closest("[data-workspace-panel]");
+    const panel = dyn ? unitEl(dyn.dataset.wintab)
+      : (handle && handle.closest("[data-workspace-panel]"));
     if (!panel || !event.dataTransfer) return;
     draggedPanel = panel;
     event.dataTransfer.effectAllowed = "move";
@@ -569,8 +960,27 @@ function bindWorkspaceDocking() {
     panel.classList.add("workspace-dragging");
   });
 
+  // Group tabs: click activates; dragging one (above) moves its panel out.
+  root.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-dyn-tab]");
+    if (!tab) return;
+    activateTab(tab.dataset.host, tab.dataset.wintab);
+    window.dispatchEvent(new Event("resize"));
+  });
+
   root.addEventListener("dragover", (event) => {
     if (!draggedPanel) return;
+    const drop = workspaceDropTarget(event, draggedPanel);
+    if (drop) {
+      event.preventDefault();
+      clearWorkspaceDropMarkers(root);
+      if (drop.kind !== "none") {
+        drop.top.classList.add(drop.kind === "merge" ? "workspace-drop-merge"
+          : (drop.before ? "workspace-drop-before" : "workspace-drop-after"));
+      }
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+      return;
+    }
     const column = event.target.closest("[data-workspace-column]");
     if (!column) return;
     event.preventDefault();
@@ -587,6 +997,27 @@ function bindWorkspaceDocking() {
 
   root.addEventListener("drop", (event) => {
     if (!draggedPanel) return;
+    const drop = workspaceDropTarget(event, draggedPanel);
+    if (drop) {
+      event.preventDefault();
+      clearWorkspaceDropMarkers(root);
+      const dragged = draggedPanel;
+      const name = dragged.dataset.workspacePanel;
+      dragged.classList.remove("workspace-dragging");
+      draggedPanel = null;
+      if (drop.kind === "merge") {
+        WS.host[name] = drop.topName;
+        commitWorkspaceGroups(`${UNIT_TITLES[name]} grouped with ${UNIT_TITLES[drop.topName]}.`);
+      } else if (drop.kind === "edge") {
+        const wasMember = !!WS.host[name];
+        delete WS.host[name];
+        drop.top.parentElement.insertBefore(dragged, drop.before ? drop.top : drop.top.nextSibling);
+        commitWorkspaceGroups(wasMember
+          ? `${UNIT_TITLES[name]} moved out of its group.`
+          : `${UNIT_TITLES[name]} moved.`);
+      }
+      return;
+    }
     const column = event.target.closest("[data-workspace-column]");
     if (!column) return;
     event.preventDefault();
@@ -622,11 +1053,236 @@ function bindWorkspaceDocking() {
   });
 
   const reset = $("workspaceReset");
-  if (reset) reset.onclick = () => {
-    applyWorkspaceLayout(DEFAULT_WORKSPACE_LAYOUT);
-    saveWorkspaceLayout();
-    window.dispatchEvent(new Event("resize"));
-  };
+  if (reset) reset.onclick = () => resetWorkspace();
+}
+
+/* ------------------------------------------------------------ menu bar */
+
+function clickBtn(id) {
+  const el = $(id);
+  if (el && !el.disabled) el.click();
+}
+
+function ensureUnitVisible(unit) {
+  const el = unitEl(unit);
+  if (!el || !WS) return el;
+  const tabs = UNIT_TABS[unit];
+  if (!tabs) {
+    if (!WS.win[unit]) toggleWin(unit);
+  } else {
+    const anyTab = tabs.some((t) => WS.win[t]);
+    if (!WS.win[unit] || !anyTab) {
+      WS.win[unit] = true;
+      if (!anyTab) WS.win[WS.activeTab[unit] || tabs[0]] = true;
+      afterWorkspaceVisibility();
+    }
+  }
+  return el;
+}
+
+function flashEl(el) {
+  if (!el) return;
+  try { el.scrollIntoView({ block: "nearest" }); } catch (_) { /* older browsers */ }
+  el.classList.add("panel-flash");
+  setTimeout(() => el.classList.remove("panel-flash"), 1200);
+}
+
+function flashUnit(unit) {
+  flashEl(ensureUnitVisible(unit));
+}
+
+function revealTab(tab) {
+  const unit = TAB_UNIT[tab];
+  if (!unit || !WS) return;
+  WS.win[tab] = true;
+  WS.win[unit] = true;
+  WS.activeTab[unit] = tab;
+  afterWorkspaceVisibility();
+  flashUnit(unit);
+}
+
+function muteSelectedClips() {
+  if (!S.project || !S.tl) return;
+  const sel = new Set(selectedIds());
+  const picked = S.tl.clips.filter((c) => sel.has(c.id));
+  const clips = picked.filter((c) => !itemLocked(c));
+  if (!clips.length) return status(picked.length ? "That lane is locked." : "Select a video clip first.");
+  const to = !(clips[0].fx && clips[0].fx.mute);
+  for (const c of clips) {
+    if (!c.fx || typeof c.fx !== "object") c.fx = TLM.defaultFx();
+    if (!Array.isArray(c.kf)) c.kf = [];
+    c.fx.mute = to;
+  }
+  commitTL();
+  refresh();
+  status((to ? `Muted ${clips.length} clip(s).` : `Unmuted ${clips.length} clip(s).`) +
+    (clips.length < picked.length ? " A locked lane was skipped." : ""));
+}
+
+const MENU_ACTS = {
+  "file-open": () => { flashUnit("project"); const p = $("pathInput"); if (p) { p.focus(); p.select(); } },
+  "file-browse": () => clickBtn("browseBtn"),
+  "file-upload": () => { const u = $("uploadInput"); if (u) u.click(); },
+  "file-demo": () => clickBtn("demoBtn"),
+  "file-speech": () => clickBtn("speechDemoBtn"),
+  "edit-undo": () => clickBtn("tlUndo"),
+  "edit-redo": () => clickBtn("tlRedo"),
+  "edit-copy": () => clickBtn("tlCopy"),
+  "edit-cut": () => clickBtn("tlCut"),
+  "edit-paste": () => clickBtn("tlPaste"),
+  "edit-split": () => clickBtn("capSplit"),
+  "edit-delete": () => clickBtn("capDel"),
+  "edit-ripple": () => clickBtn("tlRipple"),
+  "clip-up": () => clickBtn("txTrackUp"),
+  "clip-down": () => clickBtn("txTrackDown"),
+  "clip-mute": () => muteSelectedClips(),
+  "tl-zoom-in": () => clickBtn("zoomIn"),
+  "tl-zoom-out": () => clickBtn("zoomOut"),
+  "tl-zoom-fit": () => clickBtn("zoomFit"),
+  "tl-snap": () => {
+    const c = $("tlSnap");
+    if (c) { c.checked = !c.checked; status(`Snap ${c.checked ? "on" : "off"}.`); }
+  },
+  "cap-add": () => clickBtn("capAdd"),
+  "cap-auto": () => { ensureUnitVisible("project"); flashEl(document.querySelector('[data-project-card="caption"]')); const b = $("capBtn"); if (b) b.focus(); },
+  "exp-go": () => {
+    revealTab("export");
+    if ($("exportBtn") && !$("exportBtn").disabled) clickBtn("exportBtn");
+    else status("Open a video and build a timeline first.");
+  },
+  "help-keys": () => status("V/R/T/H/Z/M tools · Space play · ←/→ frame · Del delete · Ctrl+K split · Ctrl+Z/X/C/V undo/cut/copy/paste · Esc select"),
+};
+
+function buildWindowMenu() {
+  const drop = $("windowDrop");
+  if (!drop) return;
+  drop.innerHTML = "";
+  for (const entry of WINDOW_MENU) {
+    if (entry === "sep") {
+      drop.appendChild(document.createElement("hr"));
+      continue;
+    }
+    const [id, label] = entry;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.dataset.win = id;
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    tick.textContent = "\u2713";
+    const name = document.createElement("span");
+    name.textContent = label;
+    b.appendChild(tick);
+    b.appendChild(name);
+    b.addEventListener("click", () => toggleWin(id));
+    drop.appendChild(b);
+  }
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.textContent = "Reset workspace";
+  reset.addEventListener("click", () => resetWorkspace());
+  drop.appendChild(reset);
+  refreshWindowMenu();
+}
+
+function winEffectiveVisible(kind) {
+  if (!WS || !WS.win) return false;
+  const unit = TAB_UNIT[kind];
+  if (unit) return !!WS.win[kind] && !!WS.win[unit];
+  return !!WS.win[kind];
+}
+
+function refreshWindowMenu() {
+  document.querySelectorAll("#windowDrop [data-win]").forEach((b) => {
+    const tick = b.querySelector(".tick");
+    if (tick) tick.textContent = winEffectiveVisible(b.dataset.win) ? "\u2713" : "";
+  });
+}
+
+function toggleWin(kind) {
+  if (!WS || typeof WS.win[kind] !== "boolean") return;
+  const unit = TAB_UNIT[kind];
+  if (unit) {
+    if (winEffectiveVisible(kind)) WS.win[kind] = false; // hide just this tab
+    else {
+      // Showing a tab shows its unit and activates the tab.
+      WS.win[kind] = true;
+      WS.win[unit] = true;
+      WS.activeTab[unit] = kind;
+    }
+  } else {
+    WS.win[kind] = !WS.win[kind];
+  }
+  afterWorkspaceVisibility();
+  status(`${TAB_TITLES[kind] || UNIT_TITLES[kind] || kind} ${winEffectiveVisible(kind) ? "shown" : "hidden"}.`);
+}
+
+function hideUnit(unit) {
+  if (!WS || typeof WS.win[unit] !== "boolean") return;
+  WS.win[unit] = false;
+  afterWorkspaceVisibility();
+  status(`${UNIT_TITLES[unit] || unit} hidden.`);
+}
+
+function activateTab(unit, tab, save = true) {
+  const tabs = UNIT_TABS[unit];
+  if (!tabs || !tabs.includes(tab) || !WS) return;
+  WS.activeTab[unit] = tab;
+  for (const t of tabs) {
+    const on = t === tab;
+    const btn = tabBtn(unit, t);
+    if (btn) {
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    const page = tabPage(unit, t);
+    if (page) page.classList.toggle("active", on);
+  }
+  if (save) saveWorkspaceLayout();
+}
+
+function bindUnitTabsAndHide() {
+  for (const unit of Object.keys(UNIT_TABS)) {
+    for (const t of UNIT_TABS[unit]) {
+      const btn = tabBtn(unit, t);
+      if (btn && !btn.dataset.dynTab) btn.addEventListener("click", () => {
+        activateTab(unit, t);
+        window.dispatchEvent(new Event("resize"));
+      });
+    }
+  }
+  // The x on a unit header hides the whole unit; tabs toggle individually
+  // from the Window menu, which also brings hidden units back.
+  document.querySelectorAll("[data-hide-unit]").forEach((btn) => {
+    btn.addEventListener("click", () => hideUnit(btn.dataset.hideUnit));
+  });
+}
+
+function bindMenuBar() {
+  buildWindowMenu();
+  document.querySelectorAll("#menubar .menu > button").forEach((b) => {
+    b.addEventListener("click", (ev) => {
+      const menu = b.parentElement;
+      const was = menu.classList.contains("open");
+      document.querySelectorAll("#menubar .menu").forEach((m) => m.classList.remove("open"));
+      if (!was) menu.classList.add("open");
+      ev.stopPropagation();
+    });
+  });
+  document.addEventListener("click", (ev) => {
+    if (!ev.target.closest("#menubar .menu")) {
+      document.querySelectorAll("#menubar .menu").forEach((m) => m.classList.remove("open"));
+    }
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") document.querySelectorAll("#menubar .menu").forEach((m) => m.classList.remove("open"));
+  });
+  document.querySelectorAll("#menubar [data-act]").forEach((el) => {
+    el.addEventListener("click", () => {
+      document.querySelectorAll("#menubar .menu").forEach((m) => m.classList.remove("open"));
+      const fn = MENU_ACTS[el.dataset.act];
+      if (fn) fn();
+    });
+  });
 }
 
 async function api(path, opts = {}) {

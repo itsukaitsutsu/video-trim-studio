@@ -1055,12 +1055,38 @@ def test_caption_overlay_is_wired_between_html_and_js():
                    "videoZoomFit", "videoZoomIn", "videoZoomLevel",
                    "previewViewportResize"):
         assert f'id="{needle}"' in html, f"id={needle} missing from index.html"
-    timeline_start = html.index('data-workspace-panel="timeline"')
-    apply_all_pos = html.index('id="capApplyAll"')
-    cap_add_pos = html.index('id="capAdd"')
-    list_start = html.index('data-workspace-panel="list"')
+    project_unit = html.index('data-workspace-panel="project"')
+    program_unit = html.index('data-workspace-panel="program"')
+    insp_unit = html.index('data-workspace-panel="inspector"')
+    tl_unit = html.index('data-workspace-panel="timeline"')
+    # Zone order: Project | Program | Inspector | Timeline.
+    assert project_unit < program_unit < insp_unit < tl_unit
+    clip_tab = html.index('data-tab="clip"')
+    text_tab = html.index('data-tab="text"')
+    export_tab = html.index('data-tab="export"')
+    tab_clip_page = html.index('id="tab-clip"')
+    tab_text_page = html.index('id="tab-text"')
+    tab_export_page = html.index('id="tab-export"')
+    settings_card = html.index('data-export-card="settings"')
+    export_card = html.index('data-export-card="export"')
     style_row_pos = html.index('id="capStyleRow"')
-    assert timeline_start < apply_all_pos < cap_add_pos < list_start < style_row_pos
+    # Inspector tabs precede their pages; Text owns the font controls and the
+    # Export tab holds the settings card (with the style row) + Export card.
+    assert insp_unit < clip_tab < text_tab < export_tab
+    assert export_tab < tab_clip_page < tab_text_page < tab_export_page
+    assert tab_text_page < html.index('id="capFontSize"') < tab_export_page
+    assert tab_export_page < settings_card < style_row_pos < export_card
+    for wintab in ("clip", "text", "export", "tl", "list"):
+        assert f'data-wintab="{wintab}"' in html
+    tl_tab = html.index('data-btab="tl"')
+    list_tab = html.index('data-btab="list"')
+    tab_tl_page = html.index('id="tab-tl"')
+    tab_list_page = html.index('id="tab-list"')
+    apply_all_pos = html.index('id="capApplyAll"')
+    cap_add_pos = html.index('id="capAdd"')  # exact id: capAddCue sorts earlier
+    # Bottom tabs precede their pages; the timeline toolbar is in Timeline 01.
+    assert tl_unit < tl_tab < list_tab < tab_tl_page
+    assert tab_tl_page < apply_all_pos < cap_add_pos < tab_list_page
     assert "capApplyAllHint" not in html and "capApplyAllHint" not in js
     assert "app.js?v=" in html and "style.css?v=" in html
 

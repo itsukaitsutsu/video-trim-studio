@@ -1,11 +1,20 @@
 /* Timeline model for Video Trim Studio. Pure functions: no DOM, no network.
  * Loaded by the browser (window.TLM) and by the Node tests (module.exports).
  *
- *   tl    = { clips: [...], caps: [...], lanes: n }
- *   clip  = { id, start, end, in, kind, text }      video from the one source file
+ *   tl    = { clips: [...], caps: [...], lanes: n, vtracks: m }
+ *   clip  = { id, track, start, end, in, kind, text, fx, kf }
+ *           track = auto-stacking video lane (works exactly like caption
+ *           lanes): clips may overlap in time and restack onto free lanes
+ *           instead of overwriting each other; the highest lane wins the
+ *           preview and the export.
+ *           fx = { x, y, scale, opacity, crop_l/t/r/b, volume, mute,
+ *                  fade_in/out, vfade_in/out } (see vts/fx.py).
+ *           kf = [{ t, x, y, scale, opacity }, ...] with t relative to the
+ *           clip start; animates the transform, evaluated by evalFxAt().
  *   cap   = { id, lane, start, end, text, style }   caption on a lane
  *
  * clip.in is the source time that plays at clip.start; captions have no `in`.
+ * Clips never overlap *on the same video track*; different tracks stack.
  * Every function returns a new timeline and never changes its input.
  */
 (function (root) {
@@ -13,7 +22,16 @@
 
   const MIN_LEN = 0.05;   // shortest clip or caption, in seconds
   const EPS = 1e-6;
+  const MAX_VTRACKS = 64;   // lanes grow on demand, like captions
+  const KF_KEYS = ["x", "y", "scale", "opacity"];
   let seq = 0;
+
+  const DEFAULT_FX = {
+    x: 0, y: 0, scale: 100, opacity: 100,
+    crop_l: 0, crop_t: 0, crop_r: 0, crop_b: 0,
+    volume: 100, mute: false,
+    fade_in: 0, fade_out: 0, vfade_in: 0, vfade_out: 0,
+  };
 
   function newId(prefix) {
     seq += 1;
@@ -26,14 +44,146 @@
   const overlaps = (a, b) => a.start < b.end - EPS && b.start < a.end - EPS;
   const byStart = (a, b) => a.start - b.start || a.end - b.end;
   const clamp = (x, lo, hi) => (hi < lo ? lo : Math.min(hi, Math.max(lo, x)));
+  const num = (v, dflt) => (Number.isFinite(Number(v)) ? Number(v) : dflt);
+
+  function trackOf(it) {
+    const t = Math.floor(num(it && it.track, 0));
+    return Math.max(0, Math.min(MAX_VTRACKS - 1, t));
+  }
+
+  function vtracksOf(tl) {
+    let n = Math.max(1, Math.floor(num(tl && tl.vtracks, 1)) || 1);
+    for (const c of (tl && tl.clips) || []) n = Math.max(n, trackOf(c) + 1);
+    return Math.min(MAX_VTRACKS, n);
+  }
+
+  // ------------------------------------------------------------ effects
+
+  function defaultFx() { return { ...DEFAULT_FX }; }
+
+  function cleanFx(raw) {
+    const s = (raw && typeof raw === "object") ? raw : {};
+    const fx = defaultFx();
+    fx.x = r3(clamp(num(s.x, 0), -100, 100));
+    fx.y = r3(clamp(num(s.y, 0), -100, 100));
+    fx.scale = r3(clamp(num(s.scale, 100), 1, 400));
+    fx.opacity = r3(clamp(num(s.opacity, 100), 0, 100));
+    for (const k of ["crop_l", "crop_t", "crop_r", "crop_b"]) {
+      fx[k] = r3(clamp(num(s[k], 0), 0, 45));
+    }
+    if (fx.crop_l + fx.crop_r >= 90) {
+      const over = (fx.crop_l + fx.crop_r - 89) / 2;
+      fx.crop_l = r3(Math.max(0, fx.crop_l - over));
+      fx.crop_r = r3(Math.max(0, fx.crop_r - over));
+    }
+    if (fx.crop_t + fx.crop_b >= 90) {
+      const over = (fx.crop_t + fx.crop_b - 89) / 2;
+      fx.crop_t = r3(Math.max(0, fx.crop_t - over));
+      fx.crop_b = r3(Math.max(0, fx.crop_b - over));
+    }
+    fx.volume = r3(clamp(num(s.volume, 100), 0, 400));
+    fx.mute = !!s.mute;
+    for (const k of ["fade_in", "fade_out", "vfade_in", "vfade_out"]) {
+      fx[k] = r3(Math.max(0, num(s[k], 0)));
+    }
+    return fx;
+  }
+
+  function fxIsDefault(fx) {
+    if (!fx) return true;
+    const c = cleanFx(fx);
+    return Object.keys(DEFAULT_FX).every((k) => c[k] === DEFAULT_FX[k]);
+  }
+
+  function cleanKf(raw, clipLen) {
+    const len = Math.max(0, num(clipLen, 0));
+    if (!Array.isArray(raw)) return [];
+    const seen = new Map();
+    for (const item of raw.slice(0, 64)) {
+      if (!item || typeof item !== "object") continue;
+      const t = r3(clamp(num(item.t, -1), 0, len));
+      if (!(t >= 0)) continue;
+      seen.set(t, {
+        t,
+        x: r3(clamp(num(item.x, DEFAULT_FX.x), -100, 100)),
+        y: r3(clamp(num(item.y, DEFAULT_FX.y), -100, 100)),
+        scale: r3(clamp(num(item.scale, DEFAULT_FX.scale), 1, 400)),
+        opacity: r3(clamp(num(item.opacity, DEFAULT_FX.opacity), 0, 100)),
+      });
+    }
+    return [...seen.keys()].sort((a, b) => a - b).map((t) => seen.get(t));
+  }
+
+  // Effective transform at an absolute timeline time: base fx with x/y/scale/
+  // opacity interpolated linearly through the keyframes. Mirrors vts/fx.py.
+  function evalFxAt(clip, tAbs) {
+    const fx = cleanFx(clip && clip.fx);
+    const len = Math.max(0, (clip ? clip.end - clip.start : 0) || 0);
+    const keys = cleanKf(clip && clip.kf, len);
+    if (!keys.length) return fx;
+    const t = clamp(num(tAbs, 0) - (clip ? clip.start : 0), 0, len);
+    const snap = (k) => {
+      const o = {};
+      for (const key of KF_KEYS) o[key] = num(k[key], fx[key]);
+      return o;
+    };
+    if (t <= keys[0].t + EPS) return { ...fx, ...snap(keys[0]) };
+    if (t >= keys[keys.length - 1].t - EPS) return { ...fx, ...snap(keys[keys.length - 1]) };
+    for (let i = 0; i + 1 < keys.length; i += 1) {
+      const a = keys[i], b = keys[i + 1];
+      if (t >= a.t - EPS && t <= b.t + EPS) {
+        const span = b.t - a.t;
+        const f = span > 1e-9 ? (t - a.t) / span : 0;
+        const sa = snap(a), sb = snap(b), o = {};
+        for (const key of KF_KEYS) o[key] = r3(sa[key] + (sb[key] - sa[key]) * f);
+        return { ...fx, ...o };
+      }
+    }
+    return { ...fx, ...snap(keys[keys.length - 1]) };
+  }
+
+  // Audio/video fade envelopes at an absolute timeline time, 0..1.
+  function fadeEnv(clip, tAbs) {
+    const fx = cleanFx(clip && clip.fx);
+    const t = num(tAbs, 0) - (clip ? clip.start : 0);
+    const len = Math.max(0, (clip ? clip.end - clip.start : 0) || 0);
+    const env = (fi, fo) => {
+      let e = 1;
+      if (fi > 0.001 && t < fi) e = Math.min(e, Math.max(0, t / fi));
+      if (fo > 0.001 && t > len - fo) e = Math.min(e, Math.max(0, (len - t) / fo));
+      return e;
+    };
+    return { audio: env(fx.fade_in, fx.fade_out), video: env(fx.vfade_in, fx.vfade_out) };
+  }
+
+  function withClipFx(piece, src) {
+    piece.fx = clone(src.fx || defaultFx());
+    piece.kf = clone(src.kf || []);
+    return piece;
+  }
+
+  // Keyframes surviving in a piece that covers [pieceStart, pieceStart+len]
+  // of the source clip, shifted to piece-relative time.
+  function kfForPiece(kf, pieceStartRel, pieceLen) {
+    const out = [];
+    for (const k of kf || []) {
+      const t = num(k && k.t, -1) - pieceStartRel;
+      if (t < -EPS || t > pieceLen + EPS) continue;
+      out.push({ ...clone(k), t: r3(clamp(t, 0, pieceLen)) });
+    }
+    return out.sort((a, b) => a.t - b.t);
+  }
 
   function emptyTimeline() {
-    return { clips: [], caps: [], lanes: 1 };
+    return { clips: [], caps: [], lanes: 1, vtracks: 1 };
   }
 
   function clipsFromSource(duration) {
     if (!(duration > 0)) return [];
-    return [{ id: newId("c"), start: 0, end: r3(duration), in: 0, kind: null, text: "" }];
+    return [{
+      id: newId("c"), track: 0, start: 0, end: r3(duration), in: 0,
+      kind: null, text: "", fx: defaultFx(), kf: [],
+    }];
   }
 
   // Detection sections (source time == timeline time before any edit).
@@ -41,8 +191,8 @@
     const list = (sections || [])
       .filter((s) => s.end - s.start > EPS)
       .map((s) => ({
-        id: newId("c"), start: r3(s.start), end: r3(s.end), in: r3(s.start),
-        kind: s.kind || null, text: s.text || "",
+        id: newId("c"), track: 0, start: r3(s.start), end: r3(s.end), in: r3(s.start),
+        kind: s.kind || null, text: s.text || "", fx: defaultFx(), kf: [],
       }));
     return list.length ? list : clipsFromSource(duration);
   }
@@ -62,10 +212,10 @@
     return Math.max(1, lastEnd.length);
   }
 
-  // Map source-time cues onto the timeline through the video clips. A cue that
+  // Map source-time cues onto the timeline through the V1 clips. A cue that
   // crosses a cut is split into pieces; parts in removed time are dropped.
   function capsFromCues(clips, cues) {
-    const sorted = clips.slice().sort(byStart);
+    const sorted = clips.filter((k) => trackOf(k) === 0).sort(byStart);
     const caps = [];
     for (const cue of cues || []) {
       const cs = Number(cue.start);
@@ -103,29 +253,23 @@
       }
       const left = { ...it, end: r3(t) };
       const right = { ...it, id: newId(prefixOf(it)), start: r3(t) };
-      if (isClip(it)) right.in = r3(it.in + (t - it.start));
-      out.push(left, right);
-    }
-    return out;
-  }
-
-  // Overwrite: remove [a, b] from every item (except ids in `except`).
-  function carveArr(arr, a, b, except) {
-    const out = [];
-    for (const it of arr) {
-      if ((except && except.has(it.id)) || it.end <= a + EPS || it.start >= b - EPS) {
-        out.push(it);
-        continue;
+      if (isClip(it)) {
+        const rel = t - it.start;
+        right.in = r3(it.in + rel);
+        withClipFx(left, it);
+        withClipFx(right, it);
+        left.kf = kfForPiece(it.kf, 0, rel);
+        right.kf = kfForPiece(it.kf, rel, it.end - t);
+        // A keyframe exactly on the cut belongs to both halves.
+        for (const k of it.kf || []) {
+          if (Math.abs(num(k && k.t, -1) - rel) <= EPS) {
+            const kc = clone(k);
+            if (!left.kf.some((q) => Math.abs(q.t - kc.t) <= EPS)) left.kf.push({ ...kc });
+            if (!right.kf.some((q) => q.t <= EPS)) right.kf.unshift({ ...kc, t: 0 });
+          }
+        }
       }
-      const parts = [];
-      if (it.start < a - EPS) parts.push([it.start, a]);
-      if (it.end > b + EPS) parts.push([b, it.end]);
-      parts.forEach(([s, e], i) => {
-        if (e - s < MIN_LEN - EPS) return;
-        const piece = { ...it, id: i === 0 ? it.id : newId(prefixOf(it)), start: r3(s), end: r3(e) };
-        if (isClip(it)) piece.in = r3(it.in + (s - it.start));
-        out.push(piece);
-      });
+      out.push(left, right);
     }
     return out;
   }
@@ -181,11 +325,26 @@
           start: r3(s - removedBefore(merged, s)),
           end: r3(e - removedBefore(merged, e)),
         };
-        if (isClip(it)) piece.in = r3(it.in + (s - it.start));
+        if (isClip(it)) {
+          piece.in = r3(it.in + (s - it.start));
+          withClipFx(piece, it);
+          piece.kf = kfForPiece(it.kf, s - it.start, e - s);
+        }
         out.push(piece);
       });
     }
     return out;
+  }
+
+  // Place a clip on its track, or on the lowest track where it fits.
+  // Video lanes work exactly like caption lanes: never overwrite.
+  function placeClip(list, clip) {
+    const want = trackOf(clip);
+    const clash = (track) => list.some((o) => trackOf(o) === track && overlaps(o, clip));
+    if (!clash(want)) return clip;
+    let track = 0;
+    while (clash(track)) track += 1;
+    return { ...clip, track: Math.min(track, MAX_VTRACKS - 1) };
   }
 
   // Place a caption on its lane, or on the lowest lane where it fits.
@@ -233,9 +392,10 @@
     return out;
   }
 
-  // Move the selected items by dt seconds. Clips overwrite whatever is under
-  // them; captions move to a free lane when their lane is taken.
-  function moveItems(tl, ids, dt, dLane) {
+  // Move the selected items by dt seconds. Clips and captions both restack
+  // onto a free lane when their lane is taken (nothing is ever overwritten).
+  // dVTrack shifts moved clips across video lanes (a track preference).
+  function moveItems(tl, ids, dt, dLane, dVTrack) {
     const out = clone(tl);
     const sel = new Set(ids);
     const movedClips = out.clips.filter((c) => sel.has(c.id));
@@ -244,12 +404,16 @@
     if (!all.length) return out;
     const lowest = Math.min(...all.map((c) => c.start));
     const shift = r3(Math.max(dt, -lowest));
+    const dv = Math.round(num(dVTrack, 0));
     out.clips = out.clips.filter((c) => !sel.has(c.id));
     out.caps = out.caps.filter((c) => !sel.has(c.id));
     for (const c of movedClips) {
-      const moved = { ...c, start: r3(c.start + shift), end: r3(c.end + shift) };
-      out.clips = carveArr(out.clips, moved.start, moved.end, null);
-      out.clips.push(moved);
+      const moved = {
+        ...c,
+        start: r3(c.start + shift), end: r3(c.end + shift),
+        track: clamp(trackOf(c) + dv, 0, MAX_VTRACKS - 1),
+      };
+      out.clips.push(placeClip(out.clips, moved));
     }
     out.clips.sort(byStart);
     for (const c of movedCaps) {
@@ -260,6 +424,7 @@
       out.caps.push(placeCap(out.caps, moved));
     }
     out.lanes = lanesOf(out);
+    out.vtracks = vtracksOf(out);
     return out;
   }
 
@@ -270,19 +435,27 @@
     const arr = isC ? out.clips : out.caps;
     const it = arr.find((c) => c.id === id);
     if (!it || !Number.isFinite(t)) return out;
-    const others = arr.filter((c) => c.id !== id && (isC || c.lane === it.lane));
+    const others = isC
+      ? arr.filter((c) => c.id !== id && trackOf(c) === trackOf(it))
+      : arr.filter((c) => c.id !== id && c.lane === it.lane);
     const prevEnd = Math.max(0, ...others.filter((o) => o.end <= it.start + EPS).map((o) => o.end));
     const nextStart = Math.min(Infinity, ...others.filter((o) => o.start >= it.end - EPS).map((o) => o.start));
     if (edge === "l") {
       let lo = prevEnd;
       if (isC) lo = Math.max(lo, it.start - it.in);
+      const oldStart = it.start;
       const ns = clamp(t, lo, it.end - MIN_LEN);
-      if (isC) it.in = r3(it.in + (ns - it.start));
+      if (isC) {
+        it.in = r3(it.in + (ns - it.start));
+        it.kf = kfForPiece(it.kf, ns - oldStart, it.end - ns);
+      }
       it.start = r3(ns);
     } else {
       let hi = nextStart;
       if (isC) hi = Math.min(hi, it.start + (srcDur - it.in));
-      it.end = r3(clamp(t, it.start + MIN_LEN, hi));
+      const ne = clamp(t, it.start + MIN_LEN, hi);
+      if (isC) it.kf = kfForPiece(it.kf, 0, ne - it.start);
+      it.end = r3(ne);
     }
     return out;
   }
@@ -298,7 +471,7 @@
   }
 
   // Paste at time `at`. insert=true opens a gap first (ripple paste);
-  // otherwise clips overwrite what is underneath.
+  // otherwise pasted clips restack onto free lanes like captions.
   function pasteItems(tl, clipboard, at, insert) {
     const out = clone(tl);
     const ids = [];
@@ -314,16 +487,17 @@
     }
     for (const it of items) {
       const copy = { ...it, id: newId(prefixOf(it)), start: r3(t0 + it.start), end: r3(t0 + it.end) };
+      if (isClip(copy)) copy.track = trackOf(copy);
       ids.push(copy.id);
       if (isClip(it)) {
-        if (!insert) out.clips = carveArr(out.clips, copy.start, copy.end, null);
-        out.clips.push(copy);
+        out.clips.push(insert ? copy : placeClip(out.clips, copy));
       } else {
         out.caps.push(placeCap(out.caps, copy));
       }
     }
     out.clips.sort(byStart);
     out.lanes = lanesOf(out);
+    out.vtracks = vtracksOf(out);
     return { tl: out, ids };
   }
 
@@ -388,16 +562,59 @@
     return tl.clips.reduce((m, c) => Math.max(m, c.end), 0);
   }
 
+  // Topmost clip under t (highest track wins); null in gaps.
   function clipAt(tl, t) {
-    return tl.clips.find((c) => t >= c.start - EPS && t < c.end - EPS) || null;
+    const stack = clipStackAt(tl, t);
+    return stack.length ? stack[stack.length - 1] : null;
+  }
+
+  // Every clip under t, lowest track first.
+  function clipStackAt(tl, t) {
+    return tl.clips
+      .filter((c) => t >= c.start - EPS && t < c.end - EPS)
+      .sort((a, b) => trackOf(a) - trackOf(b) || a.start - b.start);
+  }
+
+  // Flatten overlapping lanes into one virtual track (highest lane wins),
+  // the same picture the preview shows and the export renders. Returns
+  // pieces { start, end, in, fx, kf, from } with kf shifted to piece time.
+  function flattenClips(clips) {
+    const bounds = [...new Set((clips || []).flatMap((c) => [r3(c.start), r3(c.end)]))].sort((a, b) => a - b);
+    const wins = [];
+    for (let i = 0; i + 1 < bounds.length; i += 1) {
+      const s = bounds[i], e = bounds[i + 1];
+      if (e - s < 1e-3) continue;
+      const covering = (clips || []).filter((c) => c.start <= s + 1e-6 && c.end >= e - 1e-6);
+      if (!covering.length) continue;   // a gap; preview/export show black
+      covering.sort((a, b) => trackOf(a) - trackOf(b) || a.start - b.start);
+      wins.push({ s, e, clip: covering[covering.length - 1] });
+    }
+    const merged = [];
+    for (const w of wins) {
+      const last = merged[merged.length - 1];
+      if (last && last.clip.id === w.clip.id && Math.abs(last.e - w.s) < 1e-6) last.e = w.e;
+      else merged.push({ ...w });
+    }
+    return merged.map((p) => {
+      const c = p.clip;
+      const rel = p.s - c.start;
+      return {
+        start: r3(p.s), end: r3(p.e), in: r3(c.in + rel),
+        fx: clone(c.fx || defaultFx()),
+        kf: kfForPiece(c.kf, rel, p.e - p.s),
+        from: c.id,
+      };
+    });
   }
 
   // Problems in a timeline (empty array = consistent). Used by the tests.
   function validate(tl) {
     const problems = [];
-    const clips = tl.clips.slice().sort(byStart);
+    const clips = tl.clips.slice().sort((a, b) => trackOf(a) - trackOf(b) || a.start - b.start);
     for (let i = 1; i < clips.length; i += 1) {
-      if (overlaps(clips[i - 1], clips[i])) problems.push(`clips ${clips[i - 1].id} and ${clips[i].id} overlap`);
+      if (trackOf(clips[i - 1]) === trackOf(clips[i]) && overlaps(clips[i - 1], clips[i])) {
+        problems.push(`clips ${clips[i - 1].id} and ${clips[i].id} overlap on V${trackOf(clips[i]) + 1}`);
+      }
     }
     for (const c of tl.clips) {
       if (c.end - c.start < MIN_LEN - EPS) problems.push(`clip ${c.id} is too short`);
@@ -414,9 +631,12 @@
   }
 
   const api = {
-    MIN_LEN, newId, clone, isClip, emptyTimeline, clipsFromSource, clipsFromSections,
+    MIN_LEN, MAX_VTRACKS, DEFAULT_FX, newId, clone, isClip, trackOf, vtracksOf,
+    defaultFx, cleanFx, fxIsDefault, cleanKf, evalFxAt, fadeEnv,
+    emptyTimeline, clipsFromSource, clipsFromSections,
     capsFromCues, assignLanes, splitSelection, deleteItems, moveItems, trimItem,
-    copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText, timelineEnd, clipAt,
+    copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText,
+    timelineEnd, clipAt, clipStackAt, flattenClips, placeClip,
     mergeRanges, validate,
   };
   if (typeof module === "object" && module.exports) module.exports = api;

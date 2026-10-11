@@ -83,11 +83,12 @@ test("ripple through the middle of a clip keeps the right source times", () => {
   assert.deepEqual(TLM.validate(r), []);
 });
 
-test("moving a clip overwrites what is underneath it", () => {
+test("moving a clip onto a busy lane drops it onto a free lane", () => {
   const tl = { clips: [clip("a", 0, 4, 0), clip("b", 4, 8, 10)], caps: [], lanes: 1 };
   const out = TLM.moveItems(tl, ["b"], -2, 0);
-  assert.deepEqual(out.clips.map((c) => [c.id, c.start, c.end]), [["a", 0, 2], ["b", 2, 6]]);
+  assert.deepEqual(out.clips.map((c) => [c.id, c.start, c.end]), [["a", 0, 4], ["b", 2, 6]]);
   const moved = out.clips.find((c) => c.id === "b");
+  assert.equal(moved.track, 1, "the moved clip restacks instead of overwriting");
   near(moved.in, 10, "the moved clip keeps its in point");
   assert.deepEqual(TLM.validate(out), []);
 });
@@ -116,12 +117,14 @@ test("trimming stops at the neighbour and at the source limits", () => {
   assert.equal(atEnd.clips[0].end, 4, "a right trim cannot pass the source end (18 s)");
 });
 
-test("copy and paste overwrite; paste insert pushes later items", () => {
+test("paste restacks onto a free lane; paste insert pushes later items", () => {
   const tl = { clips: [clip("a", 0, 6, 0), clip("b", 6, 12, 6)], caps: [cap("t1", 0, 7, 8, "x")], lanes: 1 };
   const clipboard = TLM.copyItems(tl, ["a"]);
   const over = TLM.pasteItems(tl, clipboard, 4, false);
   const sorted = over.tl.clips.slice().sort((x, y) => x.start - y.start);
-  assert.deepEqual(sorted.map((c) => [c.start, c.end]), [[0, 4], [4, 10], [10, 12]]);
+  assert.deepEqual(sorted.map((c) => [c.start, c.end]), [[0, 6], [4, 10], [6, 12]]);
+  const pasted = over.tl.clips.find((c) => c.id !== "a" && c.id !== "b");
+  assert.equal(pasted.track, 1, "the pasted copy stacks instead of overwriting");
   assert.equal(over.ids.length, 1);
   assert.deepEqual(TLM.validate(over.tl), []);
 
@@ -138,8 +141,9 @@ test("cut then paste keeps the source frames of the moved material", () => {
   const right = split.clips.find((c) => c.start === 4);
   const cut = TLM.deleteItems(split, [right.id], false);             // lift: gap 4-10
   const back = TLM.pasteItems(cut, TLM.copyItems(split, [right.id]), 0, false).tl;
-  const pasted = back.clips.find((c) => c.start === 0);
+  const pasted = back.clips.find((c) => c.start === 0 && c.id !== "a");
   near(pasted.in, 4, "the pasted clip plays source 4 s first");
+  assert.equal(pasted.track, 1, "it stacks above the clip underneath");
   assert.deepEqual(TLM.validate(back), []);
 });
 
@@ -195,4 +199,168 @@ test("renaming a timeline caption updates its matching section label", () => {
   assert.equal(out.clips.find((c) => c.id === "a").text, "new words");
   assert.equal(out.clips.find((c) => c.id === "b").text, "old words", "non-overlapping sections keep their text");
   assert.equal(tl.caps.find((c) => c.id === "t1").text, "old words", "the input is not changed");
+});
+
+test("clips on different video tracks may overlap; same track may not", () => {
+  const tl = {
+    clips: [
+      { ...clip("a", 0, 5, 0), track: 0 },
+      { ...clip("b", 2, 4, 10), track: 1 },
+    ],
+    caps: [], lanes: 1, vtracks: 2,
+  };
+  assert.deepEqual(TLM.validate(tl), []);
+  assert.equal(TLM.vtracksOf(tl), 2);
+  // topmost clip wins the playhead
+  assert.equal(TLM.clipAt(tl, 3).id, "b");
+  assert.deepEqual(ids(TLM.clipStackAt(tl, 3)), ["a", "b"]);
+  assert.equal(TLM.clipAt(tl, 0.5).id, "a");
+  assert.equal(TLM.clipAt(tl, 9), null);
+});
+
+test("same-track overlap is still reported", () => {
+  const tl = {
+    clips: [clip("a", 0, 5, 0), clip("b", 3, 6, 3)],
+    caps: [], lanes: 1, vtracks: 1,
+  };
+  assert.equal(TLM.validate(tl).length, 1);
+});
+
+test("moving a clip up a track leaves the base track untouched", () => {
+  const tl = {
+    clips: [
+      { ...clip("a", 0, 5, 0), track: 0 },
+      { ...clip("b", 1, 3, 1), track: 0 },
+    ],
+    caps: [], lanes: 1, vtracks: 1,
+  };
+  const next = TLM.moveItems(tl, ["b"], 0, 0, 1);
+  const b = next.clips.find((c) => c.id === "b");
+  assert.equal(b.track, 1);
+  // the V1 clip underneath survives (carve is per-track)
+  assert.ok(next.clips.some((c) => c.id === "a" && c.start === 0 && c.end === 5));
+  assert.equal(next.vtracks, 2);
+});
+
+test("paste restacks onto a free lane instead of overwriting", () => {
+  const tl = {
+    clips: [{ ...clip("a", 0, 5, 0), track: 1 }],
+    caps: [], lanes: 1, vtracks: 2,
+  };
+  const cb = TLM.copyItems(tl, ["a"]);
+  const { tl: next } = TLM.pasteItems(tl, cb, 1, false);
+  // the pasted copy wants V2 but V2 is taken there, so it drops to V1
+  assert.equal(next.clips.length, 2);
+  assert.deepEqual(
+    next.clips.map((c) => c.track).sort(),
+    [0, 1]
+  );
+  assert.equal(TLM.validate(next).length, 0);
+});
+
+test("placeClip keeps the preferred lane when free, else lowest free", () => {
+  const a = { ...clip("a", 0, 5, 0), track: 0 };
+  const free = TLM.placeClip([a], { ...clip("b", 6, 8, 6), track: 0 });
+  assert.equal(free.track, 0);
+  const clash = TLM.placeClip([a], { ...clip("b", 2, 4, 2), track: 0 });
+  assert.equal(clash.track, 1);
+  const clash2 = TLM.placeClip(
+    [a, { ...clip("b", 2, 4, 2), track: 1 }],
+    { ...clip("c", 3, 6, 3), track: 1 }
+  );
+  assert.equal(clash2.track, 2);
+});
+
+test("flattenClips resolves the stack, topmost wins", () => {
+  const tl = {
+    clips: [
+      { ...clip("a", 0, 6, 0), track: 0, fx: TLM.defaultFx(), kf: [] },
+      {
+        ...clip("b", 2, 4, 10), track: 1,
+        fx: { ...TLM.defaultFx(), volume: 50 },
+        kf: [
+          { t: 0, x: 0, y: 0, scale: 20, opacity: 100 },
+          { t: 2, x: 0, y: 0, scale: 40, opacity: 100 },
+        ],
+      },
+    ],
+    caps: [], lanes: 1, vtracks: 2,
+  };
+  const flat = TLM.flattenClips(tl.clips);
+  assert.deepEqual(
+    flat.map((p) => [p.from, p.start, p.end]),
+    [["a", 0, 2], ["b", 2, 4], ["a", 4, 6]]
+  );
+  assert.equal(flat[1].in, 10);
+  assert.equal(flat[2].in, 4, "source offset follows the timeline cut");
+  assert.equal(flat[1].fx.volume, 50);
+  assert.deepEqual(flat[1].kf.map((k) => k.t), [0, 2]);
+  assert.equal(TLM.clipAt(tl, 3).id, "b", "preview agrees with the flatten");
+});
+
+test("splitting a clip splits its keyframes; trims drop out-of-range ones", () => {
+  const kf = [
+    { t: 0.5, x: -50, y: 0, scale: 50, opacity: 100 },
+    { t: 3.5, x: 50, y: 0, scale: 100, opacity: 100 },
+  ];
+  const tl = {
+    clips: [{ ...clip("a", 0, 4, 0), track: 0, fx: TLM.defaultFx(), kf }],
+    caps: [], lanes: 1, vtracks: 1,
+  };
+  const split = TLM.splitSelection(tl, 2, ["a"]);
+  assert.equal(split.clips.length, 2);
+  const left = split.clips.find((c) => c.start === 0);
+  const right = split.clips.find((c) => c.start === 2);
+  assert.deepEqual(left.kf.map((k) => k.t), [0.5]);
+  assert.deepEqual(right.kf.map((k) => k.t), [1.5]);
+  // fx objects are not shared between the halves
+  left.fx.scale = 10;
+  assert.equal(right.fx.scale, 100);
+  const trimmed = TLM.trimItem(split, right.id, "r", 3, 20);
+  const rc = trimmed.clips.find((c) => c.id === right.id);
+  assert.equal(rc.end, 3);
+  assert.deepEqual(rc.kf.map((k) => k.t), []);
+});
+
+test("evalFxAt interpolates between keyframes and holds the ends", () => {
+  const c = {
+    ...clip("a", 10, 14, 0), track: 0, fx: { ...TLM.defaultFx(), opacity: 80 },
+    kf: [
+      { t: 0, x: -100, y: 0, scale: 50, opacity: 0 },
+      { t: 4, x: 100, y: 0, scale: 100, opacity: 100 },
+    ],
+  };
+  const mid = TLM.evalFxAt(c, 12);
+  near(mid.x, 0, "x at midpoint");
+  near(mid.scale, 75, "scale at midpoint");
+  near(mid.opacity, 50, "opacity at midpoint");
+  assert.equal(TLM.evalFxAt(c, 9).x, -100);
+  assert.equal(TLM.evalFxAt(c, 99).x, 100);
+  // no keyframes -> base fx untouched
+  const plain = TLM.evalFxAt({ ...clip("b", 0, 2, 0), fx: { ...TLM.defaultFx(), volume: 50 } }, 1);
+  assert.equal(plain.volume, 50);
+  assert.equal(plain.scale, 100);
+});
+
+test("fade envelopes ramp 0..1 at the clip edges", () => {
+  const c = {
+    ...clip("a", 10, 20, 0),
+    fx: { ...TLM.defaultFx(), fade_in: 2, fade_out: 4, vfade_in: 1, vfade_out: 1 },
+  };
+  near(TLM.fadeEnv(c, 10).audio, 0, "audio starts silent");
+  near(TLM.fadeEnv(c, 11).audio, 0.5, "audio half faded");
+  near(TLM.fadeEnv(c, 15).audio, 1, "audio full in the middle");
+  near(TLM.fadeEnv(c, 19).audio, 0.25, "audio fading out");
+  near(TLM.fadeEnv(c, 10).video, 0, "video starts black");
+  near(TLM.fadeEnv(c, 15).video, 1, "video full in the middle");
+});
+
+test("captions map through the V1 track only", () => {
+  const clips = [
+    { ...clip("a", 0, 5, 0), track: 0 },
+    { ...clip("b", 0, 5, 10), track: 1 },
+  ];
+  const { caps } = TLM.capsFromCues(clips, [{ start: 1, end: 2, text: "hi" }]);
+  assert.equal(caps.length, 1);
+  assert.equal(caps[0].start, 1);
 });

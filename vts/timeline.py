@@ -4,8 +4,13 @@ The timeline is an edit list over the ONE source video of a project:
 
     clips  - pieces of the source placed on the timeline. `in` is the source
              time where the clip starts, `start`/`end` are timeline seconds.
-             Clips never overlap on the video track, but they may repeat or
-             appear out of source order (copy/paste).
+             Clips live on auto-stacking video lanes (`track`, exactly like
+             caption lanes): clips may overlap in time and restack onto free
+             lanes instead of overwriting each other, but never overlap *on
+             the same lane*. They may repeat or appear out of source order
+             (copy/paste). Each clip carries `fx` (transform/crop/audio/fades,
+             see vts/fx.py) and `kf` (keyframes animating the transform);
+             the highest lane wins the preview and the export.
     caps   - caption items on caption lanes (`lane` = 0, 1, 2...). Items on
              the same lane never overlap; different lanes stack.
 
@@ -17,6 +22,8 @@ from __future__ import annotations
 
 import math
 import uuid
+
+from . import fx as fx_mod
 
 MIN_LEN = 0.05          # shortest clip or caption that may exist (seconds)
 MAX_LANES = 64
@@ -62,18 +69,29 @@ def normalize(raw: dict, duration: float) -> dict:
             raise TimelineError(f"Clip {cid} starts before the beginning of the video.")
         if src_in + (end - start) > duration + 0.02:
             raise TimelineError(f"Clip {cid} runs past the end of the video.")
+        try:
+            track = int(item.get("track", 0))
+        except (TypeError, ValueError):
+            raise TimelineError(f"Clip {cid} has an invalid track.")
+        if not 0 <= track < fx_mod.MAX_VTRACKS:
+            raise TimelineError(f"Clip {cid} is on an invalid video track.")
+        fx = fx_mod.clean_fx(item.get("fx"))
+        kf = fx_mod.clean_keyframes(item.get("kf"), end - start)
         clips.append({
             "id": cid,
+            "track": track,
             "start": max(0.0, start),
             "end": end,
             "in": max(0.0, src_in),
             "kind": str(item.get("kind") or "") or None,
             "text": str(item.get("text") or "")[:500],
+            "fx": fx,
+            "kf": kf,
         })
-    clips.sort(key=lambda c: (c["start"], c["end"]))
+    clips.sort(key=lambda c: (c["track"], c["start"], c["end"]))
     for a, b in zip(clips, clips[1:]):
-        if b["start"] < a["end"] - _EPS:
-            raise TimelineError("Video clips overlap on the timeline.")
+        if a["track"] == b["track"] and b["start"] < a["end"] - _EPS:
+            raise TimelineError(f"Video clips overlap on track V{a['track'] + 1}.")
 
     lanes = max(1, min(MAX_LANES, int(raw.get("lanes") or 1)))
     caps: list[dict] = []
@@ -102,11 +120,18 @@ def normalize(raw: dict, duration: float) -> dict:
     for a, b in zip(caps, caps[1:]):
         if a["lane"] == b["lane"] and b["start"] < a["end"] - _EPS:
             raise TimelineError("Captions overlap on the same lane.")
-    return {"clips": clips, "caps": caps, "lanes": lanes}
+    vtracks = 1
+    try:
+        vtracks = max(1, min(fx_mod.MAX_VTRACKS, int(raw.get("vtracks") or 1)))
+    except (TypeError, ValueError):
+        vtracks = 1
+    if clips:
+        vtracks = max(vtracks, max(c["track"] for c in clips) + 1)
+    return {"clips": clips, "caps": caps, "lanes": lanes, "vtracks": vtracks}
 
 
 def video_length(tl: dict) -> float:
-    """Length of the exported picture: the end of the last video clip."""
+    """Length of the exported picture: the end of the last clip, any track."""
     return max((c["end"] for c in tl.get("clips", [])), default=0.0)
 
 

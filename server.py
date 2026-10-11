@@ -765,6 +765,7 @@ class TimelinePut(BaseModel):
     clips: list[dict] = []
     caps: list[dict] = []
     lanes: int = 1
+    vtracks: int = 1
 
 
 class TimelineExportRequest(BaseModel):

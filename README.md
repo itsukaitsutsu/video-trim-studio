@@ -14,14 +14,21 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 
 - **Text fonts:** discover installed TTF/OTF fonts, import fonts into the app, or grant browser-device font access. Imported fonts are available for both preview and FFmpeg burn-in.
 - **Shadows:** independent enable toggle, opacity, angle, distance, continuous glyph-outline spread and blur with consistent 1080p design-pixel scaling in preview/export.
-- Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
-- Rearrange the video, timeline, list, and right-side tool panels by dragging their grip handles between the two docked columns. On wide layouts, the inner edges (right edge of a main-column panel or left edge of a side-column panel) resize the shared column divider: shrinking the main column moves the side panels left and widens them, keeping each column's panels stacked and aligned. Outer edges resize individual panels; other panels have four handles, while Timeline has right/top/bottom. On narrow layouts, the columns stack and edge handles resize individual panels. The Video preview's centered inner bottom grip resizes only its viewing window; the normal outer panel handle remains separate. The Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. The layout and viewport heights are saved in this browser; **Reset layout** restores the defaults.
+- Local web UI with a video preview, a multi-row timeline (stacked video lanes plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
+- **Menu bar + Premiere-style units:** File / Edit / Clip / Timeline / Captions / Export / Window / Help across the top; below it four movable units — **Project** (Source + Detect + Auto-caption cards) on the left, **Program** monitor in the center, a tabbed **Inspector** (Clip / Text / Export) on the right, and a tabbed full-width **Timeline** (Timeline 01 / List) at the bottom.
+- Rearrange any unit by dragging its ⠿ grip handle into another zone, resize zones with the divider grips, and resize individual units by their edges (other units have four handles, Timeline has right/top/bottom).
+- **Group units into tabs:** drop a unit onto the middle of another unit and it becomes one of that unit's tabs (Premiere-style panel groups); drop it near a unit's top or bottom edge to place it beside that unit instead. Drag a group's tab out to a zone edge to split it off again. A group's header × hides the whole group, and the Window menu brings back any hidden unit or tab. Grouped units keep their own content, so a grouped Timeline is shown as a tab inside its host (it is narrower there than in its own zone). Every unit header also has a **× button** that hides the whole unit; anything hidden comes back from the **Window** menu, which shows or hides units and individual tabs with checkmarks (picking a tab re-shows its unit). The Program monitor's centered inner bottom grip resizes only its viewing window; the Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. Zones, visibility, active tabs, sizes and viewport heights are saved in this browser; **Reset workspace** restores the defaults.
+- **Lane lock / eye:** every V/T label has a lock (blocks timeline move/trim/razor/split/delete/cut/mute on that lane — the Clip panel and text edits still work) and an eye (hides the lane's blocks on the timeline to declutter; preview and export are unaffected).
 - Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
 - **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
 - Selects timeline items by click, Shift/Ctrl-click, rubber band, or the timeline-list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
+- **Tools toolbar:** the vertical icon bar beside the timeline picks the mouse mode — **Select** (V), **Razor** (R, click a clip or caption to split it), **Caption** (T, click to add one), **Hand** (H, drag to pan), **Zoom** (Z, drag a range or click; Alt = out) and **Mute** (M, click a clip to mute/unmute it). **Esc** returns to Select.
+- **Stacked video lanes:** clips live on lanes V1..Vn, which behave exactly like caption lanes — overlaps restack onto a free lane instead of overwriting (moves, pastes and alt-drag copies never destroy anything), and new lanes appear automatically. Where lanes overlap, the **highest lane wins** the preview and the export. Drag clips up/down between lanes, or use the Clip panel lane stepper.
+- **Clip panel (per-clip effects):** select a video clip to edit Transform (position X/Y, scale, opacity), Crop % per edge, Audio (volume, mute, fade in/out) and Video fade in/out. Everything previews live (position/size/crop/opacity/volume/fades) and exports through the same ffmpeg graph.
+- **Keyframes:** animate position, size and opacity with ◆ keyframes (diamonds on the clip). **◆ Add at playhead** captures the current look; export bakes the motion into short spans. Audio/video fades also preview live during playback.
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
@@ -83,7 +90,7 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
 4. **Edit the timeline.** All times are timeline seconds, and the preview plays the timeline.
    - **Select:** click a clip or caption to select it and show that frame in the preview; the clip under the playhead is highlighted in the list. Shift/Ctrl-click adds or removes one. Drag on empty space to rubber-band select. Ctrl+A selects all, and Esc clears.
    - **Cut:** **Ctrl+K** (or **split**) splits the selection, or everything, at the playhead. Drag a clip edge to trim it. The edge stops at the neighbouring clips and at the start or end of the source.
-   - **Move:** drag a clip or caption. A clip overwrites whatever it lands on, and a caption moves to a free lane if its lane is taken. Alt-drag copies instead.
+   - **Move:** drag a clip or caption. A clip restacks onto a free lane if its lane is taken (nothing is ever overwritten — the highest lane wins), just like a caption. Alt-drag copies instead.
    - **Remove:** **Delete** (or **delete**) leaves a gap. **Shift+Delete** (or **ripple delete**) closes the gap on every track, and the captions follow the picture.
    - **Copy / cut / paste:** Ctrl+C, Ctrl+X, and Ctrl+V paste at the playhead, overwriting. Ctrl+Shift+V inserts and pushes the later items along.
    - **Captions:** **+ caption** adds one at the playhead, and **+ lane** adds a caption lane to stack captions. Double-click a caption to edit its text. On the preview (burn mode), the caption box still drags and resizes as before.
@@ -400,11 +407,13 @@ server.py                  FastAPI local server
 auto_caption.py            CLI wrapper around the auto-caption engine
 vts/                       FFprobe, detection, timeline validation (timeline.py),
                            timeline export (edl.py), FFmpeg export, preview proxy,
-                           faster-whisper auto-caption
+                           faster-whisper auto-caption, clip effects (fx.py)
 static/timeline-model.js   pure editing rules: split, move, trim, ripple, paste, undo data
-static/timeline.js         timeline canvas, mouse and keyboard, playback, timeline list,
-                           detection and export glue
-static/app.js              open and browse, caption card, caption box, export options
+static/timeline.js         timeline canvas (V1..Vn + caption lanes), Tools toolbar,
+                           lane lock/eye, single-layer playback, timeline list
+static/clip.js             Clip panel: transform, crop, audio, fades, keyframes
+static/app.js              menu bar, workspace zones, source panel, caption card,
+                           caption box, export options
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)
 demo/                      18-second sample video + captions, and a short spoken clip
 setup.bat, run.bat         Windows install/run helpers
@@ -416,8 +425,8 @@ tests/js/                  Node tests for the timeline editing rules
 
 ## Notes / limitations
 
-- **One video per project.** There is no B-roll, no second video or audio file, and no picture-in-picture. Stacking applies to caption lanes; the picture is a single track.
-- **Audio belongs to its video clip.** There are no separate audio tracks, per-clip volume, or keyframes. The only fade is the short one at each cut.
+- **One video per project.** There is no B-roll and no second video or audio file. There is no compositing or picture-in-picture: where video lanes overlap, the highest lane wins outright.
+- **Audio belongs to its video clip.** There are no separate audio tracks, but each clip has its own volume, mute and fades. The only automatic fade is the short one at each cut.
 - **No transitions, titles** (beyond captions), or visual effects.
 - **Gaps** between clips export as black picture and silence. Captions after the end of the last clip are dropped at export.
 - **The edit list lives in the running server.** It is restored on a page refresh, but opening another video starts a new timeline and a server restart clears it, so export a finished cut before stopping the app.

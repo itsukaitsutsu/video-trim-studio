@@ -234,7 +234,7 @@ def test_video_preview_view_grip_resizes_only_the_viewport_and_persists(browser_
     page.click("#workspaceReset")
     page.wait_for_function("document.getElementById('player').readyState >= 1 && PREVIEW_VIEW.baseH > 0")
 
-    panel = page.locator('[data-workspace-panel="video"]')
+    panel = page.locator('[data-workspace-panel="program"]')
     viewport = page.locator("#previewViewport")
     stage = page.locator("#previewStage")
     handle = page.locator("#previewViewportResize")
@@ -282,7 +282,7 @@ def test_video_preview_view_grip_resizes_only_the_viewport_and_persists(browser_
     page.wait_for_function("S.project && S.project.info")
     page.wait_for_function("document.getElementById('player').readyState >= 1 && PREVIEW_VIEW.baseH > 0")
     assert abs(viewport.bounding_box()["height"] - saved_height) < 3
-    assert page.locator('[data-workspace-panel="video"] .workspace-resize-handle.resize-bottom').count() == 1
+    assert page.locator('[data-workspace-panel="program"] .workspace-resize-handle.resize-bottom').count() == 1
     page.click("#workspaceReset")
     assert not page_errors, page_errors
 
@@ -533,23 +533,50 @@ def test_startup_reopens_saved_video_when_project_is_missing(browser_page):
     assert not page_errors, page_errors
 
 
-def test_workspace_panels_can_resize_dock_and_persist(browser_page):
+def test_workspace_units_tabs_hide_and_persist(browser_page):
     page, page_errors = browser_page
     open_demo(page)
     page.click("#workspaceReset")
 
+    project = page.locator('[data-workspace-panel="project"]')
+    program = page.locator('[data-workspace-panel="program"]')
+    inspector = page.locator('[data-workspace-panel="inspector"]')
     timeline = page.locator('[data-workspace-panel="timeline"]')
-    video_panel = page.locator('[data-workspace-panel="video"]')
-    assert video_panel.locator(".resize-bottom").count() == 1
+    zone_of = "el => el.parentElement.dataset.workspaceColumn"
+    assert project.evaluate(zone_of) == "left"
+    assert program.evaluate(zone_of) == "center"
+    assert inspector.evaluate(zone_of) == "right"
+    assert timeline.evaluate(zone_of) == "bottom"
+
+    # Tabbed units: inspector (Clip/Text/Export) and bottom (Timeline/List).
+    assert page.locator("#inspTabs [role=tab]").count() == 3
+    assert page.locator("#botTabs [role=tab]").count() == 2
+    assert page.locator("#tab-clip").is_visible()
+    assert page.locator("#tab-text").is_visible() is False
+    assert page.locator("#tab-tl").is_visible()
+    assert page.locator("#tab-list").is_visible() is False
+    page.click('#inspTabs [data-tab="text"]')
+    page.click('#botTabs [data-btab="list"]')
+    assert page.locator("#tab-text").is_visible()
+    assert page.locator("#tab-clip").is_visible() is False
+    assert page.locator("#tab-list").is_visible()
+    page.reload()
+    page.wait_for_function("S.project && S.project.info")
+    assert page.locator("#tab-text").is_visible()
+    assert page.locator("#tab-list").is_visible()
+    page.click('#inspTabs [data-tab="clip"]')
+    page.click('#botTabs [data-btab="tl"]')
+
+    # Resize handles live on the units now (timeline keeps no left edge).
+    assert program.locator(".resize-bottom").count() == 1
     assert timeline.locator(".resize-left").count() == 0
     assert timeline.locator(".resize-right").count() == 1
     for edge in ["top", "bottom"]:
         assert timeline.locator(f".resize-{edge}").count() == 1
-    detect_panel = page.locator('[data-workspace-panel="detect"]')
-    for edge in ["left", "right", "top", "bottom"]:
-        assert detect_panel.locator(f".resize-{edge}").count() == 1
-    assert timeline.locator(".resize-right").get_attribute("title") == "Drag to resize both workspace columns"
-    assert detect_panel.locator(".resize-left").get_attribute("title") == "Drag to resize both workspace columns"
+    assert project.locator(".resize-left").count() == 1
+    # Panel edges resize their own panel; the zone dividers resize the zones.
+    assert timeline.locator(".resize-right").get_attribute("title") == \
+        "Drag the right edge to resize this panel"
 
     def drag_handle(edge, dx, dy):
         handle = timeline.locator(f".resize-{edge}")
@@ -567,57 +594,173 @@ def test_workspace_panels_can_resize_dock_and_persist(browser_page):
     old = timeline.bounding_box()
     drag_handle("bottom", 0, -14)
     assert timeline.bounding_box()["height"] < old["height"]
-    main_column = page.locator('[data-workspace-column="main"]')
-    side_column = page.locator('[data-workspace-column="side"]')
-    video = page.locator('[data-workspace-panel="video"]')
-    detect = page.locator('[data-workspace-panel="detect"]')
-    old_main = main_column.bounding_box()
-    old_side = side_column.bounding_box()
-    old_detect = detect.bounding_box()
-    old_width = timeline.bounding_box()["width"]
-    drag_handle("right", -70, 0)
-    saved_width = timeline.bounding_box()["width"]
-    saved_main_width = main_column.bounding_box()["width"]
-    saved_side_width = side_column.bounding_box()["width"]
-    saved_detect_x = detect.bounding_box()["x"]
-    assert saved_width < old_width - 50
-    assert saved_main_width < old_main["width"] - 50
-    assert saved_side_width > old_side["width"] + 50
-    assert saved_detect_x < old_detect["x"] - 50
-    assert abs(video.bounding_box()["width"] - saved_main_width) < 2
-    assert abs(timeline.bounding_box()["width"] - saved_main_width) < 2
-    assert abs(page.locator('[data-workspace-panel="list"]').bounding_box()["width"] - saved_main_width) < 2
-    assert abs(detect.bounding_box()["width"] - saved_side_width) < 2
-    assert main_column.bounding_box()["x"] + saved_main_width < side_column.bounding_box()["x"]
     saved_height = timeline.bounding_box()["height"]
 
-    # The shared column split and panel height are persisted with the layout.
+    # The left divider resizes the left zone against the center zone.
+    left_zone = page.locator('[data-workspace-column="left"]')
+    center_zone = page.locator('[data-workspace-column="center"]')
+    old_left = left_zone.bounding_box()["width"]
+    old_center = center_zone.bounding_box()["width"]
+    divider = page.locator("#divL")
+    divider.scroll_into_view_if_needed()
+    box = divider.bounding_box()
+    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    page.mouse.move(x, y)
+    page.mouse.down()
+    page.mouse.move(x + 70, y, steps=5)
+    page.mouse.up()
+    saved_left = left_zone.bounding_box()["width"]
+    assert saved_left > old_left + 50
+    assert center_zone.bounding_box()["width"] < old_center - 50
+
+    # The x hides the ENTIRE unit; the Window menu brings it back.
+    page.click('[data-hide-unit="inspector"]')
+    assert inspector.bounding_box() is None
+    page.click('[data-menu="window"]')
+    assert page.locator('#windowDrop [data-win="clip"] .tick').inner_text() == ""
+    assert page.locator('#windowDrop [data-win="text"] .tick').inner_text() == ""
+    assert page.locator('#windowDrop [data-win="export"] .tick').inner_text() == ""
+    page.click('#windowDrop [data-win="text"]')
+    assert inspector.bounding_box() is not None
+    assert page.locator("#tab-text").is_visible()
+    assert page.locator('#windowDrop [data-win="text"] .tick').inner_text() != ""
+    # Single tabs still toggle from the Window menu (unit stays put).
+    page.click('#windowDrop [data-win="clip"]')
+    assert page.locator('#inspTabs [data-tab="clip"]').is_visible() is False
+    assert page.locator("#tab-text").is_visible()
+    assert inspector.bounding_box() is not None
+    page.keyboard.press("Escape")
+
+    # Visibility persists across a reload.
     page.reload()
     page.wait_for_function("S.project && S.project.info")
-    assert abs(timeline.bounding_box()["width"] - saved_width) < 2
+    assert abs(left_zone.bounding_box()["width"] - saved_left) < 2
     assert abs(timeline.bounding_box()["height"] - saved_height) < 1
-    assert abs(main_column.bounding_box()["width"] - saved_main_width) < 2
-    assert abs(side_column.bounding_box()["width"] - saved_side_width) < 2
-    assert abs(detect.bounding_box()["x"] - saved_detect_x) < 2
+    assert inspector.bounding_box() is not None
+    assert page.locator("#tab-text").is_visible()
+    assert page.locator('#inspTabs [data-tab="clip"]').is_visible() is False
+    # Plain units hide whole from x and return from the Window menu.
+    page.click('[data-hide-unit="project"]')
+    assert project.bounding_box() is None
+    page.click('[data-menu="window"]')
+    page.click('#windowDrop [data-win="project"]')
+    assert project.bounding_box() is not None
+    page.keyboard.press("Escape")
 
+    # Docking: the timeline unit moves into the left zone and stays there.
     timeline.locator('[aria-label="Move Timeline panel"]').drag_to(
-        detect, target_position={"x": 24, "y": 5})
-    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "side"
-    side_order = page.locator('[data-workspace-column="side"]').evaluate(
-        "column => [...column.children].map(panel => panel.dataset.workspacePanel)")
-    assert side_order.index("timeline") < side_order.index("detect")
+        left_zone, target_position={"x": 24, "y": 5})
+    assert timeline.evaluate(zone_of) == "left"
+    left_order = left_zone.evaluate(
+        "zone => [...zone.children].map(el => el.dataset.workspacePanel)")
+    assert left_order == ["timeline", "project"]
 
-    # Rearrangement is remembered across a refresh, and the header control
-    # returns every workspace panel to the initial two-column arrangement.
     page.reload()
     page.wait_for_function("S.project && S.project.info")
-    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "side"
-    assert abs(timeline.bounding_box()["height"] - saved_height) < 1
+    assert timeline.evaluate(zone_of) == "left"
     page.click("#workspaceReset")
-    assert timeline.evaluate("panel => panel.parentElement.dataset.workspaceColumn") == "main"
-    main_order = page.locator('[data-workspace-column="main"]').evaluate(
-        "column => [...column.children].map(panel => panel.dataset.workspacePanel)")
-    assert main_order == ["video", "timeline", "list"]
+    assert timeline.evaluate(zone_of) == "bottom"
+    bottom_order = page.locator('[data-workspace-column="bottom"]').evaluate(
+        "zone => [...zone.children].map(el => el.dataset.workspacePanel)")
+    assert bottom_order == ["timeline"]
+    assert inspector.bounding_box() is not None
+    assert page.locator("#tab-clip").is_visible()
+    assert page.locator("#tab-tl").is_visible()
+    assert not page_errors, page_errors
+
+
+def test_units_group_by_drop_and_ungroup(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.click("#workspaceReset")
+    page.set_viewport_size({"width": 1600, "height": 2400})
+
+    def mouse_drag(src, dst, fy=0.5):
+        src.scroll_into_view_if_needed()
+        gb = src.bounding_box()
+        dst.scroll_into_view_if_needed()
+        db = dst.bounding_box()
+        page.mouse.move(gb["x"] + gb["width"] / 2, gb["y"] + gb["height"] / 2)
+        page.mouse.down()
+        tx, ty = db["x"] + db["width"] / 2, db["y"] + db["height"] * fy
+        page.mouse.move(tx - 5, ty - 5, steps=3)
+        page.mouse.move(tx, ty, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(250)
+
+    project = page.locator('[data-workspace-panel="project"]')
+    inspector = page.locator('[data-workspace-panel="inspector"]')
+    grip = lambda unit: page.locator(f'[data-workspace-panel="{unit}"] .workspace-drag-handle').first
+    group_tab = lambda host, unit: page.locator(
+        f'[data-workspace-panel="{host}"] > .ws-tabs [data-dyn-tab][data-wintab="{unit}"]')
+
+    # Dropping a unit on the middle of another unit makes it a tab of that unit.
+    mouse_drag(grip("project"), inspector)
+    assert group_tab("inspector", "project").count() == 1
+    assert project.evaluate("el => !!el.closest('[data-workspace-panel=inspector]')")
+    group_tab("inspector", "project").click()
+    assert project.locator(".ws-body").is_visible()
+    page.reload()
+    page.wait_for_function("S.project && S.project.info")
+    assert group_tab("inspector", "project").count() == 1
+
+    # Dragging the group tab out to a zone edge ungroups the unit.
+    mouse_drag(group_tab("inspector", "project"),
+               page.locator('[data-workspace-panel="program"]'), fy=0.05)
+    assert group_tab("inspector", "project").count() == 0
+    assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "center"
+
+    # The bottom timeline unit can join the inspector as a tab too.
+    mouse_drag(grip("timeline"), inspector)
+    assert group_tab("inspector", "timeline").count() == 1
+    assert page.locator('[data-workspace-panel="timeline"] #tab-tl').count() == 1
+
+    # The header x hides the whole group; Window brings it back.
+    page.click('[data-hide-unit="inspector"]')
+    assert inspector.bounding_box() is None
+    page.click('[data-menu="window"]')
+    page.click('#windowDrop [data-win="clip"]')
+    assert inspector.bounding_box() is not None
+    page.keyboard.press("Escape")
+
+    page.click("#workspaceReset")
+    assert page.locator("[data-dyn-tab]").count() == 0
+    assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "left"
+    assert not page_errors, page_errors
+
+
+def test_timeline_lane_lock_and_eye(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.click("#workspaceReset")
+    page.wait_for_function("S.tl.clips.length === 1")
+
+    lock = page.locator('.track-name.video [data-op="lock"]').first
+    eye = page.locator('.track-name.video [data-op="eye"]').first
+    lock.click()
+    assert lock.evaluate("b => b.classList.contains('off')") is False
+    # A locked lane refuses deletes.
+    page.evaluate("S.sel = new Set([S.tl.clips[0].id])")
+    page.keyboard.press("Delete")
+    assert "locked" in page.locator("#tlStatus").inner_text()
+    assert page.evaluate("S.tl.clips.length") == 1
+    # The eye hides the lane's blocks; the lock survives a reload.
+    eye.click()
+    assert page.locator(".track-name.video.lane-hidden").count() == 1
+    page.reload()
+    page.wait_for_function("S.project && S.project.info")
+    lock = page.locator('.track-name.video [data-op="lock"]').first
+    assert lock.evaluate("b => b.classList.contains('off')") is False
+    assert page.locator(".track-name.video.lane-hidden").count() == 1
+    eye = page.locator('.track-name.video [data-op="eye"]').first
+    eye.click()
+    assert page.locator(".track-name.video.lane-hidden").count() == 0
+    lock.click()
+    assert lock.evaluate("b => b.classList.contains('off')") is True
+    page.evaluate("S.sel = new Set([S.tl.clips[0].id])")
+    page.keyboard.press("Delete")
+    assert page.evaluate("S.tl.clips.length") == 0
+    page.click("#workspaceReset")
     assert not page_errors, page_errors
 
 
@@ -840,7 +983,8 @@ def test_font_picker_search_keyboard_cancel_and_history(browser_page):
 def test_font_picker_popup_in_resized_panel_and_small_viewport(browser_page):
     page, errors = browser_page
     open_demo(page)
-    panel = page.locator('[data-workspace-panel="caption-style"]')
+    page.click('#inspTabs [data-tab="text"]')
+    panel = page.locator('#tab-text')
     panel.evaluate("el => { el.style.height='190px'; el.classList.add('workspace-panel-resized'); }")
     page.set_viewport_size({'width':390,'height':720})
     search = page.locator('#capFontSearch')

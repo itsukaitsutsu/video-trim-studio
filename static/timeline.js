@@ -4,8 +4,11 @@
  * Editing rules live in timeline-model.js (window.TLM). */
 "use strict";
 
-const TL = { labelW: 46, ruler: 20, vTop: 20, vH: 56, laneTop: 80, laneH: 22, laneGap: 3, wave: 12 };
-const laneY = (i) => TL.laneTop + i * (TL.laneH + TL.laneGap);
+const TL = { labelW: 68, ruler: 20, vTop: 20, vH: 40, vGap: 4, laneH: 22, laneGap: 3, wave: 12 };
+const vTrackCount = () => TLM.vtracksOf(S.tl);
+const vTrackTop = () => TL.vTop + vTrackCount() * (TL.vH + TL.vGap);
+const vY = (track) => TL.vTop + Math.max(0, track || 0) * (TL.vH + TL.vGap);
+const laneY = (i) => vTrackTop() + i * (TL.laneH + TL.laneGap);
 const laneCount = () => Math.max(1, S.tl.lanes || 1);
 const tlHeight = () => laneY(laneCount()) + 4;
 const CLIP_FALLBACK = "#2b4f6b";
@@ -70,16 +73,20 @@ const x2t = (x) => S.view.start + (x / plotWidth()) * S.view.span;
 
 function rowAt(y) {
   if (y < TL.ruler) return { kind: "ruler" };
-  if (y >= TL.vTop && y < TL.vTop + TL.vH + 2) return { kind: "video" };
-  if (y >= TL.laneTop) {
-    const lane = Math.floor((y - TL.laneTop) / (TL.laneH + TL.laneGap));
+  const vtEnd = vTrackTop();
+  if (y >= TL.vTop && y < vtEnd) {
+    const vtrack = Math.floor((y - TL.vTop) / (TL.vH + TL.vGap));
+    return { kind: "video", vtrack: Math.min(vtrack, vTrackCount() - 1) };
+  }
+  if (y >= vtEnd) {
+    const lane = Math.floor((y - vtEnd) / (TL.laneH + TL.laneGap));
     if (lane < laneCount()) return { kind: "lane", lane };
   }
   return { kind: "none" };
 }
 
 function itemsOnRow(row) {
-  if (row.kind === "video") return S.tl.clips;
+  if (row.kind === "video") return S.tl.clips.filter((c) => TLM.trackOf(c) === row.vtrack);
   if (row.kind === "lane") return S.tl.caps.filter((c) => c.lane === row.lane);
   return [];
 }
@@ -87,6 +94,7 @@ function itemsOnRow(row) {
 function hitItem(row, x) {
   let best = null;
   for (const it of itemsOnRow(row)) {
+    if (itemHidden(it)) continue;
     if (x >= t2x(it.start) - 3 && x <= t2x(it.end) + 3) best = it;
   }
   return best;
@@ -103,21 +111,70 @@ function edgeAt(it, x) {
 
 /* ------------------------------------------------------------ drawing */
 
-let renderedTrackLabelCount = -1;
+/* ------------------------------------------------------------ lane lock/eye */
+
+// Video lane v -> "v0".., caption lane -> "c0".. The sets live on S so the
+// workspace layout can persist them. Lock blocks timeline gestures
+// (move/trim/razor/split/delete/cut/mute); the eye only declutters the
+// timeline drawing — preview and export are unaffected.
+function laneSets() {
+  if (!S.laneHidden) S.laneHidden = new Set();
+  if (!S.laneLocked) S.laneLocked = new Set();
+}
+function laneKeyOf(it) {
+  return TLM.isClip(it) ? `v${TLM.trackOf(it)}` : `c${it.lane}`;
+}
+function laneHidden(key) { laneSets(); return S.laneHidden.has(key); }
+function laneLocked(key) { laneSets(); return S.laneLocked.has(key); }
+function itemLocked(it) { return laneLocked(laneKeyOf(it)); }
+function itemHidden(it) { return laneHidden(laneKeyOf(it)); }
+function findTlItem(id) {
+  return [...S.tl.clips, ...S.tl.caps].find((it) => it.id === id) || null;
+}
+function laneName(key) {
+  const n = Number(key.slice(1)) + 1;
+  return key[0] === "v" ? `V${n}` : `T${n}`;
+}
+function laneLabelsDirty() {
+  renderedLaneSig = "";
+  if (S.project) draw();
+}
+const LANE_SVG = {
+  lock: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="5" y="9" width="10" height="7" rx="1.4"/><path d="M7 9V6.8a3 3 0 0 1 6 0V9"/></svg>`,
+  eye: `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M2.5 10S5.4 5.8 10 5.8 17.5 10 17.5 10 14.6 14.2 10 14.2 2.5 10 2.5 10Z"/><circle cx="10" cy="10" r="2.2"/></svg>`,
+};
+let renderedLaneSig = "";
 
 function syncTrackLabels(height) {
   const rail = $("trackLabels");
   if (!rail) return;
+  laneSets();
+  // Prune lanes that no longer exist so stale keys never linger.
+  for (const key of [...S.laneHidden, ...S.laneLocked]) {
+    const n = Number(key.slice(1));
+    const live = key[0] === "v" ? n < vTrackCount() : n < laneCount();
+    if (!live) { S.laneHidden.delete(key); S.laneLocked.delete(key); }
+  }
   const count = laneCount();
-  if (count !== renderedTrackLabelCount) {
+  const vc = vTrackCount();
+  const sig = `${vc}/${count}/` +
+    [...S.laneHidden].sort().join(",") + "|" + [...S.laneLocked].sort().join(",");
+  if (sig !== renderedLaneSig) {
+    const btn = (key, op, on, title, svg) =>
+      `<button type="button" class="lanebtn${on ? "" : " off"}" data-lane="${key}" ` +
+      `data-op="${op}" title="${title}">${svg}</button>`;
+    const label = (key, name, cls, top, h) =>
+      `<div class="track-name ${cls}${laneHidden(key) ? " lane-hidden" : ""}" ` +
+      `style="top:${top}px;height:${h}px"><span class="tlabel">${name}</span>` +
+      btn(key, "lock", laneLocked(key), `${name}: lock lane (blocks timeline edits)`, LANE_SVG.lock) +
+      btn(key, "eye", !laneHidden(key), `${name}: show / hide lane on the timeline`, LANE_SVG.eye) +
+      `</div>`;
+    const videos = Array.from({ length: vc }, (_, v) =>
+      label(`v${v}`, `V${v + 1}`, "video", vY(v), TL.vH)).join("");
     const captions = Array.from({ length: count }, (_, lane) =>
-      `<div class="track-name caption" style="top:${laneY(lane)}px;height:${TL.laneH}px">T${lane + 1}</div>`
-    ).join("");
-    rail.innerHTML =
-      `<div class="track-ruler"></div>` +
-      `<div class="track-name video" style="top:${TL.vTop}px;height:${TL.vH}px">V1</div>` +
-      captions;
-    renderedTrackLabelCount = count;
+      label(`c${lane}`, `T${lane + 1}`, "caption", laneY(lane), TL.laneH)).join("");
+    rail.innerHTML = `<div class="track-ruler"></div>` + videos + captions;
+    renderedLaneSig = sig;
   }
   const viewport = $("timelineViewport");
   const visibleHeight = viewport?.style.height ? viewport.clientHeight : 0;
@@ -194,7 +251,7 @@ function drawClip(ctx, c) {
   const x = t2x(c.start);
   const x2 = Math.max(x + 2, t2x(c.end));
   const bw = x2 - x;
-  const y = TL.vTop + 2;
+  const y = vY(TLM.trackOf(c)) + 2;
   const bh = TL.vH - 4;
   const selected = S.sel.has(c.id);
   ctx.fillStyle = (c.kind && KIND_COLOR[c.kind]) || CLIP_FALLBACK;
@@ -221,6 +278,28 @@ function drawClip(ctx, c) {
   ctx.lineWidth = selected ? 2 : 1;
   ctx.strokeRect(x + 0.5, y + 0.5, bw - 1, bh - 1);
   ctx.lineWidth = 1;
+  // keyframe diamonds along the top edge + a dot when effects are set
+  const kfs = Array.isArray(c.kf) ? c.kf : [];
+  if (kfs.length) {
+    ctx.fillStyle = "#ffd54a";
+    for (const k of kfs) {
+      const kx = t2x(c.start + (Number(k.t) || 0));
+      if (kx < x || kx > x2) continue;
+      ctx.beginPath();
+      ctx.moveTo(kx, y + 1);
+      ctx.lineTo(kx + 3, y + 5);
+      ctx.lineTo(kx, y + 9);
+      ctx.lineTo(kx - 3, y + 5);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  if (!TLM.fxIsDefault(c.fx)) {
+    ctx.fillStyle = "#39c5cf";
+    ctx.beginPath();
+    ctx.arc(x + bw - 8, y + bh - 8, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 function drawCap(ctx, c) {
@@ -255,6 +334,7 @@ function drawCap(ctx, c) {
 function draw() {
   if (!S.project) return;
   const { ctx, w, h } = canvasGeo();
+  if (w < 10) return;   // the timeline panel is hidden; nothing to paint
   const v0 = S.view.start, v1 = S.view.start + S.view.span;
   ctx.fillStyle = "#0b0f14";
   ctx.fillRect(0, 0, w, h);
@@ -271,11 +351,14 @@ function draw() {
     ctx.fillText(fmtTime(t, false), x + 3, 12);
   }
 
-  // video row; the separate left rail holds the V1 label while this time area pans.
-  ctx.fillStyle = "#0d1218";
-  ctx.fillRect(0, TL.vTop, w, TL.vH);
+  // video rows V1..Vn; the separate left rail holds the labels while this area pans.
+  for (let v = 0; v < vTrackCount(); v += 1) {
+    ctx.fillStyle = "#0d1218";
+    ctx.fillRect(0, vY(v), w, TL.vH);
+  }
   for (const c of S.tl.clips) {
     if (c.end < v0 || c.start > v1) continue;
+    if (itemHidden(c)) continue;
     drawClip(ctx, c);
   }
 
@@ -288,11 +371,12 @@ function draw() {
   }
   for (const c of S.tl.caps) {
     if (c.end < v0 || c.start > v1) continue;
+    if (itemHidden(c)) continue;
     drawCap(ctx, c);
   }
 
-  // marquee
-  if (S.drag && S.drag.mode === "marquee" && S.drag.moved) {
+  // marquee (selection) and zoom-rectangle share the rubber band
+  if (S.drag && (S.drag.mode === "marquee" || S.drag.mode === "zoomrect") && S.drag.moved) {
     const d = S.drag;
     ctx.fillStyle = "rgba(88,166,255,.18)";
     ctx.fillRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1),
@@ -333,6 +417,7 @@ function refresh(forcePreview = false) {
   updateTally();
   updateTimecode();
   layoutCapOverlay();
+  if (typeof ClipRefresh === "function") ClipRefresh();
   // The timeline is the source of truth. Edits can change which source frame
   // belongs under the unchanged playhead (or turn it into a gap), so keep the
   // video preview aligned whenever the edit list changes.
@@ -444,9 +529,12 @@ function selectAll() {
 function deleteSel(ripple) {
   const ids = selectedIds();
   if (!ids.length) return status("Select a clip or caption first.");
+  const open = ids.filter((id) => { const it = findTlItem(id); return it && !itemLocked(it); });
+  if (!open.length) return status("That lane is locked.");
   S.sel = new Set();
-  setTL(TLM.deleteItems(S.tl, ids, ripple));
-  status(ripple ? "Removed and closed the gap." : "Removed (gap left on the timeline).");
+  setTL(TLM.deleteItems(S.tl, open, ripple));
+  status((ripple ? "Removed and closed the gap." : "Removed (gap left on the timeline).") +
+    (open.length < ids.length ? " A locked lane was skipped." : ""));
 }
 
 function copySel() {
@@ -460,9 +548,12 @@ function cutSel() {
   const ids = selectedIds();
   if (!ids.length) return status("Select something to cut.");
   S.clip = TLM.copyItems(S.tl, ids);
+  const open = ids.filter((id) => { const it = findTlItem(id); return it && !itemLocked(it); });
   S.sel = new Set();
-  setTL(TLM.deleteItems(S.tl, ids, false));
-  status(`Cut ${S.clip.items.length} item(s). Paste with Ctrl+V.`);
+  if (open.length) setTL(TLM.deleteItems(S.tl, open, false));
+  status(open.length < ids.length
+    ? `Copied ${S.clip.items.length} item(s) — a locked lane was left in place.`
+    : `Cut ${S.clip.items.length} item(s). Paste with Ctrl+V.`);
 }
 
 function pasteSel(insert) {
@@ -475,12 +566,19 @@ function pasteSel(insert) {
 }
 
 function splitAtPlayhead() {
-  const ids = selectedIds();
   const at = playheadTime();
-  const next = TLM.splitSelection(S.tl, at, ids.length ? ids : null);
-  if (JSON.stringify(next) === JSON.stringify(S.tl)) return status("Nothing to split at the playhead.");
+  const pool = selectedIds().length
+    ? selectedIds().map(findTlItem).filter(Boolean)
+    : [...S.tl.clips, ...S.tl.caps];
+  const skipped = pool.filter((it) => itemLocked(it) && at > it.start + 0.05 && at < it.end - 0.05);
+  const cut = pool.filter((it) => !itemLocked(it)).map((it) => it.id);
+  if (!cut.length) return status(skipped.length ? "That lane is locked." : "Nothing to split at the playhead.");
+  const next = TLM.splitSelection(S.tl, at, cut);
+  if (JSON.stringify(next) === JSON.stringify(S.tl)) {
+    return status(skipped.length ? "Nothing to split (a locked lane was skipped)." : "Nothing to split at the playhead.");
+  }
   setTL(next);
-  status(`Split at ${fmtTime(at, false)}.`);
+  status(`Split at ${fmtTime(at, false)}${skipped.length ? " (a locked lane was skipped)" : ""}.`);
 }
 
 function addCaptionAtPlayhead() {
@@ -489,7 +587,7 @@ function addCaptionAtPlayhead() {
   const r = TLM.addCaption(S.tl, playheadTime(), "New caption", style, 0);
   S.sel = new Set([r.id]);
   S.capSel = r.id;
-  setTL(r.tl);
+  setTL(dodgeLockedLane(r.tl, r.id));
 }
 
 function addLane() {
@@ -498,6 +596,7 @@ function addLane() {
   commitTL();
   refresh();
 }
+
 
 /* ------------------------------------------------------------ snapping */
 
@@ -546,9 +645,12 @@ function applyMarquee(d) {
   const top = Math.min(d.y0, d.y1), bottom = Math.max(d.y0, d.y1);
   const picked = new Set(d.additive ? d.baseSel : []);
   for (const c of S.tl.clips) {
-    if (t2x(c.end) >= a && t2x(c.start) <= b && TL.vTop <= bottom && TL.vTop + TL.vH >= top) picked.add(c.id);
+    if (itemHidden(c)) continue;
+    const cy0 = vY(TLM.trackOf(c)), cy1 = cy0 + TL.vH;
+    if (t2x(c.end) >= a && t2x(c.start) <= b && cy0 <= bottom && cy1 >= top) picked.add(c.id);
   }
   for (const c of S.tl.caps) {
+    if (itemHidden(c)) continue;
     const y0 = laneY(c.lane), y1 = y0 + TL.laneH;
     if (t2x(c.end) >= a && t2x(c.start) <= b && y0 <= bottom && y1 >= top) picked.add(c.id);
   }
@@ -556,9 +658,108 @@ function applyMarquee(d) {
 }
 
 
+/* ------------------------------------------------------------ tools */
+
+const TL_TOOLS = [
+  { id: "select", key: "V", hint: "Select / move" },
+  { id: "razor", key: "R", hint: "Razor: click a clip or caption to split it" },
+  { id: "text", key: "T", hint: "Caption: click the timeline to add one" },
+  { id: "hand", key: "H", hint: "Pan: drag to scroll the timeline" },
+  { id: "zoom", key: "Z", hint: "Zoom: drag a range, click to zoom in (Alt = out)" },
+  { id: "mute", key: "M", hint: "Mute: click a clip to mute / unmute it" },
+];
+let curTool = "select";
+
+function toolCursor() {
+  return { select: "default", razor: "crosshair", text: "text", hand: "grab", zoom: "zoom-in", mute: "pointer" }[curTool] || "default";
+}
+
+function setTool(id) {
+  if (!TL_TOOLS.some((t) => t.id === id)) id = "select";
+  curTool = id;
+  document.querySelectorAll("#tlTools .tl-tool").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tool === id);
+  });
+  const cv = $("timeline");
+  if (cv) cv.style.cursor = toolCursor();
+  const t = TL_TOOLS.find((t) => t.id === id);
+  status(`Tool: ${t.hint} (${t.key})`);
+}
+
+function bindTools() {
+  document.querySelectorAll("#tlTools .tl-tool").forEach((b) => {
+    b.addEventListener("click", () => setTool(b.dataset.tool));
+  });
+}
+
+function razorSplit(item, t) {
+  if (itemLocked(item)) return status(`${laneName(laneKeyOf(item))} is locked.`);
+  if (!(t > item.start + 0.05 && t < item.end - 0.05)) {
+    return status("Too close to the edge to split.");
+  }
+  const next = TLM.splitSelection(S.tl, t, [item.id]);
+  if (JSON.stringify(next) === JSON.stringify(S.tl)) return status("Nothing to split here.");
+  setTL(next);
+  status(`Split at ${fmtTime(t, false)}.`);
+}
+
+function dodgeLockedLane(tl, id) {
+  // New captions restack past locked lanes (and anything already there).
+  const cap = tl.caps.find((c) => c.id === id);
+  if (!cap) return tl;
+  const others = tl.caps.filter((c) => c.id !== id);
+  while (laneLocked(`c${cap.lane}`) ||
+         others.some((o) => o.lane === cap.lane && o.start < cap.end && o.end > cap.start)) {
+    cap.lane += 1;
+  }
+  return { ...tl, lanes: Math.max(tl.lanes || 1, cap.lane + 1) };
+}
+
+function addCaptionAt(t) {
+  if (!S.project) return;
+  const style = (S.capSel && S.tl.caps.find((c) => c.id === S.capSel)?.style) || CAPPOS;
+  const r = TLM.addCaption(S.tl, Math.max(0, t), "New caption", style, 0);
+  S.sel = new Set([r.id]);
+  S.capSel = r.id;
+  setTL(dodgeLockedLane(r.tl, r.id));
+  status("Caption added — double-click it to edit the text.");
+}
+
+function toggleClipMute(id) {
+  const clip = S.tl.clips.find((c) => c.id === id);
+  if (!clip) return;
+  if (itemLocked(clip)) return status(`${laneName(laneKeyOf(clip))} is locked.`);
+  if (!clip.fx || typeof clip.fx !== "object") clip.fx = TLM.defaultFx();
+  if (!Array.isArray(clip.kf)) clip.kf = [];
+  clip.fx.mute = !clip.fx.mute;
+  commitTL();
+  refresh();
+  status(clip.fx.mute ? "Clip muted (M tool: click again to unmute)." : "Clip unmuted.");
+}
+
 function bindTimeline() {
   const cv = $("timeline");
   const viewport = $("timelineViewport");
+  const rail = $("trackLabels");
+  if (rail && rail.dataset.laneBound !== "true") {
+    rail.dataset.laneBound = "true";
+    rail.addEventListener("click", (ev) => {
+      const b = ev.target.closest(".lanebtn");
+      if (!b || !S.project) return;
+      ev.stopPropagation();
+      laneSets();
+      const set = b.dataset.op === "lock" ? S.laneLocked : S.laneHidden;
+      const key = b.dataset.lane;
+      if (set.has(key)) set.delete(key);
+      else set.add(key);
+      saveWorkspaceLayout();
+      laneLabelsDirty();
+      const name = laneName(key);
+      status(b.dataset.op === "lock"
+        ? (set.has(key) ? `${name} locked — timeline edits blocked.` : `${name} unlocked.`)
+        : (set.has(key) ? `${name} hidden on the timeline (preview/export unaffected).` : `${name} shown.`));
+    });
+  }
   if (viewport && viewport.dataset.trackRailScrollBound !== "true") {
     viewport.addEventListener("scroll", syncTrackLabelScroll, { passive: true });
     viewport.dataset.trackRailScrollBound = "true";
@@ -577,8 +778,39 @@ function bindTimeline() {
       return;
     }
     if (row.kind === "none") return;
+    if (curTool === "razor") {
+      const hit = hitItem(row, x);
+      if (hit) razorSplit(hit, x2t(x));
+      return;
+    }
+    if (curTool === "text") {
+      addCaptionAt(x2t(x));
+      return;
+    }
+    if (curTool === "hand") {
+      S.drag = {
+        mode: "pan", x0: x, clientY0: ev.clientY, vStart: S.view.start,
+        scrollTop: viewport ? viewport.scrollTop : 0,
+      };
+      cv.style.cursor = "grabbing";
+      return;
+    }
+    if (curTool === "zoom") {
+      S.drag = { mode: "zoomrect", x0: x, y0: y, x1: x, y1: y, moved: false, alt: ev.altKey };
+      return;
+    }
+    if (curTool === "mute") {
+      const hit = hitItem(row, x);
+      if (hit && TLM.isClip(hit)) toggleClipMute(hit.id);
+      else if (hit) status("Only video clips have audio to mute.");
+      return;
+    }
     const hit = hitItem(row, x);
     if (hit) {
+      if (itemLocked(hit)) {
+        if (!ev.shiftKey && !ev.ctrlKey && !ev.metaKey) selectOnly(hit.id);
+        return status(`${laneName(laneKeyOf(hit))} is locked — unlock it to move or trim.`);
+      }
       const edge = edgeAt(hit, x);
       const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
       if (additive) toggleSel(hit.id);
@@ -588,6 +820,7 @@ function bindTimeline() {
         mode: edge === "move" ? "move" : edge === "l" ? "trimL" : "trimR",
         id: hit.id, ids: selectedIds(), x0: x, y0: y, moved: false,
         base: JSON.parse(JSON.stringify(S.tl)), lane0: row.kind === "lane" ? row.lane : null,
+        vtrack0: row.kind === "video" ? row.vtrack : null,
         alt: ev.altKey, srcDur: S.duration, resultIds: null,
       };
       return;
@@ -606,6 +839,7 @@ function bindTimeline() {
     if (row.kind !== "lane") return;
     const hit = hitItem(row, x);
     if (!hit) return;
+    if (itemLocked(hit)) return status(`${laneName(laneKeyOf(hit))} is locked.`);
     S.sel = new Set([hit.id]);
     S.capSel = hit.id;
     refresh();
@@ -627,6 +861,18 @@ function bindTimeline() {
       return;
     }
     if (!d.moved && (Math.abs(x - d.x0) > 3 || Math.abs(y - d.y0) > 3)) d.moved = true;
+    if (d.mode === "pan") {
+      S.view.start = clampStart(d.vStart - (x - d.x0) / pxPerSec(), S.view.span);
+      if (viewport) viewport.scrollTop = d.scrollTop - (ev.clientY - d.clientY0);
+      draw();
+      return;
+    }
+    if (d.mode === "zoomrect") {
+      d.x1 = x;
+      d.y1 = y;
+      draw();
+      return;
+    }
     if (d.mode === "marquee") {
       d.x1 = x;
       d.y1 = y;
@@ -644,12 +890,13 @@ function bindTimeline() {
       const dt = snapShift(d.base, d.ids, (x - d.x0) / pxPerSec());
       const row = rowAt(y);
       const dLane = row.kind === "lane" && d.lane0 !== null ? row.lane - d.lane0 : 0;
+      const dVTrack = row.kind === "video" && d.vtrack0 !== null ? row.vtrack - d.vtrack0 : 0;
       if (d.alt) {
         const dup = TLM.duplicateItems(d.base, d.ids, dt);
-        S.tl = dup.tl;
+        S.tl = dVTrack ? TLM.moveItems(dup.tl, dup.ids, 0, 0, dVTrack) : dup.tl;
         d.resultIds = dup.ids;
       } else {
-        S.tl = TLM.moveItems(d.base, d.ids, dt, dLane);
+        S.tl = TLM.moveItems(d.base, d.ids, dt, dLane, dVTrack);
       }
     } else {
       const t = snapTime(x2t(x), new Set([d.id]));
@@ -666,6 +913,28 @@ function bindTimeline() {
     S.drag = null;
     if (!d) return;
     if (d.mode === "scrub") return;
+    if (d.mode === "pan") {
+      cv.style.cursor = toolCursor();
+      return;
+    }
+    if (d.mode === "zoomrect") {
+      const a = Math.min(d.x0, d.x1), b = Math.max(d.x0, d.x1);
+      if (d.moved && b - a > 6) {
+        const t0 = x2t(a);
+        const span = Math.max(0.2, x2t(b) - t0);
+        S.view.span = span;
+        S.view.start = clampStart(t0, span);
+      } else {
+        const anchor = x2t(d.x0);
+        const factor = d.alt ? 2 : 0.5;
+        const span = Math.min(Math.max(contentEnd(), 1), Math.max(0.2, S.view.span * factor));
+        const frac = (anchor - S.view.start) / S.view.span;
+        S.view.start = clampStart(anchor - frac * span, span);
+        S.view.span = span;
+      }
+      draw();
+      return;
+    }
     if (d.mode === "marquee") {
       if (!d.moved) {
         if (!d.additive) clearSel();
@@ -736,12 +1005,16 @@ function bindTimeline() {
 }
 
 function updateCursor(cv, x, y) {
+  if (curTool !== "select" || (S.drag && S.drag.mode === "pan")) {
+    cv.style.cursor = (S.drag && S.drag.mode === "pan") ? "grabbing" : toolCursor();
+    return;
+  }
   const row = rowAt(y);
   let cursor = "default";
   if (row.kind === "ruler") cursor = "pointer";
   else if (row.kind === "video" || row.kind === "lane") {
     const hit = hitItem(row, x);
-    if (hit) cursor = edgeAt(hit, x) === "move" ? "grab" : "ew-resize";
+    if (hit) cursor = itemLocked(hit) ? "not-allowed" : edgeAt(hit, x) === "move" ? "grab" : "ew-resize";
   }
   cv.style.cursor = cursor;
 }
@@ -770,9 +1043,11 @@ function setPlayhead(t, sync = true) {
   draw();
   updateTimecode();
   layoutCapOverlay();
+  if (typeof ClipRefresh === "function") ClipRefresh();
 }
 
-// Show the source frame for the clip under the playhead; black in gaps.
+// Show the source frame for the topmost clip under the playhead; black in
+// gaps. Video lanes stack exactly like caption lanes: highest lane wins.
 function syncPreview(force) {
   const p = $("player");
   const shade = $("gapShade");
@@ -781,19 +1056,56 @@ function syncPreview(force) {
   if (!clip) {
     if (shade) shade.hidden = false;
     if (!p.paused) p.pause();
+    resetLayerFx(p);
     return;
   }
   if (shade) shade.hidden = true;
+  seekLayer(p, clip, force);
+  applyClipFx(p, clip, playheadTime());
+  driveLayer(p);
+}
+
+function seekLayer(el, clip, force) {
   const want = clip.in + (playheadTime() - clip.start);
-  if (force || Math.abs(p.currentTime - want) > 0.25) {
-    try { p.currentTime = want; } catch (_) { /* metadata not loaded yet */ }
+  if (force || Math.abs((el.currentTime || 0) - want) > 0.25) {
+    try { el.currentTime = want; } catch (_) { /* metadata not loaded yet */ }
   }
-  if (PV.playing && p.paused) {
-    const pr = p.play();
+}
+
+function driveLayer(el) {
+  if (PV.playing && el.paused) {
+    const pr = el.play();
     if (pr && pr.catch) pr.catch(() => {});
-  } else if (!PV.playing && !p.paused) {
-    p.pause();
+  } else if (!PV.playing && !el.paused) {
+    el.pause();
   }
+}
+
+// Mirror the clip's evaluated effects on a preview <video> (CSS approximation
+// of the ffmpeg graph: position, size, crop, opacity, volume and fades).
+function applyClipFx(el, clip, tAbs) {
+  if (!el || !clip) return;
+  const fx = TLM.evalFxAt(clip, tAbs);
+  const env = TLM.fadeEnv(clip, tAbs);
+  const vol = fx.mute ? 0 : (fx.volume / 100) * env.audio;
+  try { el.volume = Math.max(0, Math.min(1, vol)); } catch (_) { /* not ready */ }
+  el.style.transform =
+    `translate(${fx.x.toFixed(2)}%, ${fx.y.toFixed(2)}%) scale(${(fx.scale / 100).toFixed(4)})`;
+  el.style.opacity = ((fx.opacity / 100) * env.video).toFixed(3);
+  if (fx.crop_l || fx.crop_t || fx.crop_r || fx.crop_b) {
+    el.style.clipPath =
+      `inset(${fx.crop_t}% ${fx.crop_r}% ${fx.crop_b}% ${fx.crop_l}%)`;
+  } else {
+    el.style.clipPath = "";
+  }
+}
+
+function resetLayerFx(el) {
+  if (!el) return;
+  el.style.transform = "";
+  el.style.opacity = "";
+  el.style.clipPath = "";
+  try { el.volume = 1; } catch (_) { /* not ready */ }
 }
 
 function togglePlay() {
@@ -836,10 +1148,11 @@ function pvTick(now) {
   PV.last = now;
   const p = $("player");
   let t = playheadTime() + dt;
-  const clip = TLM.clipAt(S.tl, playheadTime());
+  const stack = TLM.clipStackAt(S.tl, playheadTime());
+  const clock = stack.length ? stack[stack.length - 1] : null;  // topmost wins
   // While a clip plays, the video clock is the more accurate reference.
-  if (clip && !p.paused && p.readyState >= 2) {
-    const vt = clip.start + (p.currentTime - clip.in);
+  if (clock && !p.paused && p.readyState >= 2) {
+    const vt = clock.start + (p.currentTime - clock.in);
     if (Math.abs(vt - t) < 0.3) t = vt;
   }
   const end = timelineEnd();
@@ -855,6 +1168,7 @@ function pvTick(now) {
   draw();
   updateTimecode();
   layoutCapOverlay();
+  if (typeof ClipTick === "function") ClipTick();
   PV.raf = requestAnimationFrame(pvTick);
 }
 
@@ -923,7 +1237,20 @@ function bindKeys() {
       }
       return;
     }
-    if (key === "Escape") { clearSel(); return; }
+    if (key === "Escape") {
+      if (curTool !== "select") setTool("select");
+      clearSel();
+      return;
+    }
+    if (key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      const toolByKey = { v: "select", r: "razor", t: "text", h: "hand", z: "zoom", m: "mute" };
+      const tool = toolByKey[key.toLowerCase()];
+      if (tool) {
+        ev.preventDefault();
+        setTool(tool);
+        return;
+      }
+    }
     if (key === "ArrowLeft" || key === "ArrowRight") {
       ev.preventDefault();
       if (ev.shiftKey) setPlayhead(playheadTime() + (key === "ArrowLeft" ? -1 : 1));
@@ -937,7 +1264,7 @@ function bindKeys() {
 function allListItems() {
   const entries = [
     ...S.tl.clips.map((item) => ({
-      id: item.id, item, type: "clip", track: "V1", kind: item.kind || "other",
+      id: item.id, item, type: "clip", track: `V${TLM.trackOf(item) + 1}`, kind: item.kind || "other",
     })),
     ...S.tl.caps.map((item) => ({
       id: item.id, item, type: "caption", track: `T${Math.max(0, item.lane || 0) + 1}`,
@@ -966,8 +1293,7 @@ function visibleListItems() {
 
 function listActiveIdsAt(t) {
   const ids = new Set();
-  const clip = TLM.clipAt(S.tl, t);
-  if (clip) ids.add(clip.id);
+  for (const clip of TLM.clipStackAt(S.tl, t)) ids.add(clip.id);
   for (const cap of S.tl.caps) {
     if (t >= cap.start && t <= cap.end) ids.add(cap.id);
   }
@@ -1319,7 +1645,7 @@ async function runDetect() {
     }
     S.sel = new Set();
     S.capSel = null;
-    setTL({ clips, caps, lanes });
+    setTL({ clips, caps, lanes, vtracks: 1 });
     const sm = data.summary;
     $("detectInfo").innerHTML =
       `${clips.length} clips &middot; ${data.silence_count} silences (${fmtTime(sm.seconds_by_kind.silence, false)})` +
@@ -1547,6 +1873,7 @@ function bindUI() {
 
   window.addEventListener("resize", draw);
   bindList();
+  bindTools();
   bindTimeline();
   bindTimelineTools();
   bindKeys();
@@ -1567,7 +1894,7 @@ async function onProjectOpen(data) {
   S.capSel = null;
   S.undo = [];
   S.redo = [];
-  S.tl = { clips: TLM.clipsFromSource(S.duration), caps: [], lanes: 1 };
+  S.tl = { clips: TLM.clipsFromSource(S.duration), caps: [], lanes: 1, vtracks: 1 };
   S.lastJSON = JSON.stringify(S.tl);
   S.peaks = [];
   S.thumbs = null;
