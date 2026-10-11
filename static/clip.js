@@ -5,14 +5,22 @@
 
 let CLIP_BOUND = false;
 
+// The panel edits the selected video clip, or - when the selection is a sound
+// on an A lane - that audio item (its transform controls simply do nothing).
 function clipSelectedClip() {
   if (!S.project || !S.tl) return null;
   for (const id of S.sel) {
-    const c = S.tl.clips.find((x) => x.id === id);
+    const c = (S.tl.clips || []).find((x) => x.id === id);
     if (c) return c;
+  }
+  for (const id of S.sel) {
+    const a = (S.tl.auds || []).find((x) => x.id === id);
+    if (a) return a;
   }
   return null;
 }
+
+function clipIsAudioItem(clip) { return !!clip && TLM.isAudioItem(clip); }
 
 function clipEnsureFx(clip) {
   if (!clip.fx || typeof clip.fx !== "object") clip.fx = TLM.defaultFx();
@@ -83,13 +91,59 @@ function ClipRefresh() {
   empty.hidden = true;
   body.hidden = false;
   clipEnsureFx(clip);
+  const isAud = clipIsAudioItem(clip);
   const fx = TLM.cleanFx(clip.fx);
   const len = clip.end - clip.start;
-  $("toolClipName").textContent = clip.text ? `“${clip.text}”` : `clip ${clip.id.slice(0, 6)}`;
+  $("toolClipName").textContent = clip.text ? `“${clip.text}”`
+    : clip.name || mediaName(clip.src) || `clip ${clip.id.slice(0, 6)}`;
   $("toolClipMeta").textContent =
-    `V${TLM.trackOf(clip) + 1} · ${fmtTime(clip.start, false)}–${fmtTime(clip.end, false)} ` +
-    `(${fmtTime(len, false)}) · src ${fmtTime(clip.in, false)}`;
-  $("txTrack").textContent = `V${TLM.trackOf(clip) + 1}`;
+    `${isAud ? `A${TLM.atrackOf(clip) + 1}` : `V${TLM.trackOf(clip) + 1}`} · ` +
+    `${fmtTime(clip.start, false)}–${fmtTime(clip.end, false)} ` +
+    `(${fmtTime(len, false)}) · src ${fmtTime(clip.in, false)}` +
+    (isAud ? " · audio only" : "");
+  $("txTrack").textContent = isAud ? `A${TLM.atrackOf(clip) + 1}` : `V${TLM.trackOf(clip) + 1}`;
+
+  const srcEl = $("txSource");
+  if (srcEl) {
+    const asset = MEDIA.assets.get(clip.src || TLM.MAIN_SRC);
+    srcEl.textContent = asset
+      ? `${asset.name} · ${asset.kind}${asset.width ? ` · ${asset.width}×${asset.height}` : ""}` +
+        (asset.id === TLM.MAIN_SRC ? " (main)" : "")
+      : (clip.src || TLM.MAIN_SRC);
+  }
+  if ($("txFit")) $("txFit").value = fx.fit || "fill";
+  // Linked sound: offer to hand it to its own lane, or put it back.
+  const unlink = $("txUnlinkAudio");
+  if (unlink) {
+    if (isAud && clip.from) {
+      unlink.textContent = "Relink audio";
+      unlink.title = "Put this sound back on the picture it came from";
+      unlink.disabled = false;
+    } else if (isAud) {
+      unlink.textContent = "Remove";
+      unlink.title = "Remove this audio item";
+      unlink.disabled = false;
+    } else if (clip.audio === false) {
+      unlink.textContent = "Relink audio";
+      unlink.title = "Put the sound back on the picture (drops the A-lane item)";
+      unlink.disabled = false;
+    } else {
+      unlink.textContent = "Unlink audio";
+      unlink.title = "Move this clip's sound onto its own A lane";
+      unlink.disabled = !mediaHasAudio(clip.src || TLM.MAIN_SRC);
+    }
+  }
+  const lane = $("txAudioLane");
+  if (lane) {
+    if (!isAud && clip.audio !== false) {
+      const linked = TLM.linkedAudioOf(S.tl, clip.id);
+      lane.textContent = linked ? `unlinked → A${TLM.atrackOf(linked) + 1}` : `linked on A${TLM.trackOf(clip) + 1}`;
+    } else if (isAud && clip.from) {
+      lane.textContent = "from a video clip";
+    } else {
+      lane.textContent = "";
+    }
+  }
   clipSetPair("txX", "txXn", fx.x);
   clipSetPair("txY", "txYn", fx.y);
   clipSetPair("txS", "txSn", fx.scale);
@@ -193,12 +247,64 @@ function ClipInit() {
 
   $("txTrackDown").onclick = () => {
     const clip = clipSelectedClip();
-    if (clip) setTL(TLM.moveItems(S.tl, [clip.id], 0, 0, -1));
+    if (clip) setTL(TLM.moveItems(S.tl, [clip.id], 0, 0, -1, -1));
   };
   $("txTrackUp").onclick = () => {
     const clip = clipSelectedClip();
-    if (clip) setTL(TLM.moveItems(S.tl, [clip.id], 0, 0, 1));
+    if (clip) setTL(TLM.moveItems(S.tl, [clip.id], 0, 0, 1, 1));
   };
+  if ($("txFit")) {
+    $("txFit").addEventListener("change", () => {
+      const clip = clipSelectedClip();
+      if (!clip) return;
+      clipEnsureFx(clip);
+      clip.fx.fit = $("txFit").value;
+      clip.fx = TLM.cleanFx(clip.fx);
+      commitTL();
+      refresh();
+    });
+  }
+  const preset = (patch) => {
+    const clip = clipSelectedClip();
+    if (!clip) return;
+    clipEnsureFx(clip);
+    Object.assign(clip.fx, patch);
+    clip.fx = TLM.cleanFx(clip.fx);
+    commitTL();
+    refresh();
+  };
+  if ($("txFillFrame")) {
+    $("txFillFrame").onclick = () => preset({ scale: 100, x: 0, y: 0, fit: "fill" });
+  }
+  if ($("txCorner")) {
+    $("txCorner").onclick = () => preset({ scale: 35, x: 30, y: 30, fit: "contain", opacity: 100 });
+  }
+  if ($("txUnlinkAudio")) {
+    $("txUnlinkAudio").onclick = () => {
+      const clip = clipSelectedClip();
+      if (!clip) return;
+      if (clipIsAudioItem(clip) && clip.from) {
+        // Relink: put the sound back on its picture.
+        setTL(TLM.relinkClipAudio(S.tl, clip.from));
+        S.sel = new Set([clip.from]);
+        syncCapSel();
+        refresh(true);
+        status("Sound relinked to its clip.");
+      } else if (clipIsAudioItem(clip)) {
+        setTL(TLM.deleteItems(S.tl, [clip.id], false));
+        S.sel = new Set();
+        refresh(true);
+      } else if (clip.audio === false) {
+        setTL(TLM.relinkClipAudio(S.tl, clip.id));
+        refresh(true);
+        status("Sound relinked to the clip.");
+      } else {
+        const r = TLM.unlinkClipAudio(S.tl, clip.id);
+        setTL(r.tl);
+        status(`Sound unlinked — it is now on A${TLM.trackOf(clip) + 1}. Drag it along the lane to slide it.`);
+      }
+    };
+  }
   $("txReset").onclick = () => clipResetGroup(["x", "y", "scale", "opacity"]);
   $("tcReset").onclick = () => clipResetGroup(["crop_l", "crop_t", "crop_r", "crop_b"]);
   $("taReset").onclick = () => clipResetGroup(["volume", "mute", "fade_in", "fade_out"]);

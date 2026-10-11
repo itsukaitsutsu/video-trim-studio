@@ -12,10 +12,27 @@ from vts import timeline as tl_mod
 W, H = 1280, 720
 FPS = 30.0
 
+# Every asset in these tests is a plain video with sound at /media/<id>.mp4.
+ASSETS = {"overlay.mp4": ("video", True), "silent.mp4": ("video", False),
+          "music.wav": ("audio", True)}
 
-def graph(clips, total=5.0, burn=None, audio=True):
-    return edl_mod.build_filter(clips, total, FPS, (W, H), "yuv420p",
-                                48000, "stereo", 30, audio, burn_srt=burn)
+
+def _resolve(asset_id):
+    path = f"/media/{asset_id}"
+    kind, has_audio = ASSETS.get(asset_id, ("video", True))
+    return (path, kind, has_audio)
+
+
+def build(clips, total=5.0, burn=None, auds=None):
+    """-> (filter graph, has_audio)."""
+    inputs, by_asset = edl_mod.collect_inputs(clips, auds or [], _resolve, FPS)
+    return edl_mod.build_filter(clips, auds or [], total, FPS, (W, H), "yuv420p",
+                                48000, "stereo", 30, by_asset, burn_srt=burn)
+
+
+def graph(clips, total=5.0, burn=None, auds=None):
+    """The filter graph only (most assertions are about its shape)."""
+    return build(clips, total=total, burn=burn, auds=auds)[0]
 
 
 def test_clean_fx_clamps_ranges():
@@ -101,13 +118,17 @@ def test_normalize_rejects_bad_track():
         tl_mod.normalize({"clips": [{"start": 0, "end": 2, "in": 0, "track": 99}]}, 20.0)
 
 
-def test_plain_graph_has_no_overlay_or_mix():
-    g = graph([{"start": 0, "end": 5, "in": 0, "track": 0,
-                "fx": fx_mod.clean_fx(None), "kf": []}])
-    assert "overlay" not in g
-    assert "amix" not in g
-    assert "concat=n=1" in g
-    assert g.rstrip().endswith("[outv][outa]")
+def test_plain_graph_overlays_one_clip_on_the_canvas():
+    g, has_audio = build([{"start": 0, "end": 5, "in": 0, "track": 0,
+                           "fx": fx_mod.clean_fx(None), "kf": []}])
+    assert has_audio is True
+    # One clip is composited onto the black canvas, not concatenated.
+    assert g.count("overlay=") == 1
+    assert "overlay=x=0:y=0" in g
+    assert "color=c=black:s=1280x720" in g
+    assert "concat" not in g
+    assert "amix" not in g          # only one audible source
+    assert "[outv]" in g and "[outa]" in g
 
 
 def test_flatten_clips_highest_lane_wins_and_merges_runs():
@@ -127,29 +148,33 @@ def test_flatten_clips_highest_lane_wins_and_merges_runs():
     assert [k["t"] for k in flat[1]["kf"]] == [0.0, 2.0]
 
 
-def test_stacked_lanes_flatten_without_mixing():
+def test_stacked_lanes_composite_instead_of_flattening():
     g = graph([
         {"start": 0, "end": 5, "in": 0, "track": 0,
          "fx": fx_mod.clean_fx(None), "kf": []},
         {"start": 1, "end": 3, "in": 10, "track": 1,
-         "fx": fx_mod.clean_fx({"scale": 40, "x": 25, "volume": 50}), "kf": []},
+         "fx": fx_mod.clean_fx({"scale": 40, "x": 25}), "kf": []},
     ])
-    assert "overlay=x=" not in g
-    assert "amix=" not in g
-    assert "adelay=" not in g
-    assert "concat=n=3" in g  # a[0,1] b[1,3] a[3,5]
-    assert "volume=0.5" in g  # the winning lane's audio
-    assert "scale=" in g
-    assert g.rstrip().endswith("[outv][outa]")
+    # Two overlays: the base track, then the scaled-down V2 on top of it.
+    assert g.count("overlay=") == 2
+    assert "concat" not in g
+    # V2 is 40% wide and pushed right, so it is placed, not padded over V1.
+    assert "scale=512:288" in g
+    assert "overlay=x=" in g
+    # The enable windows are the clips' own timeline ranges.
+    assert "enable='gte(t,1.000000)*lt(t,3.000000)'" in g
+    assert "enable='gte(t,0.000000)*lt(t,5.000000)'" in g
+    assert "[outv]" in g and "[outa]" in g
 
 
 def test_lone_clip_on_upper_lane_renders():
     g = graph([{"start": 1, "end": 3, "in": 10, "track": 1,
                 "fx": fx_mod.clean_fx({"scale": 50}), "kf": []}],
               total=5.0)
-    assert "amix=" not in g
-    assert "scale=" in g
-    assert g.rstrip().endswith("[outv][outa]")
+    assert g.count("overlay=") == 1
+    assert "enable='gte(t,1.000000)*lt(t,3.000000)'" in g
+    assert "scale=640:360" in g
+    assert "[outv]" in g and "[outa]" in g
 
 
 def test_volume_mute_and_fades_land_in_audio_chain():
@@ -168,7 +193,8 @@ def test_video_fades_and_crop_and_opacity():
     g = graph([{"start": 0, "end": 6, "in": 0, "track": 0,
                 "fx": fx_mod.clean_fx({"vfade_in": 0.5, "crop_l": 10,
                                         "crop_r": 10, "opacity": 50}), "kf": []}])
-    assert "fade=t=in:st=0:d=0.500" in g
+    # A video fade uses absolute timeline time (the layer is PTS-shifted).
+    assert "fade=t=in:st=0.000000:d=0.500:alpha=1" in g
     assert "crop=" in g
     assert "colorchannelmixer=aa=0.5000" in g
 
@@ -182,10 +208,110 @@ def test_keyframed_top_clip_bakes_multiple_spans():
              {"t": 0, "x": 0, "y": 0, "scale": 20, "opacity": 100},
              {"t": 2, "x": 0, "y": 0, "scale": 40, "opacity": 100}]},
     ])
-    assert "amix=" not in g
-    assert "adelay=" not in g
     assert g.count("scale=") >= 10  # 2 s of animation baked at 0.2 s steps
-    assert g.rstrip().endswith("[outv][outa]")
+    assert g.count("overlay=") >= 10
+    assert "[outv]" in g and "[outa]" in g
+
+
+def test_fit_modes_change_only_the_box_filters():
+    base = {"start": 0, "end": 2, "in": 0, "track": 0, "kf": []}
+    plain = graph([dict(base, fx=fx_mod.clean_fx({"scale": 50, "fit": "fill"}))])
+    assert "scale=640:360" in plain
+    assert "pad=" not in plain
+    letter = graph([dict(base, fx=fx_mod.clean_fx({"scale": 50, "fit": "contain"}))])
+    assert "force_original_aspect_ratio=decrease" in letter
+    assert "pad=640:360:(ow-iw)/2:(oh-ih)/2:color=black@0.0" in letter
+    assert "format=yuva420p" in letter     # letterbox bars must be transparent
+    cover = graph([dict(base, fx=fx_mod.clean_fx({"scale": 50, "fit": "cover"}))])
+    assert "force_original_aspect_ratio=increase" in cover
+    assert "crop=640:360" in cover
+
+
+def test_audio_items_mix_with_the_picture_sound():
+    clips = [{"id": "c1", "src": "src", "start": 0, "end": 5, "in": 0, "track": 0,
+              "fx": fx_mod.clean_fx(None), "kf": []}]
+    auds = [{"id": "n1", "src": "music.wav", "start": 1.0, "end": 4.0, "in": 0,
+             "atrack": 0, "fx": fx_mod.clean_fx({"volume": 60})}]
+    g, has_audio = build(clips, total=5.0, auds=auds)
+    assert has_audio is True
+    assert "amix=inputs=2" in g
+    assert "adelay=1000|1000" in g        # the item starts one second in
+    assert "volume=0.6" in g
+
+
+def test_muted_clip_stays_silent_but_keeps_the_audio_stream():
+    clips = [{"id": "c1", "src": "src", "start": 0, "end": 2, "in": 0, "track": 0,
+              "fx": fx_mod.clean_fx({"mute": True}), "kf": []}]
+    g, has_audio = build(clips, total=2.0)
+    # Muting silences the clip; it must not delete the exported audio track.
+    assert has_audio is True
+    assert "volume=0" in g
+
+
+def test_source_without_sound_has_no_audio_stream():
+    clips = [{"id": "c1", "src": "silent.mp4", "start": 0, "end": 2, "in": 0,
+              "track": 0, "fx": fx_mod.clean_fx(None), "kf": []}]
+    g, has_audio = build(clips, total=2.0)
+    assert has_audio is False
+    assert "[outa]" not in g
+
+
+def test_unlinked_clip_audio_moves_to_the_audio_lane():
+    clips = [{"id": "c1", "src": "src", "start": 0, "end": 3, "in": 0, "track": 0,
+              "audio": False, "fx": fx_mod.clean_fx(None), "kf": []}]
+    auds = [{"id": "n1", "src": "src", "start": 0.5, "end": 3.5, "in": 0.5,
+             "atrack": 0, "fx": fx_mod.clean_fx(None)}]
+    g, has_audio = build(clips, total=4.0, auds=auds)
+    assert has_audio is True
+    assert g.count(":a:0]atrim=") == 1   # only the A-lane item contributes
+    assert "adelay=500|500" in g
+
+
+def test_image_assets_get_a_looped_input_and_no_audio():
+    inputs, by_asset = edl_mod.collect_inputs(
+        [{"id": "c1", "src": "logo.png", "start": 0, "end": 2, "in": 0, "track": 0}],
+        [], lambda a: (f"/media/{a}", "image", False), FPS)
+    assert inputs[0].args == ["-loop", "1", "-framerate", "30.000000"]
+    assert inputs[0].has_audio is False
+    g, has_audio = edl_mod.build_filter(
+        [{"id": "c1", "src": "logo.png", "start": 0, "end": 2, "in": 0, "track": 0,
+          "fx": fx_mod.clean_fx(None), "kf": []}], [], 2.0, FPS, (W, H), "yuv420p",
+        48000, "stereo", 30, by_asset)
+    assert has_audio is False
+    assert g.count("overlay=") == 1
+
+
+def test_normalize_accepts_audio_items_and_grows_atracks():
+    tl = tl_mod.normalize({
+        "clips": [{"start": 0, "end": 5, "in": 0, "track": 0}],
+        "auds": [{"start": 1, "end": 3, "in": 0, "atrack": 2, "src": "music.wav"}],
+        "caps": [], "lanes": 1,
+    }, 20.0)
+    assert tl["vtracks"] == 1
+    assert tl["atracks"] == 3
+    assert tl["auds"][0]["src"] == "music.wav"
+    assert tl_mod.timeline_length(tl) == 5.0
+
+    with pytest.raises(tl_mod.TimelineError):
+        tl_mod.normalize({"clips": [], "auds": [
+            {"start": 0, "end": 5, "in": 0, "atrack": 0, "src": "music.wav"}]}, 2.0)
+    with pytest.raises(tl_mod.TimelineError):
+        tl_mod.normalize({"clips": [], "auds": [
+            {"start": 0, "end": 0.01, "in": 0, "atrack": 0}]}, 20.0)
+
+
+def test_normalize_checks_each_clip_against_its_own_source():
+    media = {"src": {"duration": 10.0}, "clip.mp4": {"duration": 3.0}}
+    ok = tl_mod.normalize({"clips": [
+        {"start": 0, "end": 10, "in": 0, "src": "src"},
+        {"start": 0, "end": 3, "in": 0, "src": "clip.mp4", "track": 1}]}, 10.0,
+        media=media.get)
+    assert len(ok["clips"]) == 2
+    # 4 s from a 3 s asset is rejected, even though the main video is longer.
+    with pytest.raises(tl_mod.TimelineError):
+        tl_mod.normalize({"clips": [
+            {"start": 0, "end": 4, "in": 0, "src": "clip.mp4"}]}, 10.0,
+            media=media.get)
 
 
 def test_burn_graph_still_terminates_at_outv():

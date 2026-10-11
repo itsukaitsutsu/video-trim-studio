@@ -39,6 +39,8 @@ from vts import export as export_mod         # noqa: E402
 from vts import timeline as timeline_mod     # noqa: E402
 from vts import edl as edl_mod                 # noqa: E402
 from vts import media as media_mod           # noqa: E402
+from vts import medialib as medialib_mod     # noqa: E402
+from vts.medialib import MAIN_ID, MediaError  # noqa: E402
 from vts import preview as preview_mod       # noqa: E402
 from vts import transcribe as caption_mod    # noqa: E402
 from vts.ffprobe import (                    # noqa: E402
@@ -64,6 +66,9 @@ class Project:
     def __init__(self, path: str, info: dict, profile: dict):
         self.info = info
         self.profile = profile
+        # Media bin: every source the timeline may reference. The video the
+        # project was opened with is registered first, under MAIN_ID.
+        self.media = medialib_mod.MediaLibrary(str(WORK_DIR))
         self.sections: list[dict] = []
         self.cues: list[dict] = []
         self.silences: list[tuple[float, float]] = []
@@ -117,6 +122,8 @@ class Project:
                 (str(p) for ext in (".srt", ".vtt")
                  if (p := Path(self.path).with_suffix(ext)).is_file()),
                 None),
+            "media": self.media.list(),
+            "main_asset": MAIN_ID,
             "sections": self.sections,
             "summary": detect_mod.summary(
                 [detect_mod.Section(**{k: s[k] for k in ("id", "kind", "start", "end", "text")})
@@ -377,10 +384,190 @@ def open_project(info: dict, uploaded: bool = False) -> Project:
         proj = Project(info["path"], info, source_match_profile(info))
         proj.uploaded = uploaded
         PROJECT = proj
+    # The main video is just another asset in the bin (id MAIN_ID), so the
+    # timeline, the preview and the export treat every source the same way.
+    try:
+        proj.media.add_path(proj.path, main=True, asset_id=MAIN_ID)
+    except MediaError:
+        pass
     remember_project_path(proj.path)
     if proj.preview_mode == "proxy":
         proj.start_preview()
     return proj
+
+
+def asset_resolver(proj: Project):
+    """asset id -> (path on disk, kind) for the ffmpeg export."""
+
+    def resolve(asset_id: str):
+        asset = proj.media.get(asset_id) or proj.media.get(MAIN_ID)
+        if not asset:
+            return None
+        return (asset["path"], asset["kind"], bool(asset.get("has_audio")))
+
+    return resolve
+
+
+def bin_state(proj: Project) -> dict:
+    return {"assets": proj.media.list(), "main": MAIN_ID}
+
+
+# ---------------------------------------------------------------------------
+# Routes: media bin
+# ---------------------------------------------------------------------------
+
+class BinImportRequest(BaseModel):
+    paths: list[str] = []
+
+
+@app.get("/api/bin")
+def bin_list():
+    """Everything in the project's media bin."""
+    return bin_state(need_project())
+
+
+@app.post("/api/bin/import")
+def bin_import(req: BinImportRequest):
+    """Reference one or more files on disk (no copying)."""
+    proj = need_project()
+    require_ffmpeg()
+    added, errors = [], []
+    for raw in req.paths[:32]:
+        path = os.path.abspath(os.path.expanduser((raw or "").strip().strip('"')))
+        if not path:
+            continue
+        try:
+            added.append(proj.media.add_path(path)["id"])
+        except MediaError as exc:
+            errors.append(str(exc))
+        except Exception as exc:                     # ffprobe blew up
+            errors.append(f"Could not read {os.path.basename(path)}: {exc}")
+    if not added and errors:
+        raise HTTPException(400, errors[0])
+    return {**bin_state(proj), "added": added, "errors": errors}
+
+
+@app.post("/api/bin/upload")
+async def bin_upload(file: UploadFile = File(...)):
+    """Import an uploaded file into the work folder and reference it."""
+    proj = need_project()
+    require_ffmpeg()
+    chunks, size = [], 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > medialib_mod.MAX_UPLOAD_BYTES:
+            await file.close()
+            raise HTTPException(400, "That file is larger than 2 GB.")
+        chunks.append(chunk)
+    try:
+        proj.media.add_upload(b"".join(chunks), file.filename or "media.mp4")
+    except MediaError as exc:
+        raise HTTPException(400, str(exc))
+    return bin_state(proj)
+
+
+@app.delete("/api/bin/{asset_id}")
+def bin_remove(asset_id: str):
+    proj = need_project()
+    if asset_id == MAIN_ID:
+        raise HTTPException(400, "The main video cannot be removed from the bin.")
+    try:
+        proj.media.remove(asset_id)
+    except MediaError as exc:
+        raise HTTPException(404, str(exc))
+    return bin_state(proj)
+
+
+@app.get("/api/bin/{asset_id}/stream")
+def bin_stream(asset_id: str, request: Request):
+    """The bytes of an asset, with HTTP Range support so <video> can seek."""
+    proj = need_project()
+    if asset_id == MAIN_ID:
+        path = proj.preview_file()          # may be the browser-friendly proxy
+        mime = preview_mod.mime_for(path)
+    else:
+        asset = proj.media.get(asset_id)
+        if not asset:
+            raise HTTPException(404, "That asset is not in the bin.")
+        path = proj.media.serve_path(asset_id)
+        mime = preview_mod.mime_for(path)
+    if not os.path.isfile(path):
+        raise HTTPException(404, f"File not found: {path}")
+    size = os.path.getsize(path)
+
+    span = _parse_byte_range(request.headers.get("range"), size)
+    if span is None:
+        if request.headers.get("range"):
+            return Response(status_code=416,
+                            headers={"Content-Range": f"bytes */{size}"})
+        return FileResponse(path, media_type=mime)
+
+    start, end = span
+    length = end - start + 1
+
+    def iter_chunks():
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = fh.read(min(1024 * 512, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(
+        iter_chunks(),
+        status_code=206,
+        media_type=mime,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(length),
+        },
+    )
+
+
+@app.get("/api/bin/{asset_id}/thumb")
+def bin_thumb(asset_id: str):
+    proj = need_project()
+    path = proj.media.thumb_path(asset_id)
+    if not path:
+        raise HTTPException(404, "No thumbnail for that asset.")
+    return FileResponse(path, media_type="image/jpeg")
+
+
+@app.get("/api/bin/{asset_id}/waveform")
+def bin_waveform(asset_id: str, buckets: int = 1200):
+    proj = need_project()
+    try:
+        peaks = proj.media.peaks(asset_id, buckets=max(64, min(buckets, 6000)))
+    except MediaError as exc:
+        raise HTTPException(404, str(exc))
+    return {"peaks": peaks, "count": len(peaks)}
+
+
+@app.get("/api/bin/{asset_id}/proxy-status")
+def bin_proxy_status(asset_id: str):
+    proj = need_project()
+    if asset_id == MAIN_ID:
+        return proj.preview_state()
+    return proj.media.proxy_status(asset_id)
+
+
+@app.post("/api/bin/{asset_id}/proxy")
+def bin_build_proxy(asset_id: str):
+    """Transcode an asset the browser cannot decode into a playable preview."""
+    proj = need_project()
+    asset = proj.media.get(asset_id)
+    if not asset:
+        raise HTTPException(404, "That asset is not in the bin.")
+    if asset_id == MAIN_ID:
+        proj.start_preview(asset.get("preview_reason") or "")
+        return proj.preview_state()
+    proxy = proj.media.proxy(asset_id)
+    proxy.start(asset.get("preview_reason") or "", force=True)
+    return proj.media.proxy_status(asset_id)
 
 
 @app.post("/api/open")
@@ -763,9 +950,11 @@ def export(req: ExportRequest):
 
 class TimelinePut(BaseModel):
     clips: list[dict] = []
+    auds: list[dict] = []
     caps: list[dict] = []
     lanes: int = 1
     vtracks: int = 1
+    atracks: int = 1
 
 
 class TimelineExportRequest(BaseModel):
@@ -786,7 +975,8 @@ def get_timeline():
 def put_timeline(req: TimelinePut):
     proj = need_project()
     try:
-        tl = timeline_mod.normalize(req.model_dump(), float(proj.info["duration"]))
+        tl = timeline_mod.normalize(req.model_dump(), float(proj.info["duration"]),
+                                    media=proj.media.get)
         proj.timeline = tl
     except timeline_mod.TimelineError as exc:
         raise HTTPException(400, str(exc))
@@ -802,7 +992,7 @@ def export_timeline(req: TimelineExportRequest):
     if raw is None:
         raise HTTPException(400, "There is no timeline to export yet. Open a video first.")
     try:
-        tl = timeline_mod.normalize(raw, duration)
+        tl = timeline_mod.normalize(raw, duration, media=proj.media.get)
     except timeline_mod.TimelineError as exc:
         raise HTTPException(400, str(exc))
     if not tl["clips"]:
@@ -834,7 +1024,7 @@ def export_timeline(req: TimelineExportRequest):
         raise HTTPException(400, "caption_mode must be none, srt, burn or both.")
     cap_info = None
     if caption_mode != "none":
-        cues = timeline_mod.export_cues(tl, timeline_mod.video_length(tl))
+        cues = timeline_mod.export_cues(tl, timeline_mod.timeline_length(tl))
         srt_out = os.path.splitext(output)[0] + ".srt"
         caption_mod.write_srt(cues, srt_out)
         burned = caption_mode in ("burn", "both") and bool(cues)
@@ -855,7 +1045,10 @@ def export_timeline(req: TimelineExportRequest):
                     "burned": burned, "positioned": bool(ass_path)}
 
     try:
-        job = edl_mod.export_timeline(proj.path, proj.info, tl["clips"], opts, output)
+        job = edl_mod.export_timeline(
+            proj.path, proj.info, tl["clips"], opts, output,
+            media=asset_resolver(proj), auds=tl.get("auds") or [],
+            total=timeline_mod.timeline_length(tl))
     except export_mod.JobError as exc:
         raise HTTPException(400, str(exc))
     except (RuntimeError, OSError) as exc:

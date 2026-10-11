@@ -21,13 +21,16 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 - **Lane lock / eye:** every V/T label has a lock (blocks timeline move/trim/razor/split/delete/cut/mute on that lane — the Clip panel and text edits still work) and an eye (hides the lane's blocks on the timeline to declutter; preview and export are unaffected).
 - Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
+- **Program monitor:** the preview composites every video track that is visible at the playhead, each as its own layer with its own scale, position, opacity, crop and fades — so overlapping B-roll looks the same in the preview as it does in the export.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
 - **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
 - Selects timeline items by click, Shift/Ctrl-click, rubber band, or the timeline-list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
 - **Tools toolbar:** the vertical icon bar beside the timeline picks the mouse mode — **Select** (V), **Razor** (R, click a clip or caption to split it), **Caption** (T, click to add one), **Hand** (H, drag to pan), **Zoom** (Z, drag a range or click; Alt = out) and **Mute** (M, click a clip to mute/unmute it). **Esc** returns to Select.
-- **Stacked video lanes:** clips live on lanes V1..Vn, which behave exactly like caption lanes — overlaps restack onto a free lane instead of overwriting (moves, pastes and alt-drag copies never destroy anything), and new lanes appear automatically. Where lanes overlap, the **highest lane wins** the preview and the export. Drag clips up/down between lanes, or use the Clip panel lane stepper.
-- **Clip panel (per-clip effects):** select a video clip to edit Transform (position X/Y, scale, opacity), Crop % per edge, Audio (volume, mute, fade in/out) and Video fade in/out. Everything previews live (position/size/crop/opacity/volume/fades) and exports through the same ffmpeg graph.
+- **Media bin:** import video, audio and still images from disk (referenced in place, never copied) or upload them into the project folder. Anything a browser cannot decode gets its own H.264/AAC proxy for playback, while export always reads the original.
+- **Multi-track picture:** clips live on tracks V1..Vn. Dropping a clip on an occupied track **overlays** it instead of pushing it aside, so B-roll sits on top of the shot below. The program monitor composites every visible track live, and the export is built from the same layout.
+- **Audio lanes A1..An:** a clip's sound starts linked to its picture (V1→A1) and can be **unlinked** onto its own lane and moved anywhere. Music, voice-over and narration dropped from the bin live on their own lanes, and lanes **mix** — overlapping sounds play together.
+- **Clip panel (per-clip effects):** select a video clip or an audio item to edit Transform (position X/Y, scale, opacity, **Fit**), Crop % per edge, Audio (volume, mute, fade in/out, **Unlink audio**) and Video fade in/out. Everything previews live (position/size/crop/opacity/volume/fades) and exports through the same ffmpeg graph.
 - **Keyframes:** animate position, size and opacity with ◆ keyframes (diamonds on the clip). **◆ Add at playhead** captures the current look; export bakes the motion into short spans. Audio/video fades also preview live during playback.
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
@@ -87,18 +90,19 @@ The app binds to `127.0.0.1` by default, so it is only available on your PC. Do 
 1. **Open a video.** Check the media details beside the path.
 2. *(Optional)* Transcribe with **Auto-caption** (below), or load an `.srt` / `.vtt` in **Detect sections → Subtitle file**.
 3. **Detect sections.** Silence and caption sections become clips on the **V1** row, and the captions go onto the caption lanes. Detection replaces the current timeline, and Ctrl+Z brings the old one back. The threshold and minimum-silence controls work as before.
-4. **Edit the timeline.** All times are timeline seconds, and the preview plays the timeline.
+4. **Import more media.** In the **Media** card, click **Import** (pick files on your disk) or **Upload** (copy a file into the project folder). Imported files stay where they are — the bin only remembers the path, so do not move or rename them. Drag a tile onto the timeline: video and stills go on a **V** track, sound-only files go on an **A** lane. See **Media bin and multi-track editing** below.
+5. **Edit the timeline.** All times are timeline seconds, and the preview plays the timeline.
    - **Select:** click a clip or caption to select it and show that frame in the preview; the clip under the playhead is highlighted in the list. Shift/Ctrl-click adds or removes one. Drag on empty space to rubber-band select. Ctrl+A selects all, and Esc clears.
    - **Cut:** **Ctrl+K** (or **split**) splits the selection, or everything, at the playhead. Drag a clip edge to trim it. The edge stops at the neighbouring clips and at the start or end of the source.
-   - **Move:** drag a clip or caption. A clip restacks onto a free lane if its lane is taken (nothing is ever overwritten — the highest lane wins), just like a caption. Alt-drag copies instead.
+   - **Move:** drag a clip or caption. A clip that is dragged into an occupied spot restacks onto a free track so nothing is ever overwritten. Alt-drag copies instead. Dragging a clip *between* tracks moves it on top of (or under) what is already there.
    - **Remove:** **Delete** (or **delete**) leaves a gap. **Shift+Delete** (or **ripple delete**) closes the gap on every track, and the captions follow the picture.
    - **Copy / cut / paste:** Ctrl+C, Ctrl+X, and Ctrl+V paste at the playhead, overwriting. Ctrl+Shift+V inserts and pushes the later items along.
    - **Captions:** **+ caption** adds one at the playhead, and **+ lane** adds a caption lane to stack captions. Double-click a caption to edit its text. On the preview (burn mode), the caption box still drags and resizes as before.
    - **Undo / redo:** Ctrl+Z, Ctrl+Shift+Z, or Ctrl+Y. The edit list is saved while the app runs, so a page refresh keeps it.
    - **Playback:** Space plays the timeline. Left and Right step one frame, and Shift+arrows move one second. Gaps show black.
    - **Timeline list:** shows V1 sections and caption cues from every lane (T1, T2, …), with a track column. It follows the playhead and scrolls the active item into view. Clicking a non-text cell selects that exact item and seeks the preview. Tick boxes, Shift-click, or hold and drag across rows to paint a multi-selection. **Remove selected** closes the gaps.
-5. **Export.** Set the output path and profile, then click **Export clean cut**. Clips are written in timeline order, gaps become black with silence, and captions use the timeline times. The source is never overwritten.
-6. *(Optional)* In the export card, write the captions as an `.srt` next to the export, burn them into the picture, or both. Burning uses the caption box layout you set on the preview.
+6. **Export.** Set the output path and profile, then click **Export clean cut**. Clips are written in timeline order, gaps become black with silence, and captions use the timeline times. The source is never overwritten. Every video track is composited and every audio lane is mixed, exactly as the preview showed it.
+7. *(Optional)* In the export card, write the captions as an `.srt` next to the export, burn them into the picture, or both. Burning uses the caption box layout you set on the preview.
 
 ## Auto-caption (faster-whisper)
 
@@ -308,6 +312,64 @@ Notes:
 - The `.srt` refers to the **source** timeline. After a trim, cue times no longer
   match the exported file unless you regenerate captions for it.
 
+## Media bin and multi-track editing
+
+The **Media** card is a small Premiere-style Project panel, and the timeline now
+has as many picture tracks (**V1**, **V2**, **V3**, …) and audio lanes (**A1**,
+**A2**, **A3**, …) as you need.
+
+**The bin**
+
+- **Import** references a file where it sits on disk; nothing is copied, so a
+  40 GB source costs nothing. Because it is only a reference, a file you move
+  or rename afterwards cannot be read any more.
+- **Upload** copies the file into `work/bin` (the only case where media is
+  copied) and references that copy. Use it for files arriving over the network.
+- Each tile shows a poster frame, the name, the kind (video / audio / image) and
+  the duration. Audio-only files get a waveform instead of a poster.
+- **Add at playhead** drops the selected tile on the lowest free **V** track, or
+  on **A1** for sound. **Remove** takes it out of the bin (the file on disk is
+  never touched). The main video you opened the project with is always the first
+  tile and cannot be removed.
+- Files a browser cannot decode (MKV, HEVC, ProRes, WAV, …) get their own
+  H.264/AAC proxy for playback, the same way the main video does. Export always
+  reads the original full-quality file.
+
+**Picture tracks (B-roll)**
+
+- Drag a tile from the bin onto **V2** and it **overlays** whatever is on **V1**
+  below it — nothing is pushed aside and nothing is overwritten. Add as many
+  tracks as you like with **+ track** in the timeline toolbar.
+- Use the **Clip** panel to make picture-in-picture B-roll: **Scale %**,
+  **X % / Y %**, **Opacity %** and **Crop %**. **corner PiP** is the classic
+  small-with-Scale-and-Position preset, and **fill frame** snaps the clip back to
+  full frame. Everything is keyframeable.
+- **Fit** decides what happens when the clip's shape does not match the frame:
+  **fill** stretches it, **contain** letterboxes it inside its box (the default
+  for a source whose shape differs from the project), **cover** crops to fill.
+- The **program monitor** composites all of it live: every track visible at the
+  playhead gets its own `<video>` layer, positioned and scaled the same way the
+  export will be. Overlapping tracks are no longer flattened to one.
+
+**Audio lanes**
+
+- A clip's sound starts **linked** to its picture (V1→A1, V2→A2, …): move the
+  clip and its sound moves with it. The linked sound is drawn as a thin strip
+  under the picture clip.
+- **Unlink audio** in the Clip panel turns that sound into a free-standing item
+  on the matching **A** lane, which you can then slide, trim or move to another
+  lane independently. **Relink audio** puts it back.
+- **A3** and above hold music, voice-over or narration: drop an audio-only file
+  from the bin onto any **A** lane. Lanes **mix** — overlapping sounds play
+  together instead of stacking onto a new lane.
+- Every clip and every audio item has its own **Volume %**, **Mute**,
+  **Fade in** and **Fade out**.
+
+**Still images**
+
+Dropping a PNG or JPG adds a 5-second clip (change **Still duration** in the
+Media card first if you want another length). Trim it like any other clip.
+
 ## Export: what “same as source” means
 
 A clean edit changes timestamps and requires the kept sections to be joined. In the default **re-encode** mode, FFmpeg uses the source's container/extension, dimensions, constant frame rate (when detected), pixel format, source video codec family, measured video bitrate as the target, colour tags, and compatible audio parameters where available. You can override codec, bitrate/CRF, preset, pixel format, decoder, audio parameters and a few metadata/colour options.
@@ -347,6 +409,10 @@ Browsers can only play a few container/codec combinations. AVI, MPEG-TS, WMV,
 FLV, MPEG-PS, DivX/Xvid video and AC3/DTS audio all download correctly over
 HTTP yet still render as a black box, because the *browser* refuses to demux or
 decode them — nothing is wrong with the file or the server.
+
+The same applies to anything you import into the **Media bin**: the bin builds
+its own small proxy for a file the browser cannot decode, so it previews and
+scrubs even though the export still reads the full-quality original.
 
 So when you open a file the browser cannot play, the server builds a small
 H.264/AAC MP4 **preview proxy** (max 1280 px wide) in `work/preview/` and the
@@ -407,11 +473,16 @@ server.py                  FastAPI local server
 auto_caption.py            CLI wrapper around the auto-caption engine
 vts/                       FFprobe, detection, timeline validation (timeline.py),
                            timeline export (edl.py), FFmpeg export, preview proxy,
-                           faster-whisper auto-caption, clip effects (fx.py)
-static/timeline-model.js   pure editing rules: split, move, trim, ripple, paste, undo data
-static/timeline.js         timeline canvas (V1..Vn + caption lanes), Tools toolbar,
-                           lane lock/eye, single-layer playback, timeline list
-static/clip.js             Clip panel: transform, crop, audio, fades, keyframes
+                           faster-whisper auto-caption, clip effects (fx.py),
+                           media bin (medialib.py)
+static/timeline-model.js   pure editing rules: tracks, audio lanes, split, move,
+                           trim, ripple, paste, undo data
+static/timeline.js         timeline canvas (V1..Vn + A1..An + caption lanes),
+                           Tools toolbar, lane lock/eye, multi-layer playback,
+                           drag and drop from the bin, timeline list
+static/stage.js            program monitor compositor: one <video> layer per track
+static/media.js            media bin: import, upload, proxies, waveforms, thumbnails
+static/clip.js             Clip panel: transform, fit, crop, audio, fades, keyframes
 static/app.js              menu bar, workspace zones, source panel, caption card,
                            caption box, export options
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)
@@ -425,10 +496,11 @@ tests/js/                  Node tests for the timeline editing rules
 
 ## Notes / limitations
 
-- **One video per project.** There is no B-roll and no second video or audio file. There is no compositing or picture-in-picture: where video lanes overlap, the highest lane wins outright.
-- **Audio belongs to its video clip.** There are no separate audio tracks, but each clip has its own volume, mute and fades. The only automatic fade is the short one at each cut.
-- **No transitions, titles** (beyond captions), or visual effects.
+- **Imported media is referenced, not copied** (except uploads). Moving or renaming a file after importing it breaks the project's link to it.
+- The bin holds 64 assets including the main video.
+- **The program monitor is a preview.** It composites the tracks at the project's frame size using the browser's own decoder, so it can differ slightly from the export in colour handling and, on very slow machines, in smoothness. The exported file is the reference.
+- **No transitions, titles** (beyond captions), or visual effects beyond scale, position, opacity, crop and fades.
 - **Gaps** between clips export as black picture and silence. Captions after the end of the last clip are dropped at export.
 - **The edit list lives in the running server.** It is restored on a page refresh, but opening another video starts a new timeline and a server restart clears it, so export a finished cut before stopping the app.
-- **The preview** plays the timeline with the browser's video player, so it can hitch at cuts and gaps. The exported file is the reference.
-- Export still uses the primary video stream and the first audio stream.
+- **The preview** plays the timeline with the browser's video players, so it can hitch at cuts and gaps. The exported file is the reference.
+- Export still uses the primary video stream of each asset and its first audio stream.

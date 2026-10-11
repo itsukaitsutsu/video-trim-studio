@@ -1,18 +1,25 @@
-"""Export a single-video timeline with FFmpeg.
+"""Export a multi-track timeline with FFmpeg.
 
-Video lanes work exactly like caption lanes: clips may overlap in time and
-are auto-stacked onto free lanes, and the highest lane wins the picture.
-`flatten_clips()` resolves the stack into one virtual track (trim/concat,
-black gaps); gaps become black picture and silence, so captions keep the
-editor's timeline times. Per-clip effects (transform, crop, opacity, volume,
-fades) and keyframes (baked into short spans) come from vts/fx.py. The
-encoder settings, orientation handling, hardware fallback and job progress
-all come from export.py, exactly like the legacy deletion-based export.
+Tracks **composite**. Every clip is trimmed from its own source (an asset in
+the media bin), transformed, and overlaid onto a black canvas at its timeline
+position with ``overlay`` - so V2 sits on top of V1, a scaled-down V2 becomes
+picture-in-picture B-roll, and opacity/video-fades become real alpha fades
+that reveal the layer underneath instead of fading to black.
+
+Audio is mixed, not flattened: the sound of every video clip plus every item
+on the A tracks is trimmed, delayed to its timeline position, given its
+volume/fade envelope and summed with ``amix``.
+
+Per-clip effects (transform, crop, opacity, volume, fades) and keyframes
+(baked into short spans) come from vts/fx.py. The encoder settings,
+orientation handling, hardware fallback and job progress all come from
+export.py, exactly like the legacy deletion-based export.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import threading
 
@@ -20,9 +27,63 @@ from . import export as ex
 from . import fx as fx_mod
 from .ffprobe import encoder_candidates
 from .media import display_size
+from .medialib import MAIN_ID
 
 PIX_FORMATS = {"yuv420p", "yuv422p", "yuv444p",
                "yuv420p10le", "yuv422p10le", "yuv444p10le"}
+
+_FILTER_CACHE: set[str] | None = None
+_FILTER_LOCK = threading.Lock()
+
+
+def available_filters() -> set[str]:
+    """Filter names in this ffmpeg build (cached; empty set when unknown)."""
+    global _FILTER_CACHE
+    with _FILTER_LOCK:
+        if _FILTER_CACHE is not None:
+            return _FILTER_CACHE
+        names: set[str] = set()
+        try:
+            proc = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error",
+                                   "-filters"], capture_output=True, text=True)
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                # " .. name   D->V  description"
+                if len(parts) >= 3 and parts[1] not in ("->",):
+                    names.add(parts[1])
+        except (OSError, subprocess.SubprocessError):
+            names = set()
+        _FILTER_CACHE = names
+        return names
+
+
+class Input:
+    """One ``-i`` on the ffmpeg command line."""
+
+    def __init__(self, path: str, kind: str, index: int, fps: float = 30.0,
+                 has_audio: bool = True, has_video: bool = True):
+        self.path = path
+        self.kind = kind
+        self.index = index
+        self.fps = fps
+        # A "video" file may carry no audio track, and an image carries none.
+        self.has_audio = bool(has_audio) and kind != "image"
+        self.has_video = bool(has_video) and kind != "audio"
+
+    @property
+    def args(self) -> list[str]:
+        if self.kind == "image":
+            # A still must look like a video stream that `trim` can slice.
+            return ["-loop", "1", "-framerate", f"{self.fps:.6f}"]
+        return []
+
+    @property
+    def vlabel(self) -> str:
+        return f"[{self.index}:v:0]"
+
+    @property
+    def alabel(self) -> str:
+        return f"[{self.index}:a:0]"
 
 
 def _clip_track(clip: dict) -> int:
@@ -32,80 +93,289 @@ def _clip_track(clip: dict) -> int:
         return 0
 
 
-def _base_video_chain(seg: int, src: float, d: float, eff: dict,
-                      w: int, h: int, fps: float, pix_fmt: str,
-                      parts: list[str]) -> str:
-    """Append a V1 segment; return its output label."""
-    chain = [f"[0:v]trim=start={src:.6f}:duration={d:.6f}", "setpts=PTS-STARTPTS"]
-    crop_txt, cw, ch = fx_mod.crop_filter(eff, w, h)
-    if crop_txt:
-        chain.append(crop_txt)
-    scale_txt, sw, sh = fx_mod.scale_filter(eff, cw, ch)
-    if scale_txt:
-        chain.append(scale_txt)
-    needs_compose = bool(crop_txt or scale_txt or eff["x"] or eff["y"])
-    if needs_compose:
-        compose, _ = fx_mod.compose_to_frame(
-            sw, sh, w, h, w * eff["x"] / 100.0, h * eff["y"] / 100.0)
-        if compose:
-            chain.append(compose)
-    faded = fx_mod.video_fade_chain(eff, d, alpha=False)
-    if faded:
-        chain.append(faded)
-    chain.append(f"fps={fps:.6f}")
-    if eff["opacity"] < 100.0 - 1e-9:
-        # Static transparency on the base track: flatten over black.
-        chain.append("format=yuva420p")
-        chain.append(f"colorchannelmixer=aa={eff['opacity'] / 100.0:.4f}")
-        parts.append(",".join(chain) + f"[vs{seg}t]")
-        parts.append(f"color=c=black:s={w}x{h}:r={fps:.6f}:d={d:.6f},"
-                     f"format={pix_fmt}[vsbg{seg}]")
-        parts.append(f"[vsbg{seg}][vs{seg}t]overlay=0:0:format=auto,"
-                     f"format={pix_fmt},setsar=1[vs{seg}]")
-    else:
-        chain.append(f"format={pix_fmt}")
-        chain.append("setsar=1")
-        parts.append(",".join(chain) + f"[vs{seg}]")
-    return f"[vs{seg}]"
+def _audio_track(item: dict) -> int:
+    try:
+        return max(0, int(item.get("atrack", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _clamp_pos(value, lo, hi):
+    return hi if value > hi else lo if value < lo else value
+
+
+def _f(value: float) -> str:
+    return fx_mod.fmt_num(value)
 
 
 def _micro_fade(d: float, fade_ms: int, at_in: bool, at_out: bool,
                 user_in: float, user_out: float) -> str:
-    """Short anti-click fade, skipped inside slices and under user fades."""
+    """Short anti-click fade, skipped under user fades."""
     out: list[str] = []
     span = min(fade_ms / 1000.0, d / 2.0)
     if fade_ms > 0 and span > 0:
         if at_in and user_in < 0.05:
-            out.append(f"afade=t=in:d={span:.3f}")
+            out.append(f"afade=t=in:st=0:d={span:.3f}")
         if at_out and user_out < 0.05:
             out.append(f"afade=t=out:st={max(0.0, d - span):.3f}:d={span:.3f}")
     return ",".join(out)
 
 
-def _base_audio_chain(seg: int, src: float, d: float, eff: dict,
-                      sample_rate: int, layout: str, fade_ms: int,
-                      at_in: bool, at_out: bool, parts: list[str]) -> str:
-    chain = [f"[0:a]atrim=start={src:.6f}:duration={d:.6f}",
-             "asetpts=PTS-STARTPTS",
-             f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:"
-             f"channel_layouts={layout}"]
-    user = fx_mod.audio_chain(eff, d)
-    if user:
-        chain.append(user)
-    micro = _micro_fade(d, fade_ms, at_in, at_out, eff["fade_in"], eff["fade_out"])
-    if micro:
-        chain.append(micro)
-    parts.append(",".join(chain) + f"[as{seg}]")
-    return f"[as{seg}]"
+# ---------------------------------------------------------------------------
+# Video
+# ---------------------------------------------------------------------------
 
+def _layer_chain(inp: Input, src_in: float, d: float, start: float, end: float,
+                 eff: dict, w: int, h: int, fps: float, pix_fmt: str,
+                 label: str, parts: list[str]) -> tuple[str, int, int]:
+    """One composited slice of one clip.
+
+    Appends the filter that renders it and returns ``(label, x, y)`` for the
+    overlay that drops it onto the canvas. The layer keeps its own size and is
+    positioned with overlay's x/y, so whatever is beside it stays visible -
+    padding it out to a full frame would hide the track underneath.
+    """
+    chain = [f"{inp.vlabel}trim=start={src_in:.6f}:duration={d:.6f}",
+             # Land the slice on the timeline: overlay reads absolute time.
+             f"setpts=PTS-STARTPTS+{start:.6f}/TB"]
+    crop_txt, cw, ch = fx_mod.crop_filter(eff, w, h)
+    if crop_txt:
+        chain.append(crop_txt)
+
+    fi = min(eff["vfade_in"], d / 2.0) if eff["vfade_in"] else 0.0
+    fo = min(eff["vfade_out"], d / 2.0) if eff["vfade_out"] else 0.0
+    needs_alpha = (eff["opacity"] < 100.0 - 1e-9 or fi > 0.001 or fo > 0.001
+                   or eff.get("fit") == "contain")
+    if needs_alpha:
+        # Before the pad: `contain` writes transparent letterbox bars, and an
+        # alpha fade must reveal the track below instead of going to black.
+        chain.append("format=yuva420p")
+
+    scale_filters, bw, bh = fx_mod.fit_filter(eff, cw, ch, w, h)
+    chain.extend(scale_filters)
+
+    dx = w * eff["x"] / 100.0
+    dy = h * eff["y"] / 100.0
+    px = int(_clamp_pos(round((w - bw) / 2.0 + dx), 0, max(0, w - bw)))
+    py = int(_clamp_pos(round((h - bh) / 2.0 + dy), 0, max(0, h - bh)))
+
+    chain.append(f"fps={fps:.6f}")
+    chain.append("setsar=1")
+    if needs_alpha:
+        if eff["opacity"] < 100.0 - 1e-9:
+            chain.append(f"colorchannelmixer=aa={eff['opacity'] / 100.0:.4f}")
+        if fi > 0.001:
+            chain.append(f"fade=t=in:st={start:.6f}:d={fi:.3f}:alpha=1")
+        if fo > 0.001:
+            chain.append(f"fade=t=out:st={end - fo:.6f}:d={fo:.3f}:alpha=1")
+    else:
+        chain.append(f"format={pix_fmt}")
+    parts.append(",".join(chain) + label)
+    return label, px, py
+
+
+def _video_graph(clips: list[dict], inputs: dict[str, Input], total: float,
+                 fps: float, size: tuple[int, int], pix_fmt: str,
+                 parts: list[str]) -> str:
+    """Overlay every clip onto a black canvas; returns the final video label."""
+    w, h = size
+    parts.append(f"color=c=black:s={w}x{h}:r={fps:.6f}:d={max(total, 0.05):.6f},"
+                 f"format={pix_fmt},setsar=1[bv0]")
+    prev = "[bv0]"
+    n = 0
+    for clip in sorted(clips, key=lambda c: (_clip_track(c), c["start"])):
+        inp = inputs.get(clip.get("src") or MAIN_ID)
+        if inp is None or not inp.has_video:
+            continue
+        clip_len = float(clip["end"]) - float(clip["start"])
+        if clip_len <= 0:
+            continue
+        fx = fx_mod.clean_fx(clip.get("fx"))
+        kf = fx_mod.clean_keyframes(clip.get("kf"), clip_len)
+        for rel0, rel1, eff in fx_mod.slice_spans(fx, kf, clip_len):
+            s = float(clip["start"]) + rel0
+            e = float(clip["start"]) + rel1
+            d = e - s
+            if d <= 1e-4:
+                continue
+            label = f"[ln{n}]"
+            label, px, py = _layer_chain(inp, float(clip["in"]) + rel0, d, s, e, eff,
+                                         w, h, fps, pix_fmt, label, parts)
+            parts.append(
+                f"{prev}{label}overlay=x={px}:y={py}:format=auto:"
+                f"enable='gte(t,{s:.6f})*lt(t,{e:.6f})'[bv{n + 1}]")
+            prev = f"[bv{n + 1}]"
+            n += 1
+    return prev
+
+
+# ---------------------------------------------------------------------------
+# Audio
+# ---------------------------------------------------------------------------
+
+def _audio_graph(items: list[dict], inputs: dict[str, Input], total: float,
+                 sample_rate: int, layout: str, fade_ms: int,
+                 parts: list[str]) -> str | None:
+    """Mix every audible source; returns the final audio label or None."""
+    labels: list[str] = []
+    for i, item in enumerate(items):
+        inp = inputs.get(item.get("src") or MAIN_ID)
+        if inp is None or not inp.has_audio:
+            continue
+        d = float(item["end"]) - float(item["start"])
+        if d <= 1e-4:
+            continue
+        eff = fx_mod.clean_fx(item.get("fx"))
+        vol = 0.0 if eff["mute"] else eff["volume"] / 100.0
+        delay_ms = int(round(float(item["start"]) * 1000))
+        chain = [f"{inp.alabel}atrim=start={float(item['in']):.6f}:duration={d:.6f}",
+                 "asetpts=PTS-STARTPTS",
+                 f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:"
+                 f"channel_layouts={layout}"]
+        if abs(vol - 1.0) > 1e-9:
+            chain.append(f"volume={_f(vol)}")
+        user = fx_mod.audio_chain(eff, d)
+        if user:
+            # audio_chain() includes volume; strip it back out (already applied).
+            user = ",".join(p for p in user.split(",")
+                            if not p.startswith("volume="))
+            if user:
+                chain.append(user)
+        micro = _micro_fade(d, fade_ms, True, True, eff["fade_in"], eff["fade_out"])
+        if micro:
+            chain.append(micro)
+        if delay_ms > 0:
+            channels = 1 if layout == "mono" else 2
+            chain.append("adelay=" + "|".join([str(delay_ms)] * channels))
+        label = f"[ax{i}]"
+        parts.append(",".join(chain) + label)
+        labels.append(label)
+
+    if not labels:
+        return None
+
+    if len(labels) == 1:
+        mixed = labels[0]
+    else:
+        parts.append("".join(labels) +
+                     f"amix=inputs={len(labels)}:normalize=0:"
+                     f"dropout_transition=0[amx]")
+        mixed = "[amx]"
+        if "alimiter" in available_filters():
+            parts.append(f"{mixed}alimiter=limit=0.95[aml]")
+            mixed = "[aml]"
+    # Silence after the last sound so audio and picture stay the same length.
+    parts.append(f"{mixed}apad,atrim=start=0:end={max(total, 0.05):.6f},"
+                 f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:"
+                 f"channel_layouts={layout}[outa]")
+    return "[outa]"
+
+
+# ---------------------------------------------------------------------------
+# Whole graph
+# ---------------------------------------------------------------------------
+
+def collect_inputs(clips: list[dict], auds: list[dict],
+                   resolve, fps: float) -> tuple[list[Input], dict[str, Input]]:
+    """One ffmpeg input per distinct asset, in a stable order."""
+    by_asset: dict[str, Input] = {}
+    order: list[Input] = []
+    def make(key: str) -> Input:
+        got = resolve(key) or ()
+        path = got[0] if len(got) > 0 else ""
+        kind = got[1] if len(got) > 1 else "video"
+        # Optional third element: does the file actually carry sound?
+        has_audio = got[2] if len(got) > 2 else kind != "image"
+        return Input(path, kind, len(order), fps, has_audio=has_audio)
+
+    for item in list(clips) + list(auds):
+        key = item.get("src") or MAIN_ID
+        if key in by_asset:
+            continue
+        inp = make(key)
+        by_asset[key] = inp
+        order.append(inp)
+    if not order:
+        inp = make(MAIN_ID)
+        by_asset[MAIN_ID] = inp
+        order.append(inp)
+    return order, by_asset
+
+
+def build_filter(clips: list[dict], auds: list[dict], total: float, fps: float,
+                 size: tuple[int, int], pix_fmt: str, sample_rate: int,
+                 layout: str, fade_ms: int, inputs: dict[str, Input],
+                 burn_srt: str | None = None,
+                 fonts_dir: str | None = None) -> tuple[str, bool]:
+    """The full filter_complex plus whether it produces an audio stream."""
+    parts: list[str] = []
+    vlabel = _video_graph(sorted(clips, key=lambda c: (_clip_track(c), c["start"])),
+                          inputs, total, fps, size, pix_fmt, parts)
+
+    audible: list[dict] = []
+    for clip in clips:
+        inp = inputs.get(clip.get("src") or MAIN_ID)
+        if (clip.get("audio", True) is False or inp is None
+                or not inp.has_audio):
+            continue
+        audible.append({"src": clip.get("src") or MAIN_ID,
+                        "start": float(clip["start"]), "end": float(clip["end"]),
+                        "in": float(clip["in"]),
+                        "fx": fx_mod.clean_fx(clip.get("fx"))})
+    for item in auds:
+        inp = inputs.get(item.get("src") or MAIN_ID)
+        if inp is None or not inp.has_audio:
+            continue
+        audible.append({"src": item.get("src") or MAIN_ID,
+                        "start": float(item["start"]), "end": float(item["end"]),
+                        "in": float(item["in"]),
+                        "fx": fx_mod.clean_fx(item.get("fx"))})
+    audible.sort(key=lambda a: (a["start"], a["end"]))
+
+    has_audio = _audio_graph(audible, inputs, total, sample_rate, layout,
+                             fade_ms, parts) is not None
+
+    outv = "[basev]" if burn_srt else "[outv]"
+    parts.append(f"{vlabel}null{outv}")
+    graph = ";".join(parts)
+    if burn_srt:
+        fonts = (":fontsdir=" + ex.escape_filter_path(fonts_dir)) if fonts_dir else ""
+        graph += f";{outv}subtitles={ex.escape_filter_path(burn_srt)}{fonts}[outv]"
+    return graph, has_audio
+
+
+def build_command_multi(inputs: list[Input], filter_script: str, opts: dict,
+                        output: str, has_audio: bool, total: float,
+                        hwaccel: str = "auto") -> list[str]:
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+           "-progress", "pipe:1", "-nostats"]
+    # No -noautorotate: ffmpeg's default autorotate bakes the source display
+    # matrix (rotation and flips) into the pixels, so exports need no tag.
+    if hwaccel and hwaccel != "none":
+        cmd += ["-hwaccel", hwaccel]
+    for inp in inputs:
+        cmd += inp.args
+        cmd += ["-i", inp.path]
+    cmd += ["-filter_complex_script", filter_script, "-map", "[outv]"]
+    if has_audio:
+        cmd += ["-map", "[outa]"]
+    cmd += ex.build_encoder_args(opts)
+    if opts.get("copy_metadata"):
+        cmd += ["-map_metadata", "0"]
+    cmd += list(opts.get("mux_flags") or [])
+    cmd += ["-t", f"{max(total, 0.05):.6f}", output]
+    return cmd
+
+
+# ---------------------------------------------------------------------------
+# Legacy single-virtual-track helpers (kept for compatibility / tests)
+# ---------------------------------------------------------------------------
 
 def flatten_clips(clips: list[dict]) -> list[dict]:
     """Resolve overlapping lanes into one virtual track (highest lane wins).
 
-    Returns pieces sorted by start: {start, end, in, fx, kf, from}, with
-    keyframes shifted to piece time. Adjacent pieces from the same clip are
-    merged back together. Gaps are left out (the segment builder fills them
-    with black picture and silence).
+    Kept for the fast stream-copy check and the tests. The real export now
+    composites instead (see build_filter).
     """
     if not clips:
         return []
@@ -145,148 +415,114 @@ def flatten_clips(clips: list[dict]) -> list[dict]:
     return out
 
 
-def build_filter(clips: list[dict], total: float, fps: float,
-                 size: tuple[int, int], pix_fmt: str, sample_rate: int,
-                 layout: str, fade_ms: int, has_audio: bool,
-                 burn_srt: str | None = None) -> str:
-    """One filter_complex: flattened lanes (trim/concat/gaps) + caption burn.
-
-    Times are snapped to whole frames so video and audio segments stay the same
-    length; every clip is trimmed from the same input, which FFmpeg splits for
-    us, so repeated source ranges are fine. Animated clips (keyframes) are
-    baked into short spans by vts/fx.slice_spans.
-    """
-    w, h = size
-    total = max(float(total or 0.0),
-                max((float(c["end"]) for c in clips), default=0.0))
-    flat = flatten_clips(clips)
-    parts: list[str] = []
-    labels: list[str] = []
-    cursor = 0          # output position in frames
-    seg = 0
-
-    def add_gap(frames: int) -> None:
-        nonlocal seg
-        d = frames / fps
-        parts.append(f"color=c=black:s={w}x{h}:r={fps:.6f}:d={d:.6f},"
-                     f"format={pix_fmt},setsar=1[vs{seg}]")
-        if has_audio:
-            parts.append(f"anullsrc=r={sample_rate}:cl={layout}:d={d:.6f},"
-                         f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:"
-                         f"channel_layouts={layout}[as{seg}]")
-            labels.append(f"[vs{seg}][as{seg}]")
-        else:
-            labels.append(f"[vs{seg}]")
-        seg += 1
-
-    for clip in flat:
-        clip_len = float(clip["end"]) - float(clip["start"])
-        fx = fx_mod.clean_fx(clip.get("fx"))
-        kf = fx_mod.clean_keyframes(clip.get("kf"), clip_len)
-        spans = fx_mod.slice_spans(fx, kf, clip_len)
-        for i, (rel0, rel1, eff) in enumerate(spans):
-            s_f = max(cursor, round((float(clip["start"]) + rel0) * fps))
-            e_f = max(s_f + 1, round((float(clip["start"]) + rel1) * fps))
-            if s_f > cursor:
-                add_gap(s_f - cursor)
-            d = (e_f - s_f) / fps
-            src = float(clip["in"]) + rel0
-            vlabel = _base_video_chain(seg, src, d, eff, w, h, fps, pix_fmt, parts)
-            if has_audio:
-                alabel = _base_audio_chain(seg, src, d, eff, sample_rate, layout,
-                                           fade_ms, i == 0, i == len(spans) - 1,
-                                           parts)
-                labels.append(f"{vlabel}{alabel}")
-            else:
-                labels.append(vlabel)
-            seg += 1
-            cursor = e_f
-
-    total_f = round(total * fps)
-    if cursor < total_f:
-        add_gap(total_f - cursor)
+def _copy_fast_path(clips: list[dict], auds: list[dict], opts: dict,
+                    info: dict, output: str, resolve) -> dict | None:
+    """True stream copy: one untouched clip from t=0 and nothing else."""
+    if auds:
+        return None
+    pieces = flatten_clips(clips)
+    single = pieces[0] if len(pieces) == 1 else None
+    if single is None or len(clips) != 1:
+        return None
+    clip = clips[0]
+    if not fx_mod.fx_is_default(clip.get("fx")) or clip.get("kf"):
+        return None
+    if single["start"] > 1e-3 or single["in"] > 1e-3:
+        return None
+    if opts.get("burn_srt") or ex.has_display_transform(info):
+        return None
+    src_id = clip.get("src") or MAIN_ID
+    path, kind = resolve(src_id)
+    if kind != "video":
+        return None
+    dur = single["end"] - single["start"]
+    fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="vts_concat_")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        quoted = path.replace("'", "'\\''")
+        f.write(f"file '{quoted}'\n")
+        f.write(f"outpoint {dur:.3f}\n")
+    job = ex._new_job("copy", output, dur)
+    job["concat_list"] = list_path
+    cmd = ex.build_copy_command(path, list_path, output, opts)
+    threading.Thread(target=ex._watch, args=(job, cmd, dur, False), daemon=True).start()
+    snap = ex.get_job(job["id"])
+    snap["segments"] = 1
+    return snap
 
 
-    vout = "[concatv]" if burn_srt else "[outv]"
-    aflag = 1 if has_audio else 0
-    outs = f"{vout}[outa]" if has_audio else vout
-    parts.append("".join(labels) + f"concat=n={seg}:v=1:a={aflag}{outs}")
-    if burn_srt:
-        parts.append(f"[concatv]subtitles={ex.escape_filter_path(burn_srt)}[outv]")
-    return ";".join(parts)
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def export_timeline(source: str, info: dict, clips: list[dict],
-                    opts: dict, output: str) -> dict:
-    """Start the export of `clips` (dicts with start, end, in); returns the job."""
+                    opts: dict, output: str, media=None,
+                    auds: list[dict] | None = None,
+                    total: float | None = None) -> dict:
+    """Render the edit list; returns the job dict.
+
+    `media` maps an asset id to ``(path, kind)``. Without it every clip is
+    trimmed from `source`, which is the pre-media-bin behaviour.
+    """
     if not clips:
         raise ex.JobError("The timeline has no video clips left to export.")
+    auds = list(auds or [])
     clips = sorted(clips, key=lambda c: (_clip_track(c), c["start"]))
-    total = max(float(c["end"]) for c in clips)
-    if total < 0.05:
+    end = max([float(c["end"]) for c in clips] +
+              [float(a["end"]) for a in auds], default=0.0)
+    if total is not None:
+        end = max(end, float(total))
+    if end < 0.05:
         raise ex.JobError("The timeline is too short to export.")
     os.makedirs(os.path.dirname(os.path.abspath(output)) or ".", exist_ok=True)
 
+    def resolve(asset_id):
+        if media is not None:
+            try:
+                got = media(asset_id)
+            except Exception:
+                got = None
+            if got:
+                return got
+        return (source, "video")
+
     vinfo = info.get("video") or {}
     ainfo = info.get("audio") or {}
-    has_audio = bool(ainfo)
+    has_source_audio = bool(ainfo)
     fps = float(vinfo.get("fps") or 0) or 30.0
     if not 1.0 <= fps <= 240.0:
         fps = 30.0
 
-    # Stream copy only when the result is one untouched V1 range from the
-    # start: stacked lanes and any clip effect force the frame-accurate path.
-    pieces = flatten_clips(clips)
-    single = pieces[0] if len(pieces) == 1 else None
-    single_plain = (single is not None
-                    and fx_mod.fx_is_default(single.get("fx"))
-                    and not single.get("kf"))
-    if (opts.get("mode") == "copy" and single_plain
-            and single["start"] < 1e-3 and single["in"] < 1e-3
-            and not opts.get("burn_srt") and not ex.has_display_transform(info)):
-        dur = single["end"] - single["start"]
-        fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="vts_concat_")
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            quoted = source.replace("'", "'\\''")
-            f.write(f"file '{quoted}'\n")
-            f.write(f"outpoint {dur:.3f}\n")
-        job = ex._new_job("copy", output, dur)
-        job["concat_list"] = list_path
-        cmd = ex.build_copy_command(source, list_path, output, opts)
-        threading.Thread(target=ex._watch, args=(job, cmd, dur, False), daemon=True).start()
-        snap = ex.get_job(job["id"])
-        snap["segments"] = 1
-        return snap
+    if opts.get("mode") == "copy":
+        fast = _copy_fast_path(clips, auds, opts, info, output, resolve)
+        if fast:
+            return fast
+        if not opts.get("_mode_note"):
+            reason = ("several clips" if len(clips) > 1 else
+                      ("audio items" if auds else "clip effects / keyframes"))
+            opts = {**opts, "_mode_note":
+                    "Stream copy needs one plain clip that starts at 0 with no "
+                    f"burned captions; {reason} need frame-accurate rendering, "
+                    "so this export was re-encoded."}
 
-    if opts.get("mode") == "copy" and not opts.get("_mode_note"):
-        stacked = len(pieces) != 1 or len(clips) != 1
-        fxed = any(not fx_mod.fx_is_default(c.get("fx")) or c.get("kf") for c in clips)
-        reason = ("stacked lanes" if stacked else
-                  ("clip effects / keyframes" if fxed else
-                   "this edit list")) + " need frame-accurate rendering"
-        opts = {**opts, "_mode_note": "Stream copy needs one plain clip that starts at 0 "
-                                      "with no burned captions; " + reason +
-                                      ", so this export was re-encoded."}
     pix = opts.get("pix_fmt") or vinfo.get("pix_fmt") or "yuv420p"
     if pix not in PIX_FORMATS:
         pix = "yuv420p"
-    sample_rate = int(ainfo.get("sample_rate") or 48000) if has_audio else 48000
-    layout = "mono" if has_audio and int(ainfo.get("channels") or 2) == 1 else "stereo"
+    sample_rate = int(ainfo.get("sample_rate") or 48000)
+    layout = "mono" if has_source_audio and int(ainfo.get("channels") or 2) == 1 else "stereo"
     w, h = display_size(vinfo)
-    graph = build_filter(clips, total, fps, (w, h), pix, sample_rate, layout,
-                         int(opts.get("fade_ms", 30)), has_audio,
-                         burn_srt=None)
+
+    inputs, by_asset = collect_inputs(clips, auds, resolve, fps)
     burn = opts.get("burn_srt")
-    if burn:
-        graph = graph.replace("[outv]", "[basev]")
-        fonts = (":fontsdir=" + ex.escape_filter_path(opts["fonts_dir"])) if opts.get("fonts_dir") else ""
-        graph += f";[basev]subtitles={ex.escape_filter_path(burn)}{fonts}[outv]"
+    graph, has_audio = build_filter(
+        clips, auds, end, fps, (w, h), pix, sample_rate, layout,
+        int(opts.get("fade_ms", 30)), by_asset,
+        burn_srt=burn, fonts_dir=opts.get("fonts_dir"))
 
     fd, script_path = tempfile.mkstemp(suffix=".txt", prefix="vts_filter_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(graph)
 
-    job = ex._new_job("reencode", output, total)
+    job = ex._new_job("reencode", output, end)
     if opts.get("_burn_ass_cleanup"):
         job["burn_ass"] = opts["_burn_ass_cleanup"]
     if opts.get("_mode_note"):
@@ -295,8 +531,9 @@ def export_timeline(source: str, info: dict, clips: list[dict],
         job["note"] = ("Rotation/flip is baked into the picture; the export "
                        "carries no rotation tag.")
     job["filter_script"] = script_path
+
     hwaccel = opts.get("hwaccel") or "auto"
-    cmd = ex.build_command(source, output, [], opts, script_path, has_audio, hwaccel)
+    cmd = build_command_multi(inputs, script_path, opts, output, has_audio, end, hwaccel)
 
     fallback_cmd = None
     fallback_codec = None
@@ -307,12 +544,12 @@ def export_timeline(source: str, info: dict, clips: list[dict],
              if not c["hw"] and c["name"] != codec), None)
         if fallback_codec:
             fallback_opts = {**opts, "codec": fallback_codec, "hwaccel": "none"}
-            fallback_cmd = ex.build_command(source, output, [], fallback_opts,
-                                            script_path, has_audio, "none")
+            fallback_cmd = build_command_multi(inputs, script_path, fallback_opts,
+                                               output, has_audio, end, "none")
 
     threading.Thread(
         target=ex._watch_and_cleanup,
-        args=(job, cmd, total, hwaccel in ("auto", "d3d11va", "cuda", "dxva2", "vaapi"),
+        args=(job, cmd, end, hwaccel in ("auto", "d3d11va", "cuda", "dxva2", "vaapi"),
               script_path, fallback_cmd, fallback_codec),
         daemon=True,
     ).start()

@@ -1,0 +1,74 @@
+VIDEO TRIM STUDIO — media bin, multi-track B-roll and audio lanes
+=================================================================
+
+HOW TO INSTALL
+--------------
+Unzip this file over your existing project folder and let it overwrite the
+files inside. Then DELETE these three files from your copy (they are obsolete
+and no longer used by the app):
+
+    BROLL-AND-FONTS.md
+    static/broll.js
+    vts/broll.py
+
+Nothing else has to be removed. No Python packages were added. Restart the
+server (run.bat) and hard-reload the page (Ctrl+F5) so the browser picks up
+the new JavaScript.
+
+Read MEDIA-BIN-AND-MULTITRACK.md for the feature guide.
+
+
+WHAT CHANGED
+------------
+Added
+  vts/medialib.py          media bin backend (import / upload / probe / proxy)
+  static/media.js          media bin panel
+  static/stage.js          program monitor compositor
+  tests/test_media_bin.py  real FFmpeg exports for the bin and the mix
+  MEDIA-BIN-AND-MULTITRACK.md   the new feature guide
+
+Changed
+  server.py                     /api/bin/* routes, multi-input export
+  vts/timeline.py               video tracks + audio lanes in the model
+  vts/edl.py                    compositing filter graph, audio mix
+  vts/fx.py                     fit modes (fill / contain / cover)
+  static/timeline-model.js      tracks, audio items, unlink/relink
+  static/timeline.js            V1..Vn + A1..An canvas, drag from the bin
+  static/clip.js                Clip panel: fit, audio items, unlink
+  static/app.js                 import-mode file browser, initial state
+  static/index.html             Media card, Clip panel rows, new scripts
+  static/style.css              media bin + stage layer styles
+  tests/test_fx.py              rewritten for the new graph
+  tests/test_broll_fonts.py     dropped the tests for the removed feature
+  tests/test_timeline_ui.py     + 2 browser tests for the new behaviour
+  README.md, TEXT-AND-FONTS.md  documentation
+
+
+THE THREE BUGS
+--------------
+1. "The multi video cannot overlapping (so, user just can see only 1 video)"
+   FIXED. Tracks now composite. Dropping a clip on V2 lays it over V1 instead
+   of pushing it aside, and the program monitor shows one <video> layer per
+   visible track, scaled and positioned the way the export will be.
+
+2. "The lane of audio in timeline is missing"
+   FIXED. There are now audio lanes A1..An under the picture tracks. A clip's
+   sound starts linked to its picture (V1 -> A1) and "Unlink audio" in the
+   Clip panel frees it onto its own lane so you can slide or move it. Music
+   dropped from the bin goes to A3+ and lanes mix.
+
+3. Multi-track / B-roll editing is real
+   The Media card imports video, audio and images (referenced in place, not
+   copied). Drag a tile onto a track. Scale / X / Y / Opacity / Crop / Fit in
+   the Clip panel make picture-in-picture B-roll. Export re-encodes and builds
+   the same composite.
+
+
+TESTS
+-----
+  269 passed, 8 failed
+The 8 failures are pre-existing and reproduce on the unmodified code: one
+shadow-opacity assertion in tests/test_broll_fonts.py and seven workspace /
+font-picker visibility timeouts in tests/test_timeline_ui.py that depend on
+the headless browser in this sandbox. 32/32 Node model tests pass, including
+two new browser tests that check the overlay and the audio lanes in Chromium.

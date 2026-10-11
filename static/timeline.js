@@ -4,13 +4,21 @@
  * Editing rules live in timeline-model.js (window.TLM). */
 "use strict";
 
-const TL = { labelW: 68, ruler: 20, vTop: 20, vH: 40, vGap: 4, laneH: 22, laneGap: 3, wave: 12 };
+const TL = { labelW: 68, ruler: 20, vTop: 20, vH: 40, vGap: 4,
+             aH: 26, aGap: 3, laneH: 22, laneGap: 3, wave: 12 };
 const vTrackCount = () => TLM.vtracksOf(S.tl);
+const aTrackCount = () => TLM.atracksOf(S.tl);
 const vTrackTop = () => TL.vTop + vTrackCount() * (TL.vH + TL.vGap);
 const vY = (track) => TL.vTop + Math.max(0, track || 0) * (TL.vH + TL.vGap);
-const laneY = (i) => vTrackTop() + i * (TL.laneH + TL.laneGap);
+// Audio lanes sit between the picture tracks and the caption lanes, one per
+// video track (A1 is V1's sound) plus any spare for music / voice-over.
+const aTop = () => vTrackTop() + 3;
+const aY = (i) => aTop() + Math.max(0, i || 0) * (TL.aH + TL.aGap);
+const aTrackTop = () => aTop() + aTrackCount() * (TL.aH + TL.aGap);
+const laneY = (i) => aTrackTop() + i * (TL.laneH + TL.laneGap);
 const laneCount = () => Math.max(1, S.tl.lanes || 1);
 const tlHeight = () => laneY(laneCount()) + 4;
+const tlItems = (tl) => [...(tl.clips || []), ...(tl.auds || []), ...(tl.caps || [])];
 const CLIP_FALLBACK = "#2b4f6b";
 const PV = { playing: false, raf: 0, last: 0 };
 let saveTimer = null;
@@ -27,15 +35,17 @@ function status(msg) {
 }
 
 function playheadTime() { return S.T || 0; }
-function timelineEnd() { return TLM.timelineEnd(S.tl); }
+// Picture and sound: playback runs to the end of everything on the timeline.
+function timelineEnd() { return TLM.contentEnd(S.tl); }
 
 function contentEnd() {
-  return Math.max(S.duration || 0, timelineEnd(), ...S.tl.caps.map((c) => c.end), 0);
+  return Math.max(S.duration || 0, TLM.contentEnd(S.tl), 0);
 }
 
 function selectedIds() { return [...S.sel]; }
 
 function syncCapSel() {
+  if (!S.tl || !S.tl.caps) { S.capSel = null; return; }
   const caps = [...S.sel].filter((id) => S.tl.caps.some((c) => c.id === id));
   S.capSel = caps.length ? caps[caps.length - 1] : null;
 }
@@ -78,17 +88,38 @@ function rowAt(y) {
     const vtrack = Math.floor((y - TL.vTop) / (TL.vH + TL.vGap));
     return { kind: "video", vtrack: Math.min(vtrack, vTrackCount() - 1) };
   }
-  if (y >= vtEnd) {
-    const lane = Math.floor((y - vtEnd) / (TL.laneH + TL.laneGap));
+  const at = aTop(), atEnd = aTrackTop();
+  if (y >= at && y < atEnd) {
+    const atrack = Math.floor((y - at) / (TL.aH + TL.aGap));
+    return { kind: "audio", atrack: Math.max(0, Math.min(atrack, aTrackCount() - 1)) };
+  }
+  if (y >= atEnd) {
+    const lane = Math.floor((y - atEnd) / (TL.laneH + TL.laneGap));
     if (lane < laneCount()) return { kind: "lane", lane };
   }
   return { kind: "none" };
 }
 
 function itemsOnRow(row) {
-  if (row.kind === "video") return S.tl.clips.filter((c) => TLM.trackOf(c) === row.vtrack);
-  if (row.kind === "lane") return S.tl.caps.filter((c) => c.lane === row.lane);
+  if (row.kind === "video") return (S.tl.clips || []).filter((c) => TLM.trackOf(c) === row.vtrack);
+  if (row.kind === "audio") return (S.tl.auds || []).filter((c) => TLM.atrackOf(c) === row.atrack);
+  if (row.kind === "lane") return (S.tl.caps || []).filter((c) => c.lane === row.lane);
   return [];
+}
+
+// The sound of a video clip is drawn on the matching audio lane. Clicking it
+// selects the picture it belongs to, so the pair stays linked until the user
+// unlinks it from the Clip panel.
+function linkedAudioAt(row, x) {
+  if (row.kind !== "audio") return null;
+  return (S.tl.clips || []).find((c) => TLM.trackOf(c) === row.atrack
+    && c.audio !== false && itemHasAudio(c)
+    && x >= t2x(c.start) - 3 && x <= t2x(c.end) + 3) || null;
+}
+
+function itemHasAudio(it) {
+  if (it.atrack !== undefined) return mediaHasAudio(it.src || TLM.MAIN_SRC);
+  return mediaHasAudio(it.src || TLM.MAIN_SRC);
 }
 
 function hitItem(row, x) {
@@ -122,6 +153,7 @@ function laneSets() {
   if (!S.laneLocked) S.laneLocked = new Set();
 }
 function laneKeyOf(it) {
+  if (TLM.isAudioItem(it)) return `a${TLM.atrackOf(it)}`;
   return TLM.isClip(it) ? `v${TLM.trackOf(it)}` : `c${it.lane}`;
 }
 function laneHidden(key) { laneSets(); return S.laneHidden.has(key); }
@@ -129,11 +161,11 @@ function laneLocked(key) { laneSets(); return S.laneLocked.has(key); }
 function itemLocked(it) { return laneLocked(laneKeyOf(it)); }
 function itemHidden(it) { return laneHidden(laneKeyOf(it)); }
 function findTlItem(id) {
-  return [...S.tl.clips, ...S.tl.caps].find((it) => it.id === id) || null;
+  return tlItems(S.tl).find((it) => it.id === id) || null;
 }
 function laneName(key) {
   const n = Number(key.slice(1)) + 1;
-  return key[0] === "v" ? `V${n}` : `T${n}`;
+  return key[0] === "v" ? `V${n}` : key[0] === "a" ? `A${n}` : `T${n}`;
 }
 function laneLabelsDirty() {
   renderedLaneSig = "";
@@ -152,12 +184,14 @@ function syncTrackLabels(height) {
   // Prune lanes that no longer exist so stale keys never linger.
   for (const key of [...S.laneHidden, ...S.laneLocked]) {
     const n = Number(key.slice(1));
-    const live = key[0] === "v" ? n < vTrackCount() : n < laneCount();
+    const live = key[0] === "v" ? n < vTrackCount()
+      : key[0] === "a" ? n < aTrackCount() : n < laneCount();
     if (!live) { S.laneHidden.delete(key); S.laneLocked.delete(key); }
   }
   const count = laneCount();
   const vc = vTrackCount();
-  const sig = `${vc}/${count}/` +
+  const ac = aTrackCount();
+  const sig = `${vc}/${ac}/${count}/` +
     [...S.laneHidden].sort().join(",") + "|" + [...S.laneLocked].sort().join(",");
   if (sig !== renderedLaneSig) {
     const btn = (key, op, on, title, svg) =>
@@ -171,9 +205,11 @@ function syncTrackLabels(height) {
       `</div>`;
     const videos = Array.from({ length: vc }, (_, v) =>
       label(`v${v}`, `V${v + 1}`, "video", vY(v), TL.vH)).join("");
+    const audios = Array.from({ length: ac }, (_, a) =>
+      label(`a${a}`, `A${a + 1}`, "audio", aY(a), TL.aH)).join("");
     const captions = Array.from({ length: count }, (_, lane) =>
       label(`c${lane}`, `T${lane + 1}`, "caption", laneY(lane), TL.laneH)).join("");
-    rail.innerHTML = `<div class="track-ruler"></div>` + videos + captions;
+    rail.innerHTML = `<div class="track-ruler"></div>` + videos + audios + captions;
     renderedLaneSig = sig;
   }
   const viewport = $("timelineViewport");
@@ -233,17 +269,141 @@ function drawFilmstrip(ctx, c, x, x2, y, h) {
   ctx.globalAlpha = 1;
 }
 
-function drawWave(ctx, c, x, x2, yBottom, h) {
-  const n = S.peaks.length;
-  if (!n || !S.duration) return;
+// Peaks for any asset: the main video reuses the project waveform, everything
+// else is fetched from /api/bin/<id>/waveform the first time it is drawn.
+function peaksFor(src) {
+  if (!src || src === TLM.MAIN_SRC) return (S.peaks && S.peaks.length) ? S.peaks : null;
+  const got = MEDIA.peaks.get(src);
+  if (!got && typeof mediaPeaks === "function") mediaPeaks(src);
+  return got || null;
+}
+
+function sourceDurationOf(src) {
+  if (!src || src === TLM.MAIN_SRC) return S.duration || 0;
+  return mediaDuration(src) || S.duration || 0;
+}
+
+function drawWave(ctx, item, x, x2, yBottom, h, src) {
+  const srcId = src !== undefined ? src : (item.src || TLM.MAIN_SRC);
+  const peaks = peaksFor(srcId);
+  const dur = sourceDurationOf(srcId);
+  const n = peaks ? peaks.length : 0;
+  if (!n || !dur) return;
   ctx.fillStyle = "rgba(46,160,67,0.9)";
   const mid = yBottom - h / 2;
   for (let px = Math.max(0, Math.floor(x)); px < Math.min(x2, $("timeline").clientWidth); px += 1) {
-    const src = c.in + (x2t(px) - c.start);
-    const idx = Math.floor((src / S.duration) * n);
+    const at = (Number(item.in) || 0) + (x2t(px) - item.start);
+    const idx = Math.floor((at / dur) * n);
     if (idx < 0 || idx >= n) continue;
-    const amp = (S.peaks[idx] / 1000) * (h / 2);
+    const amp = (peaks[idx] / 1000) * (h / 2);
     ctx.fillRect(px, mid - amp, 1, Math.max(1, amp * 2));
+  }
+}
+
+// Poster frame for a bin asset (no filmstrip is generated for those).
+const MEDIA_POSTERS = new Map();
+function mediaPoster(src) {
+  if (!src || src === TLM.MAIN_SRC) return null;
+  if (MEDIA_POSTERS.has(src)) return MEDIA_POSTERS.get(src);
+  const img = new Image();
+  img.onload = () => { if (S.project) draw(); };
+  img.src = mediaThumb(src);
+  MEDIA_POSTERS.set(src, img);
+  return img.complete && img.naturalWidth ? img : null;
+}
+
+function drawPoster(ctx, item, x, x2, y, h, src) {
+  const img = mediaPoster(src);
+  if (!img) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, y, x2 - x, h);
+  ctx.clip();
+  ctx.globalAlpha = 0.9;
+  const scale = Math.max((x2 - x) / img.naturalWidth, h / img.naturalHeight);
+  const w = img.naturalWidth * scale, hh = img.naturalHeight * scale;
+  ctx.drawImage(img, x + ((x2 - x) - w) / 2, y + (h - hh) / 2, w, hh);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+}
+
+function drawAud(ctx, a) {
+  const x = t2x(a.start);
+  const x2 = Math.max(x + 2, t2x(a.end));
+  const bw = x2 - x;
+  const y = aY(TLM.atrackOf(a)) + 1;
+  const bh = TL.aH - 2;
+  const selected = S.sel.has(a.id);
+  ctx.fillStyle = selected ? "#3fb950" : "#238636";
+  ctx.beginPath();
+  roundRectPath(ctx, x, y, bw, bh, 3);
+  ctx.fill();
+  ctx.save();
+  ctx.beginPath();
+  roundRectPath(ctx, x, y, bw, bh, 3);
+  ctx.clip();
+  drawWave(ctx, a, x, x2, y + bh - 1, Math.max(4, bh - 6), a.src);
+  ctx.restore();
+  if (selected) {
+    ctx.strokeStyle = "#f0f6fc";
+    ctx.strokeRect(x + 0.5, y + 0.5, bw - 1, bh - 1);
+  }
+  const fx = TLM.cleanFx(a.fx);
+  if (fx.mute || fx.volume !== 100) {
+    ctx.fillStyle = fx.mute ? "#f85149" : "#ffd54a";
+    ctx.beginPath();
+    ctx.arc(x + bw - 6, y + 6, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  if (bw > 34) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x + 3, y, bw - 6, bh);
+    ctx.clip();
+    ctx.fillStyle = "rgba(8,12,18,0.62)";
+    const label = a.name || mediaName(a.src);
+    ctx.font = "10px sans-serif";
+    const tw = Math.min(bw - 8, ctx.measureText(label).width + 8);
+    ctx.fillRect(x + 3, y + 2, tw, 12);
+    ctx.fillStyle = "#e6edf3";
+    ctx.fillText(label, x + 7, y + 11);
+    ctx.restore();
+  }
+}
+
+// A video clip's own sound, drawn on the audio lane with the same index.
+function drawLinkedAudio(ctx, c) {
+  const x = t2x(c.start);
+  const x2 = Math.max(x + 2, t2x(c.end));
+  const bw = x2 - x;
+  const y = aY(TLM.trackOf(c)) + 1;
+  const bh = TL.aH - 2;
+  const selected = S.sel.has(c.id);
+  const fx = TLM.cleanFx(c.fx);
+  ctx.fillStyle = selected ? "#2f6fd6" : "#1f4b8f";
+  ctx.beginPath();
+  roundRectPath(ctx, x, y, bw, bh, 3);
+  ctx.fill();
+  ctx.save();
+  ctx.beginPath();
+  roundRectPath(ctx, x, y, bw, bh, 3);
+  ctx.clip();
+  ctx.globalAlpha = fx.mute ? 0.35 : 1;
+  drawWave(ctx, c, x, x2, y + bh - 1, Math.max(4, bh - 6), c.src);
+  ctx.restore();
+  ctx.globalAlpha = 1;
+  if (selected) {
+    ctx.strokeStyle = "#f0f6fc";
+    ctx.strokeRect(x + 0.5, y + 0.5, bw - 1, bh - 1);
+  }
+  if (fx.mute) {
+    ctx.strokeStyle = "#f85149";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + bh - 4);
+    ctx.lineTo(x + Math.min(bw - 4, 16), y + 4);
+    ctx.stroke();
+    ctx.lineWidth = 1;
   }
 }
 
@@ -254,14 +414,17 @@ function drawClip(ctx, c) {
   const y = vY(TLM.trackOf(c)) + 2;
   const bh = TL.vH - 4;
   const selected = S.sel.has(c.id);
-  ctx.fillStyle = (c.kind && KIND_COLOR[c.kind]) || CLIP_FALLBACK;
+  const src = c.src || TLM.MAIN_SRC;
+  const isMain = src === TLM.MAIN_SRC;
+  ctx.fillStyle = (c.kind && KIND_COLOR[c.kind]) || (isMain ? CLIP_FALLBACK : "#3d3b52");
   ctx.globalAlpha = selected ? 0.95 : 0.8;
   ctx.fillRect(x, y, bw, bh);
   ctx.globalAlpha = 1;
-  drawFilmstrip(ctx, c, x, x2, y, bh - TL.wave);
-  drawWave(ctx, c, x, x2, y + bh, TL.wave);
-  if (bw > 40 && (c.text || c.kind)) {
-    const label = c.text || c.kind;
+  if (isMain) drawFilmstrip(ctx, c, x, x2, y, bh - TL.wave);
+  else drawPoster(ctx, c, x, x2, y, bh - TL.wave, src);
+  if (c.audio !== false && itemHasAudio(c)) drawWave(ctx, c, x, x2, y + bh, TL.wave, src);
+  if (bw > 40 && (c.text || c.kind || !isMain)) {
+    const label = c.text || c.kind || c.name || mediaName(src);
     ctx.save();
     ctx.beginPath();
     ctx.rect(x + 3, y, bw - 6, bh);
@@ -362,6 +525,22 @@ function draw() {
     drawClip(ctx, c);
   }
 
+  // audio lanes A1..An: standalone items, plus the sound of each V track.
+  for (let a = 0; a < aTrackCount(); a += 1) {
+    ctx.fillStyle = "#0b1017";
+    ctx.fillRect(0, aY(a), w, TL.aH);
+  }
+  for (const c of S.tl.clips) {
+    if (c.end < v0 || c.start > v1) continue;
+    if (itemHidden(c) || c.audio === false) continue;
+    if (TLM.trackOf(c) >= aTrackCount()) continue;
+    if (!itemHasAudio(c)) continue;
+    drawLinkedAudio(ctx, c);
+  }
+  for (const a of S.tl.auds) {
+    if (a.end < v0 || a.start > v1) continue;
+    drawAud(ctx, a);
+  }
 
   // caption lanes; their T labels are kept in the independent left rail.
   for (let i = 0; i < laneCount(); i += 1) {
@@ -382,6 +561,8 @@ function draw() {
     ctx.fillRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1),
                  Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
   }
+
+  drawDropHint(ctx, w);
 
   // playhead
   const pt = playheadTime();
@@ -425,7 +606,10 @@ function refresh(forcePreview = false) {
 }
 
 function setTL(next) {
-  S.tl = next;
+  // Every path into the editor goes through here, so normalise once: a caller
+  // that builds a bare { clips, caps } (detection, presets) still ends up with
+  // the audio lanes the rest of the app assumes.
+  S.tl = TLM.normalise(next);
   syncCapSel();
   commitTL();
   refresh(true);
@@ -440,8 +624,8 @@ function undoTL() {
   if (!S.undo.length) return status("Nothing to undo.");
   S.redo.push(S.lastJSON);
   S.lastJSON = S.undo.pop();
-  S.tl = JSON.parse(S.lastJSON);
-  S.sel = new Set([...S.sel].filter((id) => [...S.tl.clips, ...S.tl.caps].some((c) => c.id === id)));
+  S.tl = TLM.normalise(JSON.parse(S.lastJSON));
+  S.sel = new Set([...S.sel].filter((id) => tlItems(S.tl).some((c) => c.id === id)));
   syncCapSel();
   scheduleSave();
   refresh(true);
@@ -452,7 +636,7 @@ function redoTL() {
   if (!S.redo.length) return status("Nothing to redo.");
   S.undo.push(S.lastJSON);
   S.lastJSON = S.redo.pop();
-  S.tl = JSON.parse(S.lastJSON);
+  S.tl = TLM.normalise(JSON.parse(S.lastJSON));
   S.sel = new Set();
   syncCapSel();
   scheduleSave();
@@ -519,7 +703,7 @@ function clearSel() {
 }
 
 function selectAll() {
-  S.sel = new Set([...S.tl.clips, ...S.tl.caps].map((c) => c.id));
+  S.sel = new Set(tlItems(S.tl).map((c) => c.id));
   syncCapSel();
   refresh();
 }
@@ -569,7 +753,7 @@ function splitAtPlayhead() {
   const at = playheadTime();
   const pool = selectedIds().length
     ? selectedIds().map(findTlItem).filter(Boolean)
-    : [...S.tl.clips, ...S.tl.caps];
+    : tlItems(S.tl);
   const skipped = pool.filter((it) => itemLocked(it) && at > it.start + 0.05 && at < it.end - 0.05);
   const cut = pool.filter((it) => !itemLocked(it)).map((it) => it.id);
   if (!cut.length) return status(skipped.length ? "That lane is locked." : "Nothing to split at the playhead.");
@@ -597,12 +781,22 @@ function addLane() {
   refresh();
 }
 
+// An empty Vn (and its An) to drop another layer on.
+function addVideoTrack() {
+  if (!S.project) return;
+  const v = vTrackCount();
+  S.tl = TLM.normalise({ ...S.tl, vtracks: v + 1, atracks: Math.max(aTrackCount(), v + 1) });
+  commitTL();
+  refresh();
+  status(`V${v + 1} added — drop media on it to overlay the tracks below.`);
+}
+
 
 /* ------------------------------------------------------------ snapping */
 
 function snapCandidates(exclude) {
   const list = [0, playheadTime(), timelineEnd()];
-  for (const c of [...S.tl.clips, ...S.tl.caps]) {
+  for (const c of tlItems(S.tl)) {
     if (!exclude.has(c.id)) list.push(c.start, c.end);
   }
   return list;
@@ -623,7 +817,7 @@ function snapTime(t, exclude) {
 function snapShift(base, ids, dt) {
   if (!$("tlSnap") || !$("tlSnap").checked) return dt;
   const sel = new Set(ids);
-  const items = [...base.clips, ...base.caps].filter((c) => sel.has(c.id));
+  const items = tlItems(base).filter((c) => sel.has(c.id));
   if (!items.length) return dt;
   const s0 = Math.min(...items.map((c) => c.start));
   const e0 = Math.max(...items.map((c) => c.end));
@@ -653,6 +847,10 @@ function applyMarquee(d) {
     if (itemHidden(c)) continue;
     const y0 = laneY(c.lane), y1 = y0 + TL.laneH;
     if (t2x(c.end) >= a && t2x(c.start) <= b && y0 <= bottom && y1 >= top) picked.add(c.id);
+  }
+  for (const a2 of S.tl.auds) {
+    const y0 = aY(TLM.atrackOf(a2)), y1 = y0 + TL.aH;
+    if (t2x(a2.end) >= a && t2x(a2.start) <= b && y0 <= bottom && y1 >= top) picked.add(a2.id);
   }
   S.sel = picked;
 }
@@ -726,7 +924,8 @@ function addCaptionAt(t) {
 }
 
 function toggleClipMute(id) {
-  const clip = S.tl.clips.find((c) => c.id === id);
+  const clip = (S.tl.clips || []).find((c) => c.id === id)
+    || (S.tl.auds || []).find((c) => c.id === id);
   if (!clip) return;
   if (itemLocked(clip)) return status(`${laneName(laneKeyOf(clip))} is locked.`);
   if (!clip.fx || typeof clip.fx !== "object") clip.fx = TLM.defaultFx();
@@ -734,7 +933,47 @@ function toggleClipMute(id) {
   clip.fx.mute = !clip.fx.mute;
   commitTL();
   refresh();
-  status(clip.fx.mute ? "Clip muted (M tool: click again to unmute)." : "Clip unmuted.");
+  status(clip.fx.mute ? "Muted (M tool: click again to unmute)." : "Unmuted.");
+}
+
+// While a bin tile is dragged over the canvas, the target lane and time are
+// highlighted so the drop point is obvious before releasing.
+function setDropHint(active) {
+  if (!active) S.dropHint = null;
+  draw();
+}
+
+function dropTargetFor(ev, cv) {
+  const r = cv.getBoundingClientRect();
+  const x = ev.clientX - r.left, y = ev.clientY - r.top;
+  const row = rowAt(y);
+  const t = Math.max(0, snapTime(x2t(x), new Set()));
+  return { x, y, row, t };
+}
+
+function drawDropHint(ctx, w) {
+  const d = S.dropHint;
+  if (!d) return;
+  const isAudio = d.kind === "audio";
+  let top, height;
+  if (isAudio) {
+    const lane = d.row.kind === "audio" ? d.row.atrack : 0;
+    top = aY(lane); height = TL.aH;
+  } else {
+    const lane = d.row.kind === "video" ? d.row.vtrack : d.lane;
+    top = vY(lane); height = TL.vH;
+  }
+  const x = t2x(d.t);
+  const bw = Math.max(3, (d.duration || 2) * pxPerSec());
+  ctx.fillStyle = "rgba(63,185,80,0.22)";
+  ctx.fillRect(0, top, w, height);
+  ctx.strokeStyle = "#3fb950";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x + 0.5, top + 0.5, bw, height - 1);
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#3fb950";
+  ctx.font = "10px sans-serif";
+  ctx.fillText(`${isAudio ? "A" : "V"}${d.lane + 1} · ${fmtTime(d.t, false)}`, x + 4, top + 11);
 }
 
 function bindTimeline() {
@@ -800,12 +1039,14 @@ function bindTimeline() {
       return;
     }
     if (curTool === "mute") {
-      const hit = hitItem(row, x);
-      if (hit && TLM.isClip(hit)) toggleClipMute(hit.id);
-      else if (hit) status("Only video clips have audio to mute.");
+      let hit = hitItem(row, x);
+      if (!hit && row.kind === "audio") hit = linkedAudioAt(row, x);
+      if (hit && (TLM.isClip(hit) || TLM.isAudioItem(hit))) toggleClipMute(hit.id);
+      else status("Only clips with audio can be muted.");
       return;
     }
-    const hit = hitItem(row, x);
+    let hit = hitItem(row, x);
+    if (!hit && row.kind === "audio") hit = linkedAudioAt(row, x);
     if (hit) {
       if (itemLocked(hit)) {
         if (!ev.shiftKey && !ev.ctrlKey && !ev.metaKey) selectOnly(hit.id);
@@ -821,6 +1062,7 @@ function bindTimeline() {
         id: hit.id, ids: selectedIds(), x0: x, y0: y, moved: false,
         base: JSON.parse(JSON.stringify(S.tl)), lane0: row.kind === "lane" ? row.lane : null,
         vtrack0: row.kind === "video" ? row.vtrack : null,
+        atrack0: row.kind === "audio" ? row.atrack : null,
         alt: ev.altKey, srcDur: S.duration, resultIds: null,
       };
       return;
@@ -829,6 +1071,62 @@ function bindTimeline() {
       mode: "marquee", x0: x, y0: y, x1: x, y1: y, moved: false,
       additive: ev.shiftKey, baseSel: new Set(S.sel),
     };
+  });
+
+  // Drop a media-bin tile onto the timeline.
+  const assetDrag = (ev) => [...(ev.dataTransfer ? ev.dataTransfer.types : [])]
+    .includes("text/vts-asset");
+  cv.addEventListener("dragover", (ev) => {
+    if (!S.project || !assetDrag(ev)) return;
+    ev.preventDefault();
+    ev.dataTransfer.dropEffect = "copy";
+    const asset = MEDIA.assets.get(ev.dataTransfer.getData("text/vts-asset"));
+    if (!asset) return;
+    const d = dropTargetFor(ev, cv);
+    const dur = asset.kind === "image"
+      ? Math.max(TLM.MIN_LEN, Number($("mediaStillDur") ? $("mediaStillDur").value : 5) || 5)
+      : Math.max(TLM.MIN_LEN, Number(asset.duration) || TLM.MIN_LEN);
+    const lane = asset.kind === "audio"
+      ? (d.row.kind === "audio" ? d.row.atrack : 0)
+      : (d.row.kind === "video" ? d.row.vtrack : TLM.firstFreeTrack(S.tl.clips || [], d.t, d.t + dur));
+    S.dropHint = { ...d, kind: asset.kind, lane, duration: dur, name: asset.name };
+    draw();
+  });
+  cv.addEventListener("dragleave", () => { if (S.dropHint) { S.dropHint = null; draw(); } });
+  cv.addEventListener("drop", (ev) => {
+    if (!S.project || !assetDrag(ev)) return;
+    ev.preventDefault();
+    S.dropHint = null;
+    const id = ev.dataTransfer.getData("text/vts-asset");
+    const asset = MEDIA.assets.get(id);
+    if (!asset) return;
+    const d = dropTargetFor(ev, cv);
+    if (asset.kind === "audio") {
+      const atrack = d.row.kind === "audio" ? d.row.atrack : 0;
+      const item = TLM.makeAudioItem(asset, d.t, atrack);
+      setTL(TLM.normalise({ ...S.tl, auds: [...(S.tl.auds || []), item] }));
+      S.sel = new Set([item.id]);
+      syncCapSel();
+      draw();
+      status(`${asset.name} → A${atrack + 1} at ${fmtTime(d.t, false)}.`);
+      return;
+    }
+    const dur = asset.kind === "image"
+      ? Math.max(TLM.MIN_LEN, Number($("mediaStillDur") ? $("mediaStillDur").value : 5) || 5)
+      : Math.max(TLM.MIN_LEN, Number(asset.duration) || TLM.MIN_LEN);
+    const want = d.row.kind === "video"
+      ? d.row.vtrack
+      : TLM.firstFreeTrack(S.tl.clips || [], d.t, d.t + dur);
+    const res = TLM.addMedia(S.tl, asset, d.t, want,
+      { duration: dur, in: 0, fit: mediaDefaultFit(asset) });
+    if (!res || !res.id) return;
+    setTL(res.tl);
+    S.sel = new Set([res.id]);
+    syncCapSel();
+    draw();
+    status(res.moved
+      ? `V${want + 1} was busy — ${asset.name} went to V${want + 1 + res.moved} so it overlays instead of overwriting.`
+      : `${asset.name} → V${want + 1} at ${fmtTime(d.t, false)}.`);
   });
 
   cv.addEventListener("dblclick", (ev) => {
@@ -891,12 +1189,13 @@ function bindTimeline() {
       const row = rowAt(y);
       const dLane = row.kind === "lane" && d.lane0 !== null ? row.lane - d.lane0 : 0;
       const dVTrack = row.kind === "video" && d.vtrack0 !== null ? row.vtrack - d.vtrack0 : 0;
+      const dATrack = row.kind === "audio" && d.atrack0 !== null ? row.atrack - d.atrack0 : dVTrack;
       if (d.alt) {
         const dup = TLM.duplicateItems(d.base, d.ids, dt);
         S.tl = dVTrack ? TLM.moveItems(dup.tl, dup.ids, 0, 0, dVTrack) : dup.tl;
         d.resultIds = dup.ids;
       } else {
-        S.tl = TLM.moveItems(d.base, d.ids, dt, dLane, dVTrack);
+        S.tl = TLM.moveItems(d.base, d.ids, dt, dLane, dVTrack, dATrack);
       }
     } else {
       const t = snapTime(x2t(x), new Set([d.id]));
@@ -1012,8 +1311,9 @@ function updateCursor(cv, x, y) {
   const row = rowAt(y);
   let cursor = "default";
   if (row.kind === "ruler") cursor = "pointer";
-  else if (row.kind === "video" || row.kind === "lane") {
-    const hit = hitItem(row, x);
+  else if (row.kind === "video" || row.kind === "lane" || row.kind === "audio") {
+    let hit = hitItem(row, x);
+    if (!hit && row.kind === "audio") hit = linkedAudioAt(row, x);
     if (hit) cursor = itemLocked(hit) ? "not-allowed" : edgeAt(hit, x) === "move" ? "grab" : "ew-resize";
   }
   cv.style.cursor = cursor;
@@ -1046,39 +1346,17 @@ function setPlayhead(t, sync = true) {
   if (typeof ClipRefresh === "function") ClipRefresh();
 }
 
-// Show the source frame for the topmost clip under the playhead; black in
-// gaps. Video lanes stack exactly like caption lanes: highest lane wins.
+// Composite every video track under the playhead, lowest track first, so V2
+// really is drawn over V1 (B-roll / picture-in-picture) instead of only the
+// topmost clip being visible. Nothing here is black in a gap: the whole stack
+// is dropped and the black stage shows through, exactly like the export.
 function syncPreview(force) {
-  const p = $("player");
+  if (!S.project) return;
+  if (typeof stageSync !== "function") return;
   const shade = $("gapShade");
-  if (!S.project || !p.hasAttribute("src")) return;
-  const clip = TLM.clipAt(S.tl, playheadTime());
-  if (!clip) {
-    if (shade) shade.hidden = false;
-    if (!p.paused) p.pause();
-    resetLayerFx(p);
-    return;
-  }
-  if (shade) shade.hidden = true;
-  seekLayer(p, clip, force);
-  applyClipFx(p, clip, playheadTime());
-  driveLayer(p);
-}
-
-function seekLayer(el, clip, force) {
-  const want = clip.in + (playheadTime() - clip.start);
-  if (force || Math.abs((el.currentTime || 0) - want) > 0.25) {
-    try { el.currentTime = want; } catch (_) { /* metadata not loaded yet */ }
-  }
-}
-
-function driveLayer(el) {
-  if (PV.playing && el.paused) {
-    const pr = el.play();
-    if (pr && pr.catch) pr.catch(() => {});
-  } else if (!PV.playing && !el.paused) {
-    el.pause();
-  }
+  const stack = TLM.clipStackAt(S.tl, playheadTime());
+  if (shade) shade.hidden = stack.length > 0;
+  stageSync(playheadTime(), PV.playing, !!force);
 }
 
 // Mirror the clip's evaluated effects on a preview <video> (CSS approximation
@@ -1115,7 +1393,7 @@ function togglePlay() {
 
 function startPlayback() {
   if (!S.project || PV.playing) return;
-  if (!S.tl.clips.length) return status("The timeline is empty.");
+  if (!(S.tl.clips || []).length) return status("The timeline is empty.");
   if (playheadTime() >= timelineEnd() - 0.01) setPlayhead(0, false);
   PV.playing = true;
   PV.last = performance.now();
@@ -1131,10 +1409,8 @@ function pausePlayback() {
   }
   const btn = $("playBtn");
   if (btn) btn.textContent = "▶ play";
-  const p = $("player");
-  if (p && !p.paused) p.pause();
   if (S.project) {
-    syncPreview(false);
+    syncPreview(true);          // settle every layer on the exact frame
     syncListPlayhead();
     draw();
     updateTimecode();
@@ -1146,16 +1422,13 @@ function pvTick(now) {
   if (!PV.playing) return;
   const dt = Math.min(0.25, Math.max(0, (now - PV.last) / 1000));
   PV.last = now;
-  const p = $("player");
+  // The playhead is the master clock. Layers are nudged onto it (see
+  // stageSync), so a buffering clip can never drag the playhead backwards -
+  // which is what used to make the preview stutter and lose sync.
   let t = playheadTime() + dt;
-  const stack = TLM.clipStackAt(S.tl, playheadTime());
-  const clock = stack.length ? stack[stack.length - 1] : null;  // topmost wins
-  // While a clip plays, the video clock is the more accurate reference.
-  if (clock && !p.paused && p.readyState >= 2) {
-    const vt = clock.start + (p.currentTime - clock.in);
-    if (Math.abs(vt - t) < 0.3) t = vt;
-  }
-  const end = timelineEnd();
+  const ref = typeof stageClockReference === "function" ? stageClockReference(t) : null;
+  if (ref !== null && Number.isFinite(ref) && Math.abs(ref - t) < 0.35) t = ref;
+  const end = Math.max(timelineEnd(), 0.001);
   if (t >= end) {
     S.T = end;
     pausePlayback();
@@ -1181,6 +1454,12 @@ function stepFrame(dir) {
 
 function bindPlayer() {
   const p = $("player");
+  // #player is now the frame reference the preview is measured against (its
+  // video size drives the stage layout and the caption overlay geometry).
+  // The picture itself is composited by stage.js, so it must stay silent.
+  p.muted = true;
+  try { p.volume = 0; } catch (_) { /* not ready */ }
+  p.classList.add("player-reference");
   p.addEventListener("seeked", () => { draw(); updateTimecode(); });
   p.addEventListener("loadedmetadata", () => {
     if (!S.duration && p.duration) {
@@ -1594,7 +1873,7 @@ function updateTally() {
   $("tOut").textContent = fmtTime(timelineEnd(), false);
   const warn = [];
   if (S.tl.clips.length > 300) warn.push("Many clips: the export will take longer.");
-  if (S.tl.clips.length && timelineEnd() < 0.5) warn.push("The timeline is very short.");
+  if ((S.tl.clips || []).length && timelineEnd() < 0.5) warn.push("The timeline is very short.");
   $("planWarn").textContent = warn.join(" ");
   $("exportBtn").disabled = !S.project || !S.tl.clips.length;
 }
@@ -1645,7 +1924,7 @@ async function runDetect() {
     }
     S.sel = new Set();
     S.capSel = null;
-    setTL({ clips, caps, lanes, vtracks: 1 });
+    setTL({ clips, caps, lanes, vtracks: 1, auds: [], atracks: 1 });
     const sm = data.summary;
     $("detectInfo").innerHTML =
       `${clips.length} clips &middot; ${data.silence_count} silences (${fmtTime(sm.seconds_by_kind.silence, false)})` +
@@ -1766,6 +2045,7 @@ function bindTimelineTools() {
   $("tlPaste").onclick = () => pasteSel(false);
   $("tlRipple").onclick = () => deleteSel(true);
   $("tlLane").onclick = addLane;
+  $("tlTrack").onclick = addVideoTrack;
   $("playBtn").onclick = togglePlay;
   $("frameBack").onclick = () => stepFrame(-1);
   $("frameFwd").onclick = () => stepFrame(1);
@@ -1787,10 +2067,7 @@ function bindUI() {
   // The file-browser modal is optional markup: if it is absent, only browsing breaks.
   const modal = $("browserModal");
   if (modal) {
-    $("browseBtn").onclick = async () => {
-      modal.hidden = false;
-      try { await browseTo(""); } catch (e) { alert(e.message); }
-    };
+    $("browseBtn").onclick = () => openBrowserFor("open");
     const close = $("browserClose");
     if (close) close.onclick = () => { modal.hidden = true; };
     modal.onclick = (e) => { if (e.target.id === "browserModal") modal.hidden = true; };
@@ -1894,7 +2171,9 @@ async function onProjectOpen(data) {
   S.capSel = null;
   S.undo = [];
   S.redo = [];
-  S.tl = { clips: TLM.clipsFromSource(S.duration), caps: [], lanes: 1, vtracks: 1 };
+  const mainAsset = data.main_asset || TLM.MAIN_SRC;
+  S.tl = { clips: TLM.clipsFromSource(S.duration, mainAsset), auds: [], caps: [],
+           lanes: 1, vtracks: 1, atracks: 1 };
   S.lastJSON = JSON.stringify(S.tl);
   S.peaks = [];
   S.thumbs = null;
@@ -1904,6 +2183,11 @@ async function onProjectOpen(data) {
   $("dSubPath").value = data.demo_subtitles || "";
   $("pathInput").value = data.info.path;
   S.preview = data.preview || { mode: "direct", ready: false, state: "none" };
+  // The bin arrives with the project, so layers resolve before the first draw.
+  MEDIA.assets = new Map((data.media || []).map((a) => [a.id, a]));
+  MEDIA.main = mainAsset;
+  if (typeof stageReset === "function") stageReset();
+  if (typeof mediaInit === "function") mediaInit();
   setupPreview(S.preview);
   S.view = { start: 0, span: S.duration };
 
@@ -1927,7 +2211,7 @@ async function onProjectOpen(data) {
   try {
     const saved = await api("/api/timeline");
     if (S.project === data && JSON.stringify(S.tl) === initialJSON && saved.timeline && saved.timeline.clips) {
-      S.tl = saved.timeline;
+      S.tl = TLM.normalise(saved.timeline);
       S.lastJSON = JSON.stringify(S.tl);
       refresh(true);
     }
@@ -1939,5 +2223,8 @@ async function onProjectOpen(data) {
   // Defer cosmetic timeline assets until the browser-friendly copy is ready.
   timelineAssetsPending = S.preview.mode === "proxy" && !S.preview.ready;
   if (!timelineAssetsPending) loadTimelineAssets();
-  if (S.project === data) S.projectReady = true;
+  if (S.project === data) {
+    S.projectReady = true;
+    if (typeof mediaLoad === "function") mediaLoad();
+  }
 }

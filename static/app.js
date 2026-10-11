@@ -7,7 +7,7 @@ const S = {
   env: null,
   project: null,
   preview: null,
-  tl: { clips: [], caps: [], lanes: 1 },   // edit list of the one video, timeline seconds
+  tl: { clips: [], auds: [], caps: [], lanes: 1, vtracks: 1, atracks: 1 },
   sel: new Set(),                           // selected clip / caption ids
   T: 0,                                     // playhead on the timeline (seconds)
   clip: null,                               // clipboard
@@ -1536,6 +1536,20 @@ function syncQualityRows() {
 
 /* ----------------------------------------------------------- file browser */
 
+// "open" picks the project's main video, "import" adds files to the media bin.
+let BROWSE_MODE = "open";
+const MEDIA_IMPORT_RE = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob|mp3|wav|flac|aac|m4a|ogg|oga|opus|aiff|aif|wma|mka|png|jpe?g|bmp|gif|webp|tiff?|svg|avif)$/i;
+
+function openBrowserFor(mode) {
+  BROWSE_MODE = mode === "import" ? "import" : "open";
+  const modal = $("browserModal");
+  if (!modal) return;
+  modal.hidden = false;
+  const title = modal.querySelector("strong");
+  if (title) title.textContent = BROWSE_MODE === "import" ? "Add media to the bin" : "Choose a file";
+  browseTo("").catch((e) => alert(e.message));
+}
+
 async function browseTo(path) {
   const data = await api(`/api/browse?path=${encodeURIComponent(path || "")}&exts_only=false`);
   $("browserCwd").textContent = data.cwd;
@@ -1559,7 +1573,15 @@ async function browseTo(path) {
   for (const d of data.dirs) add(`📁 ${d.name}`, () => browseTo(d.path));
   for (const f of data.files) {
     const isVideo = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob)$/i.test(f.name);
-    add(`${isVideo ? "🎬" : "📄"} ${f.name}`, () => {
+    const isImage = /\.(png|jpe?g|bmp|gif|webp|tiff?|svg|avif)$/i.test(f.name);
+    const isMedia = MEDIA_IMPORT_RE.test(f.name);
+    const icon = isVideo ? "🎬" : isImage ? "🖼" : isMedia ? "🎵" : "📄";
+    add(`${icon} ${f.name}`, () => {
+      if (BROWSE_MODE === "import" && isMedia) {
+        $("browserModal").hidden = true;
+        if (typeof mediaImportPaths === "function") mediaImportPaths([f.path]);
+        return;
+      }
       if (isVideo) { $("pathInput").value = f.path; $("browserModal").hidden = true; openPath(f.path); }
       else if (/\.(srt|vtt)$/i.test(f.name)) {
         $("dSubPath").value = f.path; $("browserModal").hidden = true;

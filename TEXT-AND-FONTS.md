@@ -40,11 +40,12 @@ selection, Undo/Redo, imported fonts and refreshed installed/device font lists.
 
 Text controls inherit missing older style defaults, synchronize while caption preview is disabled, and preserve global font/color/appearance settings in ASS export. Plain SRT export does not carry visual styling.
 
-## Removed feature
+## Multi-track editing
 
-This revision uses one main video track and caption lanes only. The uploaded secondary-video feature, panel, extra picture track, media endpoints and compositor have been removed. Font tools and the earlier external-editor cleanup are retained.
-
-Extract the corrected ZIP into a new directory, or apply the revision patch to the previous delivered version. Merging ZIP files over an old directory cannot remove obsolete files; the patch handles deletion explicitly. Existing personal uploads are not deleted by the patch.
+The single `B1` overlay track is gone. Its replacement — a media bin, V1..Vn
+picture tracks that composite, A1..An audio lanes and a program monitor — is
+documented in **MEDIA-BIN-AND-MULTITRACK.md**. Font and shadow behaviour is
+unaffected by it.
 
 ## Tests
 

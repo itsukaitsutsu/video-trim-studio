@@ -498,7 +498,8 @@ def test_track_labels_stay_pinned_left_during_horizontal_pan(browser_page):
     }""")
 
     rail = page.locator("#trackLabels")
-    assert rail.locator(".track-name").all_inner_texts() == ["V1", "T1", "T2"]
+    # One video track, its linked audio lane, then the caption lanes.
+    assert rail.locator(".track-name").all_inner_texts() == ["V1", "A1", "T1", "T2"]
     before = rail.bounding_box()
     start_before = page.evaluate("S.view.start")
     page.locator("#timeline").evaluate("""canvas => canvas.dispatchEvent(new WheelEvent('wheel', {
@@ -1001,3 +1002,99 @@ def test_font_picker_popup_in_resized_panel_and_small_viewport(browser_page):
     search.press('Escape')
     assert search.get_attribute('aria-expanded') == 'false'
     assert not errors
+
+
+# ---------------------------------------------------------------------------
+# Multi-track editing: B-roll overlays, the program monitor and audio lanes
+# ---------------------------------------------------------------------------
+
+def _make_media(tmp_path, name, color, seconds, tone=None):
+    """A tiny renderable clip for the bin: video, or audio when tone is set."""
+    import subprocess as _sp
+    out = tmp_path / name
+    if tone:
+        _sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                 f"sine=frequency={tone}:duration={seconds}", str(out)],
+                check=True, capture_output=True)
+    else:
+        _sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                 f"color={color}:s=320x180:r=25:d={seconds}",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)],
+                check=True, capture_output=True)
+    return str(out)
+
+
+def test_media_bin_broll_overlays_instead_of_restacking(browser_page, tmp_path):
+    """Dropping media on an occupied track must composite, not push it aside."""
+    page, page_errors = browser_page
+    broll = _make_media(tmp_path, "broll.mp4", "blue", 4)
+    music = _make_media(tmp_path, "music.wav", None, 6, tone=220)
+    open_demo(page)
+
+    page.evaluate("paths => fetch('/api/bin/import', {method:'POST',"
+                  "headers:{'content-type':'application/json'},"
+                  "body: JSON.stringify({paths})}).then(r => r.json())"
+                  ".then(d => mediaAdoptAssets(d.assets))", [broll, music])
+    page.wait_for_function("MEDIA.assets.size >= 3")
+    assert page.locator("#mediaList .media-tile").count() == 3
+
+    # Park the playhead inside the V1 clip and drop the B-roll there.
+    page.evaluate("S.T = 5; draw(); syncPreview(true);")
+    page.evaluate("id => mediaAddAtPlayhead(id)",
+                  page.evaluate("[...MEDIA.assets.values()].find(a => a.name === 'broll.mp4').id"))
+    page.wait_for_function("S.tl.clips.length === 2")
+
+    clips = page.evaluate("S.tl.clips.map(c => ({track: c.track, s: c.start, e: c.end}))")
+    assert sorted(c["track"] for c in clips) == [0, 1], clips
+    over = [c for c in clips if c["track"] == 1][0]
+    under = [c for c in clips if c["track"] == 0][0]
+    # The whole point: the two tracks overlap in time instead of queueing up.
+    assert over["s"] < under["e"] and under["s"] < over["e"], clips
+
+    # The program monitor must show one layer per visible track.
+    page.evaluate("S.T = 5; stageReset(); stageSync(5, false, true)")
+    page.wait_for_function(
+        "document.querySelectorAll('#stageLayers .fx-layer').length === 2")
+    page.evaluate("S.T = 0.2; stageSync(0.2, false, true)")
+    page.wait_for_function(
+        "document.querySelectorAll('#stageLayers .fx-layer').length === 1")
+    assert not page_errors, page_errors
+
+
+def test_audio_lane_unlink_and_music_drop(browser_page, tmp_path):
+    """A1 exists for the picture's sound, and unlinking frees it onto a lane."""
+    page, page_errors = browser_page
+    music = _make_media(tmp_path, "music.wav", None, 6, tone=220)
+    open_demo(page)
+
+    # The rail lists a linked audio lane for the video track.
+    assert page.locator("#trackLabels .track-name").all_inner_texts()[:2] == ["V1", "A1"]
+
+    page.evaluate("paths => fetch('/api/bin/import', {method:'POST',"
+                  "headers:{'content-type':'application/json'},"
+                  "body: JSON.stringify({paths})}).then(r => r.json())"
+                  ".then(d => mediaAdoptAssets(d.assets))", [music])
+    page.wait_for_function("MEDIA.assets.size >= 2")
+
+    # Music lands on an A lane, not a video track.
+    page.evaluate("S.T = 1; draw()")
+    page.evaluate("id => mediaAddAtPlayhead(id)",
+                  page.evaluate("[...MEDIA.assets.values()].find(a => a.kind === 'audio').id"))
+    page.wait_for_function("S.tl.auds.length === 1")
+    assert page.evaluate("S.tl.auds[0].atrack") == 0
+    assert page.evaluate("S.tl.clips.length") == 1
+
+    # Unlink the V1 clip's sound: the picture stays, the sound becomes an item.
+    page.evaluate("selectOnly(S.tl.clips[0].id)")
+    page.click("#txUnlinkAudio")
+    page.wait_for_function("S.tl.auds.length === 2")
+    assert page.evaluate("S.tl.clips[0].audio") is False
+    assert page.evaluate("S.tl.auds.some(a => a.src === 'src')")
+    assert page.locator("#txUnlinkAudio").inner_text().strip().lower() == "relink audio"
+
+    # It survives a reload.
+    page.wait_for_function("S.lastJSON && JSON.parse(S.lastJSON).auds.length === 2")
+    page.reload()
+    page.wait_for_function("S.project && S.tl.auds.length === 2")
+    assert page.evaluate("S.tl.clips[0].audio") is False
+    assert not page_errors, page_errors

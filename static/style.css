@@ -613,3 +613,68 @@ details.adv summary:hover { color: var(--text); }
 .tabpage > .moveunit { flex: 1 1 auto; min-height: 0; min-width: 0; width: auto; height: auto; }
 .ws-tabs [data-dyn-tab] { cursor: grab; }
 .workspace-drop-merge { box-shadow: inset 0 0 0 2px var(--accent); }
+
+/* ---------------------------------------------------------------------------
+ * Media bin (Project panel)
+ * ------------------------------------------------------------------------ */
+.media-bin {
+  border: 1px solid var(--line); border-radius: 6px; background: #0c1117;
+  max-height: 30vh; overflow: auto; margin-bottom: 6px;
+}
+.media-bin.media-drop { outline: 2px dashed var(--accent-2); outline-offset: -3px; }
+.media-list { display: flex; flex-direction: column; gap: 3px; padding: 4px; }
+.media-note { padding: 4px 2px 0; line-height: 1.35; }
+.media-empty { padding: 10px 8px; text-align: center; }
+.media-tile {
+  display: grid; grid-template-columns: 54px 1fr 16px; align-items: center; gap: 8px;
+  padding: 4px; border: 1px solid transparent; border-radius: 5px; cursor: grab;
+  background: #12181f;
+}
+.media-tile:hover { border-color: var(--line); background: #172029; }
+.media-tile.selected { border-color: var(--accent-2); background: #16233a; }
+.media-tile.dragging { opacity: 0.45; }
+.media-tile.is-main .media-name::after {
+  content: "main"; margin-left: 6px; padding: 0 4px; border-radius: 3px;
+  background: #1f4b8f; color: #dbeafe; font-size: 9px; vertical-align: 1px;
+}
+.media-thumb {
+  width: 54px; height: 34px; border-radius: 3px; overflow: hidden;
+  background: #05080b; display: flex; align-items: center; justify-content: center;
+  font-size: 17px; color: #55606d;
+}
+.media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-thumb-audio { background: #10261a; color: #3fb950; }
+.media-meta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.media-name {
+  font-size: 12px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.media-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media-kind { font-size: 12px; text-align: center; color: var(--dim); }
+.media-tools { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; }
+.media-search { flex: 1 1 90px; min-width: 0; }
+#mediaInfo.error { color: var(--cut); }
+#mediaInfo:empty { display: none; }
+#mediaEmpty[hidden] { display: none; }
+
+/* ---------------------------------------------------------------------------
+ * Program monitor: one layer per visible video track
+ * ------------------------------------------------------------------------ */
+.stage-layers { position: absolute; inset: 0; z-index: 0; pointer-events: none; }
+.fx-layer {
+  position: absolute; inset: 0; overflow: hidden;
+  transform-origin: 50% 50%; will-change: transform, opacity;
+  background: transparent;
+}
+.fx-box { position: absolute; overflow: hidden; }
+.fx-media { position: absolute; display: block; background: transparent; }
+/* #player is only the frame reference for layout / caption geometry now. */
+#player.player-reference { opacity: 0; }
+.fx-audio { display: none; }
+
+/* ---------------------------------------------------------------------------
+ * Timeline audio lanes
+ * ------------------------------------------------------------------------ */
+.track-name.audio { background: #0e1410; }
+.track-name.audio .tlabel { color: #6fbf7a; }
+.track-name.audio.lane-hidden { opacity: 0.4; }

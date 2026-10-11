@@ -68,6 +68,26 @@
         <button type="button" class="ws-hide" data-hide-unit="project" aria-label="Hide Project panel" title="Hide this panel (show it again from the Window menu)">×</button>
       </div>
       <div class="ws-body">
+        <div class="card" data-project-card="media">
+          <h3>Media <span id="mediaCount" class="dim small"></span></h3>
+          <div id="mediaBin" class="media-bin">
+            <div id="mediaList" class="media-list"></div>
+            <div id="mediaEmpty" class="dim small media-note">Nothing imported yet.</div>
+          </div>
+          <div class="media-tools">
+            <button id="mediaBrowse" class="ghost small" title="Import files from this computer. Files are referenced in place, not copied.">Import&hellip;</button>
+            <label class="ghost filebtn sm" title="Upload video, audio or images into the project folder">Upload<input id="mediaImportFiles" type="file" accept="video/*,audio/*,image/*" multiple></label>
+            <button id="mediaRemove" class="ghost small" title="Remove the selected tile from the bin">Remove</button>
+          </div>
+          <div class="media-tools">
+            <input id="mediaSearch" class="media-search" type="search" placeholder="search media&hellip;" spellcheck="false">
+            <label class="mini-label" title="How long a still image lasts when it is dropped on the timeline">still
+              <input id="mediaStillDur" type="number" value="5" min="0.1" step="0.5" style="width:56px"> s
+            </label>
+          </div>
+          <div id="mediaInfo" class="dim small"></div>
+          <div class="dim small media-note">Drag a tile onto a timeline track, or double-click to add it at the playhead. Drop a video on top of V1 and it lands on V2 as an overlay &mdash; that is how B&#8209;roll and picture-in-picture are built. Sound goes to the A lanes.</div>
+        </div>
         <div class="card" data-project-card="source">
           <h3>Source</h3>
       <div class="openbar source-openbar">
@@ -264,9 +284,21 @@
             <button id="txTrackDown" class="mini" title="Move the clip down a track">&minus;</button>
             <b id="txTrack">V1</b>
             <button id="txTrackUp" class="mini" title="Move the clip up a lane">+</button>
-            <span class="dim small">higher lane wins overlaps</span>
+            <span class="dim small">higher lane overlays the one below</span>
           </span>
         </div>
+        <div class="row"><label>Source</label><span class="grow dim small" id="txSource">&mdash;</span></div>
+        <div class="row"><label>Fit</label><span class="grow">
+          <select id="txFit" title="How the picture fills its box">
+            <option value="fill">fill (stretch to the box)</option>
+            <option value="contain">contain (letterbox, keep shape)</option>
+            <option value="cover">cover (crop to fill the box)</option>
+          </select>
+        </span></div>
+        <div class="row"><label>Frame</label><span class="grow">
+          <button id="txFillFrame" class="mini" title="Scale and position this clip so it exactly covers the frame">fill frame</button>
+          <button id="txCorner" class="mini" title="Scale to 35% and move it to the bottom-right corner - the classic B-roll picture-in-picture">corner PiP</button>
+        </span></div>
         <details open>
           <summary>Transform</summary>
           <div class="tool-grid">
@@ -293,6 +325,10 @@
             <label>Volume %<input id="taV" type="range" min="0" max="200" step="1" value="100"><input id="taVn" type="number" min="0" max="400" step="1" value="100"></label>
           </div>
           <div class="row"><label class="chk"><input type="checkbox" id="taMute"> Mute this clip</label></div>
+          <div class="row"><label>Sound</label><span class="grow">
+            <button id="txUnlinkAudio" class="mini" title="Move this clip's sound onto its own A lane so you can slide it under the picture">Unlink audio</button>
+            <span class="dim small" id="txAudioLane"></span>
+          </span></div>
           <div class="tool-grid crop">
             <label>Fade in (s)<input id="taFi" type="number" min="0" step="0.1" value="0"></label>
             <label>Fade out (s)<input id="taFo" type="number" min="0" step="0.1" value="0"></label>
@@ -463,7 +499,7 @@
           <div class="timeline-card">
       <div class="tl-head">
         <strong>Timeline</strong>
-        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move (&#8597; = change track) &middot; edges = trim &middot; alt-drag = copy &middot; dbl-click caption = edit &middot; alt+wheel = scroll overflowing tracks &middot; ctrl+wheel = scroll if needed, otherwise zoom</span>
+        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move (&#8597; = change track) &middot; edges = trim &middot; alt-drag = copy &middot; drop media from the bin &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
         <span class="spacer"></span>
         <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
         <button class="mini" id="zoomIn" title="Zoom in">+</button>
@@ -483,6 +519,7 @@
         </label>
         <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
         <button class="mini" id="tlLane" title="Add a caption lane to stack captions">+ lane</button>
+        <button class="mini" id="tlTrack" title="Add a video track (and its audio lane) to stack another layer">+ track</button>
         <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
         <span id="tlStatus" class="dim small"></span>
       </div>
@@ -506,11 +543,14 @@
       </div>
           </div>
       <div class="legend">
-        <span><i class="sw" style="background:#2b4f6b"></i>video clip</span>
+        <span><i class="sw" style="background:#2b4f6b"></i>video clip (main source)</span>
+        <span><i class="sw" style="background:#3d3b52"></i>clip from the media bin</span>
+        <span><i class="sw" style="background:#238636"></i>audio item (A lane)</span>
+        <span><i class="sw" style="background:#1f4b8f"></i>linked clip audio</span>
         <span><i class="sw silence"></i>silence</span>
         <span><i class="sw caption"></i>caption section</span>
         <span><i class="sw" style="background:#274b8f"></i>caption lanes (stack = several on one frame)</span>
-        <span class="dim small">gaps play and export as black</span>
+        <span class="dim small">V lanes composite &middot; A lanes mix &middot; gaps export black</span>
       </div>
           </div>
         </div>
@@ -558,8 +598,10 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=5"></script>
-<script src="/static/timeline.js?v=15"></script>
+<script src="/static/timeline-model.js?v=6"></script>
+<script src="/static/media.js?v=1"></script>
+<script src="/static/stage.js?v=1"></script>
+<script src="/static/timeline.js?v=16"></script>
 <script src="/static/clip.js?v=1"></script>
 <script src="/static/app.js?v=42"></script>
 <script src="/static/font-picker.js?v=1"></script>

@@ -45,7 +45,11 @@ DEFAULT_FX: dict = {
     "fade_out": 0.0,
     "vfade_in": 0.0,
     "vfade_out": 0.0,
+    "fit": "fill",
 }
+
+# How a clip's (cropped) picture fills its box on the frame.
+FIT_MODES = ("fill", "contain", "cover")
 
 # Keyframe-animatable transform keys.
 KF_KEYS = ("x", "y", "scale", "opacity")
@@ -91,6 +95,10 @@ def clean_fx(raw) -> dict:
     fx["mute"] = bool(src.get("mute", False))
     for key in ("fade_in", "fade_out", "vfade_in", "vfade_out"):
         fx[key] = round(max(0.0, _f(src.get(key), 0.0)), 3)
+    # How the (cropped) picture fills its box: fill stretches to the box,
+    # contain letterboxes inside it, cover crops to fill it.
+    fit = str(src.get("fit") or "fill").strip().lower()
+    fx["fit"] = fit if fit in FIT_MODES else "fill"
     return fx
 
 
@@ -263,6 +271,50 @@ def compose_to_frame(sw: int, sh: int, w: int, h: int,
         py = _clamp(round((h - sh) / 2 + dy), 0, h - sh)
         parts.append(f"pad={w}:{h}:{int(px)}:{int(py)}:color=black")
     return ",".join(parts), f"{sw}x{sh}->{w}x{h}"
+
+
+def fit_filter(fx: dict, cw: int, ch: int, w: int, h: int) -> tuple[list[str], int, int]:
+    """Scale the cropped cw x ch picture into its box on a WxH frame.
+
+    The box is the frame scaled by `scale` percent, so `scale` means the same
+    thing for every source shape. Returns (filters, box_w, box_h).
+    """
+    s = fx["scale"] / 100.0
+    tw, th = _even(w * s), _even(h * s)
+    fit = fx.get("fit") or "fill"
+    if fit == "contain":
+        # Letterbox inside the box; the bars are transparent so an overlay
+        # does not hide the track underneath.
+        return ([f"scale={tw}:{th}:flags=lanczos:force_original_aspect_ratio=decrease",
+                 f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black@0.0"], tw, th)
+    if fit == "cover":
+        return ([f"scale={tw}:{th}:flags=lanczos:force_original_aspect_ratio=increase",
+                 f"crop={tw}:{th}"], tw, th)
+    return ([f"scale={tw}:{th}:flags=lanczos"], tw, th)
+
+
+def overlay_placement(fx: dict, sw: int, sh: int, w: int, h: int) -> tuple[list[str], int, int]:
+    """Filters + the x/y position for compositing an swxsh picture onto WxH.
+
+    Unlike :func:`compose_to_frame` (which pads out to a full opaque frame),
+    this keeps the layer at its own size and returns the overlay offset, so
+    the picture beside it stays visible instead of being covered by padding.
+    Oversized layers are centre-cropped by the x/y offset, as before.
+    """
+    parts: list[str] = []
+    dx = fx["x"] / 100.0 * w
+    dy = fx["y"] / 100.0 * h
+    if sw > w:
+        cx = _clamp(round((sw - w) / 2 + dx), 0, sw - w)
+        parts.append(f"crop={w}:{sh}:{int(cx)}:0")
+        sw = w
+    if sh > h:
+        cy = _clamp(round((sh - h) / 2 + dy), 0, sh - h)
+        parts.append(f"crop={sw}:{h}:0:{int(cy)}")
+        sh = h
+    px = _clamp(round((w - sw) / 2.0 + dx), 0, max(0, w - sw))
+    py = _clamp(round((h - sh) / 2.0 + dy), 0, max(0, h - sh))
+    return parts, int(px), int(py)
 
 
 def fmt_num(value: float) -> str:
