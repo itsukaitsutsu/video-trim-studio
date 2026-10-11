@@ -207,7 +207,8 @@ def build_command(source: str, output: str, segments: list[tuple[float, float]],
     # rotation tags therefore still show the exported picture the right way up.
     if hwaccel and hwaccel != "none":
         cmd += ["-hwaccel", hwaccel]
-    cmd += ["-i", source, "-filter_complex_script", filter_script,
+    cmd += ["-i", source]
+    cmd += ["-filter_complex_script", filter_script,
             "-map", "[outv]"]
     if has_audio:
         cmd += ["-map", "[outa]"]
@@ -451,6 +452,8 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
 
     filter_graph = build_filter_complex(segments, int(opts.get("fade_ms", 30)),
                                         has_audio, burn_srt=opts.get("burn_srt"))
+    if opts.get("burn_srt") and opts.get("fonts_dir"):
+        filter_graph = filter_graph.replace("[outv]", ":fontsdir=" + escape_filter_path(opts["fonts_dir"]) + "[outv]")
     fd, script_path = tempfile.mkstemp(suffix=".txt", prefix="vts_filter_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(filter_graph)

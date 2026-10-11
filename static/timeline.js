@@ -279,6 +279,7 @@ function draw() {
     drawClip(ctx, c);
   }
 
+
   // caption lanes; their T labels are kept in the independent left rail.
   for (let i = 0; i < laneCount(); i += 1) {
     const y = laneY(i);
@@ -377,6 +378,7 @@ function redoTL() {
 // The edit list is saved a moment after the last change, and right away when
 // the page is hidden or reloaded, so a quick edit before a refresh is kept.
 let pendingSave = null;
+let saveInFlight = false;
 
 function scheduleSave() {
   if (!S.project) return;
@@ -387,20 +389,25 @@ function scheduleSave() {
 
 function flushSave(leaving) {
   clearTimeout(saveTimer);
-  if (pendingSave === null) return;
+  if (pendingSave === null || (saveInFlight && !leaving)) return;
   const body = pendingSave;
-  pendingSave = null;
+  saveInFlight = true;
   fetch("/api/timeline", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body,
-    keepalive: leaving && body.length < 60000,
+    keepalive: body.length < 60000,
   }).then(async (r) => {
     if (!r.ok) {
       const j = await r.json().catch(() => ({}));
       throw new Error(j.detail || r.statusText);
     }
-  }).catch((e) => status(`Timeline not saved: ${e.message}`));
+    if (pendingSave === body) pendingSave = null;
+  }).catch((e) => status(`Timeline not saved: ${e.message}`)).finally(() => {
+    saveInFlight = false;
+    // Serialize normal saves: an older response must never overwrite a newer edit.
+    if (pendingSave !== null && pendingSave !== body) flushSave(false);
+  });
 }
 
 window.addEventListener("pagehide", () => flushSave(true));
@@ -1382,6 +1389,7 @@ function startOverlayCaptionEdit() {
   ta.spellcheck = false;
   box.appendChild(ta);
   textEl.style.visibility = "hidden";
+  box.querySelector(":scope > .cap-shadow")?.remove();
   ta.focus();
   ta.select();
   let done = false;
@@ -1546,6 +1554,7 @@ function bindUI() {
 }
 
 async function onProjectOpen(data) {
+  S.projectReady = false;
   pausePlayback();
   S.project = data;
   S.duration = data.info.duration;
@@ -1586,10 +1595,11 @@ async function onProjectOpen(data) {
   $("exportBtn").disabled = true;
   refresh(true);
 
-  // Restore this project's saved edit list after a page refresh.
+  // Restore only while untouched: late responses must not erase a new edit.
+  const initialJSON = JSON.stringify(S.tl);
   try {
     const saved = await api("/api/timeline");
-    if (S.project === data && saved.timeline && saved.timeline.clips) {
+    if (S.project === data && JSON.stringify(S.tl) === initialJSON && saved.timeline && saved.timeline.clips) {
       S.tl = saved.timeline;
       S.lastJSON = JSON.stringify(S.tl);
       refresh(true);
@@ -1602,4 +1612,5 @@ async function onProjectOpen(data) {
   // Defer cosmetic timeline assets until the browser-friendly copy is ready.
   timelineAssetsPending = S.preview.mode === "proxy" && !S.preview.ready;
   if (!timelineAssetsPending) loadTimelineAssets();
+  if (S.project === data) S.projectReady = true;
 }

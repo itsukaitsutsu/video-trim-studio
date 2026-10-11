@@ -525,6 +525,10 @@ def burn_subtitles(video: str, cues: list[dict], out_path: str,
                    style: dict | None = None) -> None:
     """Render styled captions into a new video file. The source is untouched."""
     check_ffmpeg()
+    # Keep the public helper compatible with an SRT/VTT path as well as cue lists.
+    if isinstance(cues, (str, os.PathLike)):
+        from vts.detect import parse_subtitles
+        cues = parse_subtitles(Path(cues).read_text(encoding="utf-8-sig"))
     from vts.ffprobe import probe
     from vts.captionmap import write_ass
 

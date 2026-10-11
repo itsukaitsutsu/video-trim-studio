@@ -307,7 +307,9 @@
     const t0 = r3(at);
     const span = Math.max(...items.map((it) => it.end)) - Math.min(...items.map((it) => it.start));
     if (insert) {
-      if (items.some(isClip)) out.clips = shiftArr(splitArr(out.clips, t0), t0, span);
+      if (items.some(isClip)) {
+        out.clips = shiftArr(splitArr(out.clips, t0), t0, span);
+      }
       out.caps = shiftArr(splitArr(out.caps, t0), t0, span);
     }
     for (const it of items) {

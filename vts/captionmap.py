@@ -165,11 +165,8 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
     outline = _ass_colour(st.get("stroke", "#000000"))
     outline_alpha = _ass_alpha(st.get("stroke_opacity", 100))
     shadow_colour = _ass_colour(st.get("shadow", "#000000"))
-    shadow_alpha = _ass_alpha(st.get("shadow_opacity", 75))
     shadow_angle = math.radians(float(st.get("shadow_angle", 45) or 0))
     shadow_distance = max(0.0, float(st.get("shadow_distance", 2) or 0))
-    shadow_x = math.cos(shadow_angle) * shadow_distance
-    shadow_y = math.sin(shadow_angle) * shadow_distance
     shadow_blur = max(0.0, float(st.get("shadow_blur", 2) or 0))
     underline = "\\u1" if st.get("underline", False) else "\\u0"
     strike = "\\s1" if st.get("strike", False) else "\\s0"
@@ -177,32 +174,32 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
     common_tags = (f"\\fn{font}{fs}{bold}{italic}{underline}{strike}{tracking_tag}"
                    f"\\c{fill}\\alpha{fill_alpha}"
                    f"\\3c{outline}\\3a{outline_alpha}"
-                   f"\\bord{max(0.0, float(st.get('stroke_width', 2) or 0)):.2f}")
+                   f"\\bord{max(0.0, float(st.get('stroke_width', 2) or 0) * height / 1080):.2f}")
     px_scale = height / 1080.0
     shadow_distance *= px_scale
+    shadow_x = math.cos(shadow_angle) * shadow_distance
+    shadow_y = math.sin(shadow_angle) * shadow_distance
     shadow_size *= px_scale
     shadow_blur *= px_scale
     shadow_alpha_value = min(100.0, max(0.0, float(st.get("shadow_opacity", 100))))
 
+    if st.get("shadow_enabled") is False:
+        shadow_alpha_value = 0
+
     def emit_line(text: str, an: int, px: float, py: float) -> list[str]:
         out: list[str] = []
         if shadow_alpha_value > 0:
-            # ASS/libass has blur and offset, but no independent shadow-spread
-            # parameter. Approximate spread with a ring of offset glyph passes;
-            # blur remains a separate softness control.
-            spread_offsets = [(0.0, 0.0)]
-            if shadow_size > 0:
-                spread_offsets += [(math.cos(math.radians(a)) * shadow_size,
-                                    math.sin(math.radians(a)) * shadow_size)
-                                   for a in range(0, 360, 45)]
-            for ox, oy in spread_offsets:
-                shadow_tags = (f"\\fn{font}{fs}{bold}{italic}{tracking_tag}"
-                               f"\\c{shadow_colour}\\alpha{_ass_alpha(shadow_alpha_value)}"
-                               f"\\3a&HFF&\\bord0\\blur{shadow_blur:.2f}"
-                               f"\\an{an}\\pos({round(px + shadow_x + ox)},{round(py + shadow_y + oy)})")
-                out.append(f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{{{shadow_tags}}}{text}")
-        main_tags = f"{common_tags}\\an{an}\\pos({round(px)},{round(py)})"
-        out.append(f"Dialogue: 0,{start},{end},{style_name},,0,0,0,,{{{main_tags}}}{text}")
+            # A single filled/outlined glyph silhouette: size grows its contour.
+            # Same fill/outline colour and alpha, one offset, no ring of copies.
+            alpha = _ass_alpha(shadow_alpha_value)
+            shadow_tags = (f"\\fn{font}{fs}{bold}{italic}{underline}{strike}{tracking_tag}"
+                           f"\\1c{shadow_colour}\\3c{shadow_colour}"
+                           f"\\1a{alpha}\\3a{alpha}\\4a&HFF&\\shad0"
+                           f"\\bord{shadow_size:.2f}\\blur{shadow_blur:.2f}"
+                           f"\\an{an}\\pos({round(px + shadow_x)},{round(py + shadow_y)})")
+            out.append(f"Dialogue: 0,{start},{end},{style_name}Shadow,,0,0,0,,{{{shadow_tags}}}{text}")
+        main_tags = f"{common_tags}\\shad0\\blur0\\an{an}\\pos({round(px)},{round(py)})"
+        out.append(f"Dialogue: 1,{start},{end},{style_name},,0,0,0,,{{{main_tags}}}{text}")
         return out
 
     events: list[str] = []
@@ -246,7 +243,7 @@ def _ass_style_line(name: str, st: dict, height: int) -> str:
     italic = -1 if st.get("italic", False) else 0
     border_style = 3 if float(st.get("background_opacity", 0) or 0) > 0 else 1
     tracking = min(1.0, max(-0.2, float(st.get("tracking", 0) or 0)))
-    outline_width = max(0.0, float(st.get("stroke_width", 2) or 0))
+    outline_width = max(0.0, float(st.get("stroke_width", 2) or 0)) * height / 1080
     return (f"Style: {name},{font},{size},{fill},{fill},{stroke},{bg},"
             f"{bold},{italic},0,0,100,100,{size * tracking:.2f},0,{border_style},"
             f"{outline_width:.2f},0,5,10,10,10,1")
@@ -297,6 +294,9 @@ def write_ass(cues: list[dict], path, width: int, height: int,
         cue_style = dict(base, **(cue.get("style") or {}))
         style_name = f"Cue{i}"
         style_lines.append(_ass_style_line(style_name, cue_style, height))
+        # Shadow must never inherit an opaque caption-background rectangle.
+        style_lines.append(_ass_style_line(style_name + "Shadow",
+            {**cue_style, "background_opacity": 0}, height))
         events += _cue_events(cue, cue_style, width, height, style_name)
     # Place each per-cue ASS style before [Events].
     events_at = header.index("[Events]")

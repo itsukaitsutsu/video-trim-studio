@@ -65,7 +65,7 @@ function fmtBytes(n) {
 const WORKSPACE_STORAGE_KEY = "video-trim-studio.workspace.v1";
 const DEFAULT_WORKSPACE_LAYOUT = {
   main: ["video", "timeline", "list"],
-  side: ["detect", "caption", "export-settings", "export"],
+  side: ["detect", "caption", "caption-style", "export-settings", "export"],
 };
 
 function workspacePanelMap(root) {
@@ -1110,6 +1110,8 @@ function capActiveCue() {
 
 function ensureCueCaptionStyle(cue) {
   if (!cue.style || typeof cue.style !== "object") cue.style = { ...CAPPOS };
+  // Stored cues may contain only a partial style (older projects/imports).
+  cue.style = { ...CAPPOS, ...cue.style };
   return cue.style;
 }
 
@@ -1158,7 +1160,7 @@ function styleCapBoxEl(el, st, r) {
   el.style.fontFamily = `\"${String(st.font || "Arial").replace(/[\"\\\\]/g, "") || "Arial"}\", Arial, sans-serif`;
   el.style.fontWeight = st.bold === false ? "400" : "700";
   el.style.fontStyle = st.italic ? "italic" : "normal";
-  el.style.textDecoration = `${st.underline ? "underline " : ""}${st.strike ? "line-through" : ""}`.trim() || "none";
+  el.style.textDecoration = "none";  // each text layer owns its decorations
   el.style.letterSpacing = `${Number(st.tracking) || 0}em`;
   if (Number(st.box_h) > 0) {
     el.style.height = `${Number(st.box_h) * r.h}px`; el.style.display = "flex"; el.style.alignItems = "center";
@@ -1168,22 +1170,44 @@ function styleCapBoxEl(el, st, r) {
     const h = /^#[0-9a-f]{6}$/i.test(hex || "") ? hex : "#000000";
     return `rgba(${parseInt(h.slice(1,3),16)},${parseInt(h.slice(3,5),16)},${parseInt(h.slice(5,7),16)},${Math.min(100,Math.max(0,Number(opacity)||0))/100})`;
   };
-  const sourceH = $("player")?.videoHeight || 1080;
-  const scale = r.h / sourceH;
+  // Appearance distances are design pixels at 1080p, like ASS export.
+  const scale = r.h / 1080;
   el.style.color = rgba(st.fill || "#ffffff", st.fill_opacity ?? 100);
   el.style.webkitTextStroke = `${Math.max(0, Number(st.stroke_width) || 0) * scale}px ${rgba(st.stroke || "#000000", st.stroke_opacity ?? 100)}`;
   el.style.setProperty("--cap-bg", rgba(st.background || "#000000", st.background_opacity ?? 0));
-  const angle = (Number(st.shadow_angle) || 0) * Math.PI / 180;
-  const dist = Math.max(0, Number(st.shadow_distance) || 0) * scale;
+  // Shadow is a separate, single filled glyph silhouette (not offset copies).
+  el.style.textShadow = "none";
+}
+
+function syncCaptionShadow(box, text, st, frame) {
+  box.querySelector(":scope > .cap-shadow")?.remove();
+  text.style.textDecoration = `${st.underline ? "underline " : ""}${st.strike ? "line-through" : ""}`.trim() || "none";
+  const opacity = st.shadow_enabled === false ? 0 : Math.min(100, Math.max(0, Number(st.shadow_opacity ?? 100)));
+  if (!opacity || (box.id === "capBox" && CAP_EDITING)) return;
+  const scale = frame.h / 1080;
   const spread = Math.max(0, Number(st.shadow_size) || 0) * scale;
   const blur = Math.max(0, Number(st.shadow_blur) || 0) * scale;
-  const shadow = rgba(st.shadow || "#000000", st.shadow_opacity ?? 0);
-  const shadows = [`${Math.cos(angle)*dist}px ${Math.sin(angle)*dist}px ${blur}px ${shadow}`];
-  if (spread > 0) for (let deg = 0; deg < 360; deg += 45) {
-    const a = deg * Math.PI / 180;
-    shadows.push(`${Math.cos(angle)*dist + Math.cos(a)*spread}px ${Math.sin(angle)*dist + Math.sin(a)*spread}px ${blur}px ${shadow}`);
-  }
-  el.style.textShadow = shadows.join(", ");
+  const distance = Math.max(0, Number(st.shadow_distance) || 0) * scale;
+  const angle = (Number(st.shadow_angle) || 0) * Math.PI / 180;
+  const colour = /^#[0-9a-f]{6}$/i.test(st.shadow || "") ? st.shadow : "#000000";
+  const shadow = text.cloneNode(true);
+  shadow.removeAttribute("id");
+  shadow.removeAttribute("data-raw");
+  shadow.className = "cap-shadow";
+  shadow.setAttribute("aria-hidden", "true");
+  // Stroke is centred on the glyph edge: 2 * spread grows the silhouette by
+  // exactly spread pixels. Identical opaque fill/stroke make ONE solid mask.
+  // Blur the merged mask, then apply opacity once to the entire layer.
+  Object.assign(shadow.style, {
+    position: "absolute", left: `${text.offsetLeft}px`, top: `${text.offsetTop}px`,
+    width: `${text.offsetWidth}px`, color: colour,
+    webkitTextStroke: `${2 * spread}px ${colour}`, paintOrder: "stroke fill",
+    textShadow: "none", filter: blur > 0 ? `blur(${blur}px)` : "none",
+    opacity: String(opacity / 100),
+    transform: `translate(${Math.cos(angle) * distance}px, ${Math.sin(angle) * distance}px)`,
+  });
+  shadow.style.setProperty("--cap-bg", "transparent");
+  box.prepend(shadow);
 }
 
 function layoutCapOverlay() {
@@ -1191,7 +1215,7 @@ function layoutCapOverlay() {
   if (!overlay) return;
   const armed = (["burn", "both"].includes($("xCaptions").value) || $("cBurn")?.checked) && !!S.project;
   overlay.hidden = !armed;
-  if (!armed) return;
+  // Keep the Text panel controls synchronized even when burn preview is disabled.
   const t = playheadTime();
   if (!S.capCues.length && $("capBoxText").dataset.raw === undefined)
     $("capBoxText").dataset.raw = captionTextAt(t);
@@ -1217,17 +1241,21 @@ function layoutCapOverlay() {
       const cueFontPx = Math.max(10, r.h * cueStyle.size_pct / 100);
       const cueMaxChars = Math.floor((cueStyle.box_w * r.w) /
         Math.max(1, cueFontPx * (CHAR_FACTOR + (Number(cueStyle.tracking) || 0))));
+      const text = document.createElement("div"); text.className = "cap-text";
+      d.appendChild(text);
       for (const lineText of wrapText(c.text || "", cueMaxChars)) {
         const row = document.createElement("div"); row.className = "cap-line";
         row.style.textAlign = cueStyle.align === "justify" ? "left" : cueStyle.align;
         const label = document.createElement("span"); label.className = "cap-line-label";
-        label.textContent = lineText; row.appendChild(label); d.appendChild(row);
+        label.textContent = lineText; row.appendChild(label); text.appendChild(row);
       }
       overlay.appendChild(d);
+      syncCaptionShadow(d, text, cueStyle, r);
     }
   }
 
   const box = $("capBox");
+  box.hidden = !!S.capCues.length && !active;
   styleCapBoxEl(box, st, r);
   if (active) $("capBoxText").dataset.raw = active.text || "";
   const fontPx = Math.max(10, r.h * st.size_pct / 100);
@@ -1235,6 +1263,7 @@ function layoutCapOverlay() {
   renderCaptionLines(
     wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars),
     st.align);
+  syncCaptionShadow(box, $("capBoxText"), st, r);
   $("capPosInfo").textContent =
     `x ${Math.round(st.x * 100)}% \u00b7 y ${Math.round(st.y * 100)}%` +
     ` \u00b7 w ${Math.round(st.box_w * 100)}% \u00b7 ${st.align}` +
@@ -1242,6 +1271,9 @@ function layoutCapOverlay() {
             : (S.capCues.length ? " \u00b7 default (no caption on screen)" : ""));
   if (document.activeElement !== $("capFontSize"))
     $("capFontSize").value = String(st.size_pct);
+  if (![...$("capFontFamily").options].some(o => o.value === st.font)) {
+    $("capFontFamily").add(new Option(st.font || "Arial", st.font || "Arial"));
+  }
   const styleControlValues = {
     capFontFamily: st.font || "Arial", capTracking: st.tracking ?? 0,
     capLineSpacing: st.leading ?? 1.25, capBold: st.bold !== false,
@@ -1253,7 +1285,7 @@ function layoutCapOverlay() {
     capStrokePosition: st.stroke_position || "outer", capBackground: st.background || "#000000",
     capBackgroundEnabled: Number(st.background_opacity || 0) > 0,
     capBackgroundOpacity: st.background_opacity ?? 72, capShadow: st.shadow || "#000000",
-    capShadowEnabled: Number(st.shadow_opacity || 0) > 0, capShadowOpacity: st.shadow_opacity ?? 75,
+    capShadowEnabled: st.shadow_enabled ?? (Number(st.shadow_opacity ?? 100) > 0), capShadowOpacity: st.shadow_opacity ?? 75,
     capShadowAngle: st.shadow_angle ?? 135, capShadowDistance: st.shadow_distance ?? 3,
     capShadowSize: st.shadow_size ?? 6, capShadowBlur: st.shadow_blur ?? 12,
     capX: Math.round((st.x ?? .5) * 100), capY: Math.round((st.y ?? .92) * 100),
@@ -1428,7 +1460,7 @@ function bindCaptionOverlay() {
   $("capPosReset").onclick = () => {
     const targetCue = capActiveCue();
     const commit = captionStyleEditTouchesTimeline(targetCue);
-    applyCaptionStylePatch({ ...CAPPOS_DEFAULT }, targetCue);
+    applyCaptionStylePatch({ ...CAPPOS_DEFAULT, shadow_enabled: true }, targetCue);
     $("capFontSize").value = String(CAPPOS_DEFAULT.size_pct);
     syncAlignButtons();
     layoutCapOverlay();
@@ -1460,12 +1492,18 @@ function bindCaptionOverlay() {
     const input = $(id); if (!input) continue;
     const update = () => {
       const cue = capActiveCue();
-      const value = type === "number" ? Number(input.value) : type === "percent" ? Number(input.value) / 100 : input.value;
+      if (type !== "text" && (input.value === "" || !Number.isFinite(Number(input.value)))) return;
+      let numeric = Number(input.value);
+      if (type !== "text") {
+        if (input.min !== "") numeric = Math.max(Number(input.min), numeric);
+        if (input.max !== "") numeric = Math.min(Number(input.max), numeric);
+      }
+      const value = type === "number" ? numeric : type === "percent" ? numeric / 100 : input.value;
       applyCaptionStylePatch({ [key]: value }, cue);
       layoutCapOverlay();
     };
     input.addEventListener("input", update);
-    input.addEventListener("change", () => { if (captionStyleEditTouchesTimeline()) commitCaptions(); });
+    input.addEventListener("change", () => { update(); if (captionStyleEditTouchesTimeline()) commitCaptions(); });
   }
   const toggleOpacity = (id, key) => $(id)?.addEventListener("change", () => {
     const cue = capActiveCue(), st = cue ? ensureCueCaptionStyle(cue) : CAPPOS;
@@ -1477,7 +1515,12 @@ function bindCaptionOverlay() {
   toggleOpacity("capFillEnabled", "fill_opacity");
   toggleOpacity("capStrokeEnabled", "stroke_opacity");
   toggleOpacity("capBackgroundEnabled", "background_opacity");
-  toggleOpacity("capShadowEnabled", "shadow_opacity");
+  $("capShadowEnabled")?.addEventListener("change", () => {
+    const cue = capActiveCue();
+    applyCaptionStylePatch({ shadow_enabled: $("capShadowEnabled").checked }, cue);
+    layoutCapOverlay();
+    if (captionStyleEditTouchesTimeline(cue)) commitCaptions();
+  });
   $("capFontStyle")?.addEventListener("change", () => {
     const v = $("capFontStyle").value, cue = capActiveCue();
     const commit = captionStyleEditTouchesTimeline(cue);
@@ -2179,42 +2222,22 @@ function pollJob(id) {
 /* ------------------------------------------------------------------- boot */
 
 (async function boot() {
-  bindWorkspaceDocking();
-  bindVideoZoom();
-  bindUI();
-  syncQualityRows();
-  await loadEnv();
+  // Don't let a user-open race with automatic restore and reset their edits.
+  const openControls = ["openBtn", "demoBtn", "speechDemoBtn", "uploadInput", "browseBtn", "pathInput"].map($);
+  openControls.forEach(el => { el.disabled = true; });
   try {
-    // The active project survives a browser refresh while the server is running.
-    await onProjectOpen(await api("/api/project"));
-  } catch (_) {
-    // A restart clears the in-memory project. Restore its saved source path.
-    await restoreLastProject();
-  }
-  draw();
-})();
-
-$("filmcraftBtn")?.addEventListener("click", async () => {
-  if (!S.project) return alert("Open a video first.");
-  
-  const videoPath = S.project.info.path;
-  const srtPath = S.project.sidecar_subtitles || "";
-
-  $("filmcraftBtn").disabled = true;
-  $("filmcraftBtn").textContent = "Launching FilmCraft...";
-
-  try {
-    const res = await fetch("/api/send-to-filmcraft", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_path: videoPath, srt_path: srtPath })
-    });
-    const data = await res.json();
-    alert(data.message || data.error);
-  } catch (err) {
-    alert("Failed to connect to backend: " + err.message);
+    bindWorkspaceDocking();
+    bindVideoZoom();
+    bindUI();
+    syncQualityRows();
+    await loadEnv();
+    let activeProject;
+    try { activeProject = await api("/api/project"); }
+    catch (_) { /* No active server project after a restart. */ }
+    if (activeProject) await onProjectOpen(activeProject);
+    else await restoreLastProject();
+    draw();
   } finally {
-    $("filmcraftBtn").disabled = false;
-    $("filmcraftBtn").textContent = "🎬 Send to FilmCraft (.exe)";
+    openControls.forEach(el => { el.disabled = false; });
   }
-});
+})();

@@ -64,7 +64,9 @@ def find_cli() -> str | None:
     tools = APP_ROOT / "tools"
     for name in CLI_NAMES:
         cand = tools / name
-        if cand.is_file():
+        if os.name != "nt" and cand.suffix.lower() == ".exe":
+            continue  # bundled Windows binaries cannot run on Linux/macOS
+        if cand.is_file() and os.access(cand, os.F_OK if os.name == "nt" else os.X_OK):
             return str(cand)
     for name in ("whisper-cli", "main"):
         found = shutil.which(name)

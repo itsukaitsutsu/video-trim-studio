@@ -4,8 +4,16 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 
 > **Your choice in this version:** captions can come from an existing `.srt` / `.vtt`, **or** be generated in-app from the video's audio with faster-whisper (the **Auto-caption** card, plus a matching `auto_caption.py` CLI). Silence detection is built in.
 
+## Text tools
+
+See [TEXT-AND-FONTS.md](TEXT-AND-FONTS.md) for text-shadow controls,
+font import and installed-font access, supported formats, and persistence limits.
+After updating, run `python -m pip install -r requirements.txt` (adds FontTools).
+
 ## What it does
 
+- **Text fonts:** discover installed TTF/OTF fonts, import fonts into the app, or grant browser-device font access. Imported fonts are available for both preview and FFmpeg burn-in.
+- **Shadows:** independent enable toggle, opacity, angle, distance, continuous glyph-outline spread and blur with consistent 1080p design-pixel scaling in preview/export.
 - Local web UI with a video preview, a multi-row timeline (the video on V1 plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
 - Rearrange the video, timeline, list, and right-side tool panels by dragging their grip handles between the two docked columns. On wide layouts, the inner edges (right edge of a main-column panel or left edge of a side-column panel) resize the shared column divider: shrinking the main column moves the side panels left and widens them, keeping each column's panels stacked and aligned. Outer edges resize individual panels; other panels have four handles, while Timeline has right/top/bottom. On narrow layouts, the columns stack and edge handles resize individual panels. The Video preview's centered inner bottom grip resizes only its viewing window; the normal outer panel handle remains separate. The Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. The layout and viewport heights are saved in this browser; **Reset layout** restores the defaults.
 - Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.

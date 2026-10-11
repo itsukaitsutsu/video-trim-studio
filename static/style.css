@@ -306,8 +306,7 @@ details.adv summary:hover { color: var(--text); }
   color: #fff; font-weight: 600; line-height: 1.25;
   padding: 2px 6px; border-radius: 4px;
   border: 1px dashed rgba(255, 255, 255, .35); box-sizing: border-box;
-  text-shadow: 2px 0 2px #000, -2px 0 2px #000, 0 2px 2px #000, 0 -2px 2px #000,
-               2px 2px 3px #000, -2px -2px 3px #000;
+  text-shadow: none;
 }
 #capBoxText { white-space: pre-line; }
 .cap-line { display: block; width: 100%; }
@@ -358,9 +357,8 @@ details.adv summary:hover { color: var(--text); }
   position: absolute; transform: translate(-50%, -50%);
   pointer-events: none; color: #fff; font-weight: 600; line-height: 1.25;
   padding: 2px 6px; box-sizing: border-box; white-space: pre-line;
-  text-shadow: 2px 0 2px #000, -2px 0 2px #000, 0 2px 2px #000, 0 -2px 2px #000,
-               2px 2px 3px #000, -2px -2px 3px #000;
-  opacity: .92;
+  text-shadow: none;
+  opacity: 1;
 }
 .text-style-panel { padding: 10px 12px; }
 .text-style-panel details { border-bottom: 1px solid var(--line); padding: 8px 0; }
@@ -453,3 +451,13 @@ details.adv summary:hover { color: var(--text); }
 .tl-head { flex-wrap: wrap; row-gap: 6px; }
 .tl-head #tlHint { flex: 1 1 100%; white-space: normal; }
 .tl-head .mini, .tl-head .chk, .tl-head #tlStatus { white-space: nowrap; }
+
+#capBox[hidden] { display: none; }
+.font-actions { flex-wrap:wrap; gap:6px; }
+#fontInfo { overflow-wrap:anywhere; }
+
+/* Each caption owns one shadow mask and one sharp foreground text layer. */
+#capBox, #capOverlay .cap-static { isolation: isolate; }
+.cap-text { position: relative; z-index: 1; width: 100%; white-space: pre-line; }
+.cap-shadow { z-index: 0; pointer-events: none; user-select: none; white-space: pre-line; }
+.cap-shadow .cap-line-label { background: transparent; }

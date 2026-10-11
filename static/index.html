@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=33">
+<link rel="stylesheet" href="/static/style.css?v=35">
 </head>
 <body>
 <header>
@@ -18,24 +18,6 @@
   <button id="workspaceReset" class="ghost mini" title="Restore the default panel layout">Reset layout</button>
   <div class="env" id="env">checking ffmpeg&hellip;</div>
 </header>
-<button id="btnFilmCraft" class="btn btn-purple" onclick="sendToFilmCraft()">
-  🎬 Send to FilmCraft (.exe)
-</button>
-
-<script>
-function sendToFilmCraft() {
-  fetch('/api/send-to-filmcraft', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      video_path: currentVideoPath,
-      srt_path: currentSrtPath
-    })
-  }).then(res => res.json()).then(data => {
-    alert(data.message || data.error);
-  });
-}
-</script>
 <section class="openbar">
   <input id="pathInput" type="text" placeholder="Path to video, e.g. C:\Videos\clip.mp4  (or browse)" spellcheck="false">
   <button id="browseBtn" class="ghost">Browse&hellip;</button>
@@ -59,7 +41,7 @@ function sendToFilmCraft() {
               <div id="guideV" class="cap-guide v" hidden></div>
               <div id="guideH" class="cap-guide h" hidden></div>
               <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
-                <div id="capBoxText">Caption preview</div>
+                <div id="capBoxText" class="cap-text">Caption preview</div>
                 <div class="cap-handle w" title="Drag to resize the box"></div>
                 <div class="cap-handle e" title="Drag to resize the box"></div>
               </div>
@@ -281,6 +263,12 @@ function sendToFilmCraft() {
           <div class="style-row"><select id="capFontFamily" aria-label="Font family">
             <option>Arial</option><option>Arial Black</option><option>Segoe UI</option><option>Verdana</option><option>Tahoma</option><option>Georgia</option><option>Times New Roman</option><option>Courier New</option><option>Lucida Console</option>
           </select><select id="capFontStyle" aria-label="Font style"><option value="regular">Regular</option><option value="bold">Bold</option><option value="italic">Italic</option><option value="bold-italic">Bold Italic</option></select></div>
+          <div class="style-row font-actions">
+            <label class="ghost filebtn">Import fonts<input id="fontImport" type="file" accept=".ttf,.otf" multiple></label>
+            <button type="button" id="fontRefresh" class="ghost mini">Refresh installed</button>
+            <button type="button" id="fontDevice" class="ghost mini">Device fonts…</button>
+          </div>
+          <p id="fontInfo" class="dim small" role="status">Loading installed fonts…</p>
           <div class="style-row style-format-icons">
             <button class="style-icon" id="capBold" title="Bold"><b>B</b></button><button class="style-icon" id="capItalic" title="Italic"><i>I</i></button><button class="style-icon" id="capUnderline" title="Underline"><u>U</u></button><button class="style-icon" id="capStrike" title="Strikethrough"><s>S</s></button><span class="style-spacer"></span>
             <label>Size <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="4.5"><output id="capFontSizeValue">48</output></label>
@@ -313,7 +301,7 @@ function sendToFilmCraft() {
             <label>Opacity<input id="capShadowOpacity" type="range" min="0" max="100" value="75"><output id="capShadowOpacityValue">75</output></label>
             <label>Angle<input id="capShadowAngle" type="range" min="0" max="359" value="135"><output id="capShadowAngleValue">135°</output></label>
             <label>Distance<input id="capShadowDistance" type="range" min="0" max="30" step="0.5" value="3"><output id="capShadowDistanceValue">3</output></label>
-            <label>Size<input id="capShadowSize" type="range" min="0" max="20" step="0.5" value="6"><output id="capShadowSizeValue">6</output></label>
+            <label>Size (spread)<input id="capShadowSize" title="Expands the shadow silhouette; does not duplicate or scale the text" type="range" min="0" max="20" step="0.5" value="6"><output id="capShadowSizeValue">6</output></label>
             <label>Blur<input id="capShadowBlur" type="range" min="0" max="20" step="0.5" value="12"><output id="capShadowBlurValue">12</output></label>
           </div>
         </div>
@@ -385,9 +373,7 @@ function sendToFilmCraft() {
       </div>
       <div id="planWarn" class="warn"></div>
       <button id="exportBtn" class="primary block big" disabled>Export clean cut</button>
-            <button id="filmcraftBtn" class="ghost block" style="margin-top: 8px; width: 100%;">
-  🎬 Send to FilmCraft (.exe)
-</button>
+
       <div class="progress" id="progWrap" hidden>
         <div class="bar"><div id="progBar"></div></div>
         <div class="progtext"><span id="progPct">0%</span><span id="progMeta" class="dim"></span></div>
@@ -409,8 +395,9 @@ function sendToFilmCraft() {
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=2"></script>
-<script src="/static/timeline.js?v=11"></script>
-<script src="/static/app.js?v=35"></script>
+<script src="/static/timeline-model.js?v=4"></script>
+<script src="/static/timeline.js?v=13"></script>
+<script src="/static/app.js?v=37"></script>
+<script src="/static/fonts.js?v=1"></script>
 </body>
 </html>

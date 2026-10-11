@@ -31,10 +31,13 @@ def duration_of(path) -> float:
 
 def open_demo(page):
     """Open the demo and wait until the NEW project is loaded (not the old state)."""
+    page.wait_for_function('!document.getElementById("demoBtn").disabled')
+    page.evaluate("window.previousProject = S.project")
     page.click("#demoBtn")
     page.wait_for_function(
-        "S.project && S.duration > 10 && S.tl.clips.length === 1 && S.tl.clips[0].kind === null"
+        "S.project !== window.previousProject && S.projectReady && S.duration > 10 && S.tl.clips.length === 1 && S.tl.clips[0].kind === null"
         " && S.tl.caps.length === 0 && S.undo.length === 0")
+    page.wait_for_function('document.getElementById("player").readyState >= 2')
 
 
 def _free_port() -> int:
@@ -61,7 +64,7 @@ def base_url():
     proc.wait(timeout=15)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def browser_page(base_url):
     try:
         playwright = sync_api.sync_playwright().start()
@@ -692,3 +695,83 @@ def test_timeline_view_bottom_handle_adds_empty_space_and_scrolls_tracks(browser
     page.click("#workspaceReset")
     assert abs(stage.bounding_box()["height"] - stage_height_before) < 1
     assert not page_errors, page_errors
+
+
+def test_font_import_shadow_history_and_reload(browser_page):
+    page, page_errors = browser_page
+    open_demo(page)
+    page.evaluate("setPlayhead(2)")
+    page.evaluate("""() => {
+        setTL({...S.tl, caps:[{id:'text',lane:0,start:1,end:4,text:'Test caption',style:{...CAPPOS}}]});
+        S.capSel='text'; $('xCaptions').value='burn'; layoutCapOverlay();
+    }""")
+    page.locator("#capShadowEnabled").uncheck()
+    assert page.evaluate("S.tl.caps[0].style.shadow_enabled") is False
+    assert page.locator("#capBox").evaluate("el => el.style.textShadow") == "none"
+    page.locator("#capShadowEnabled").check()
+    assert page.evaluate("S.tl.caps[0].style.shadow_enabled") is True
+    page.locator("#capFontFamily").select_option("Georgia")
+    assert page.evaluate("S.tl.caps[0].style.font") == "Georgia"
+    from vts.fonts import FontLibrary
+    library = FontLibrary(ROOT / 'work/font-test-discovery')
+    library.scan()
+    if library.records:
+        font = next(iter(library.records.values()))
+        page.locator("#fontImport").set_input_files(font['path'])
+        page.wait_for_function("family => S.tl.caps[0].style.font === family", arg=font['family'])
+        page.evaluate("undoTL()")
+        assert page.evaluate("S.tl.caps[0].style.font") == "Georgia"
+        page.evaluate("redoTL()")
+    # Wait for the save to complete, then check style history survives reload.
+    page.wait_for_function("pendingSave === null")
+    page.reload()
+    page.wait_for_function("S.projectReady && S.tl.caps.length === 1")
+    page.evaluate("setPlayhead(2)")
+    page.evaluate("setPlayhead(5)")
+    assert page.locator("#capBox").is_hidden()
+    assert not page_errors
+
+
+def test_shadow_preview_uses_one_continuous_silhouette(browser_page):
+    from io import BytesIO
+    import numpy as np
+    Image = pytest.importorskip('PIL.Image')
+    page, errors = browser_page
+    open_demo(page)
+    page.evaluate('''() => {
+        const fixture = document.createElement('div'); fixture.id = 'shadowFixture';
+        fixture.style.cssText = 'position:fixed;inset:0 auto auto 0;width:640px;height:360px;background:#000;z-index:99999';
+        const box = document.createElement('div'); box.id = 'shadowTestBox';
+        box.style.cssText = 'position:absolute;transform:translate(-50%,-50%)';
+        const text = document.createElement('div'); text.className = 'cap-text'; text.textContent = 'I';
+        box.append(text); fixture.append(box); document.body.append(fixture);
+        window.paintTestShadow = (size, opacity=100) => {
+            const style = {...CAPPOS, font:'DejaVu Sans', x:.5,y:.5,size_pct:16,
+                fill_opacity:0,stroke_opacity:0,background_opacity:0,
+                shadow:'#ffffff',shadow_size:size,shadow_blur:0,
+                shadow_distance:0,shadow_opacity:opacity,shadow_angle:0};
+            styleCapBoxEl(box,style,{w:640,h:360});
+            syncCaptionShadow(box,text,style,{w:640,h:360});
+        };
+        paintTestShadow(0);
+    }''')
+    page.evaluate('document.fonts.ready')
+    boxes = []
+    for size in (0, 20):
+        page.evaluate('size => paintTestShadow(size)', size)
+        assert page.locator('#shadowTestBox > .cap-shadow').count() == 1
+        image = np.array(Image.open(BytesIO(page.locator('#shadowFixture').screenshot())))[:, :, 0]
+        y, x = np.where(image > 20)
+        boxes.append((int(x.min()), int(y.min()), int(x.max()), int(y.max())))
+        for row in image[y.min()+2:y.max()-1]:
+            xs = np.flatnonzero(row > 20)
+            if len(xs):
+                assert np.all(row[xs[0]:xs[-1]+1] > 20)
+    a,b = boxes
+    assert b[0] < a[0]-4 and b[2] > a[2]+4
+    assert abs((a[0]+a[2])-(b[0]+b[2])) <= 2
+    page.evaluate('paintTestShadow(20, 50)')
+    image = np.array(Image.open(BytesIO(page.locator('#shadowFixture').screenshot())))[:, :, 0]
+    assert 120 <= int(image.max()) <= 135
+    page.evaluate('document.getElementById("shadowFixture").remove()')
+    assert not errors

@@ -136,7 +136,12 @@ def export_timeline(source: str, info: dict, clips: list[dict],
     w, h = display_size(vinfo)
     graph = build_filter(clips, total, fps, (w, h), pix, sample_rate, layout,
                          int(opts.get("fade_ms", 30)), has_audio,
-                         burn_srt=opts.get("burn_srt"))
+                         burn_srt=None)
+    burn = opts.get("burn_srt")
+    if burn:
+        graph = graph.replace("[outv]", "[basev]")
+        fonts = (":fontsdir=" + ex.escape_filter_path(opts["fonts_dir"])) if opts.get("fonts_dir") else ""
+        graph += f";[basev]subtitles={ex.escape_filter_path(burn)}{fonts}[outv]"
 
     fd, script_path = tempfile.mkstemp(suffix=".txt", prefix="vts_filter_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:

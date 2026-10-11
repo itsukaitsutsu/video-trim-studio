@@ -31,6 +31,7 @@ from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from vts.fonts import FontLibrary, MAX_FONT_BYTES
 from vts import captionmap as captionmap_mod
 from vts import captions as captions_mod    # noqa: E402
 from vts import detect as detect_mod          # noqa: E402
@@ -50,31 +51,11 @@ STATIC_DIR = BASE_DIR / "static"
 WORK_DIR = BASE_DIR / "work"
 WORK_DIR.mkdir(exist_ok=True)
 LAST_PROJECT_FILE = WORK_DIR / "last_project.txt"
+FONT_LIBRARY = FontLibrary(WORK_DIR / "fonts")
 
 app = FastAPI(title="Video Trim Studio", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.post("/api/send-to-filmcraft")
-async def send_to_filmcraft_api(request: Request):
-  data = await request.json()
-  video_path = data.get("video_path")
-  srt_path = data.get("srt_path")
-
-  if not video_path or not os.path.exists(video_path):
-    return JSONResponse(
-        status_code=400, content={"ok": False, "error": "Video file not found"}
-    )
-
-  try:
-    bridge_script = str(BASE_DIR / "send_to_filmcraft.py")
-    subprocess.Popen(
-        [sys.executable, bridge_script, video_path, srt_path or ""]
-    )
-    return {"ok": True, "message": "FilmCraft launched successfully!"}
-  except Exception as e:
-    return JSONResponse(
-        status_code=500, content={"ok": False, "error": str(e)}
-    )
 # ---------------------------------------------------------------------------
 # Single active project (this is a local, single-user tool)
 # ---------------------------------------------------------------------------
@@ -512,6 +493,31 @@ async def parse_subtitles(file: UploadFile = File(...)):
 # Routes: timeline assets
 # ---------------------------------------------------------------------------
 
+# App-local fonts: importing does not modify operating-system fonts.
+@app.get("/api/fonts")
+def list_fonts(refresh: bool = False):
+    return {"fonts": FONT_LIBRARY.scan(refresh)}
+
+
+@app.post("/api/fonts")
+async def import_font(file: UploadFile = File(...)):
+    try:
+        data = await file.read(MAX_FONT_BYTES + 1)
+        return FONT_LIBRARY.import_font(data, file.filename or "font.ttf")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    finally:
+        await file.close()
+
+
+@app.get("/api/fonts/{font_id}")
+def font_file(font_id: str):
+    record = FONT_LIBRARY.records.get(font_id)
+    if not record or not Path(record["path"]).is_file():
+        raise HTTPException(404, "Font not found.")
+    return FileResponse(record["path"], media_type="font/otf" if record["path"].lower().endswith(".otf") else "font/ttf")
+
+
 @app.post("/api/waveform")
 def waveform(buckets: int = 2400):
     proj = need_project()
@@ -718,21 +724,18 @@ def export(req: ExportRequest):
         ass_path = None
         if caption_mode in ("burn", "both"):
             style = req.caption_style or {}
-            if style and (style.get("x") is not None or style.get("y") is not None
-                          or style.get("size_pct") is not None):
-                # The user positioned the caption box in the preview: bake that
-                # exact layout by burning a positioned ASS instead of the plain
-                # .srt (which libass would pin to the bottom edge).
-                vinfo = proj.info.get("video") or {}
-                dw, dh = media_mod.display_size(vinfo)
-                fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
-                os.close(fd)
-                captionmap_mod.write_ass(
-                    remapped, ass_path, dw, dh,
-                    style={k: style[k] for k in
-                           ("x", "y", "size_pct", "align", "box_w")
-                           if k in style})
-                burn_source = ass_path
+            # The user positioned the caption box in the preview: bake that
+            # exact layout by burning a positioned ASS instead of the plain
+            # .srt (which libass would pin to the bottom edge).
+            vinfo = proj.info.get("video") or {}
+            dw, dh = media_mod.display_size(vinfo)
+            fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
+            os.close(fd)
+            captionmap_mod.write_ass(
+                remapped, ass_path, dw, dh,
+                style=style)
+            burn_source = ass_path
+            opts["fonts_dir"] = FONT_LIBRARY.export_directory({style.get("font", "Lucida Console")} | {(c.get("style") or {}).get("font", "") for c in remapped})
             opts["burn_srt"] = burn_source
             opts["_burn_ass_cleanup"] = ass_path
         opts["_caption_info"] = {
@@ -782,7 +785,8 @@ def get_timeline():
 def put_timeline(req: TimelinePut):
     proj = need_project()
     try:
-        proj.timeline = timeline_mod.normalize(req.model_dump(), float(proj.info["duration"]))
+        tl = timeline_mod.normalize(req.model_dump(), float(proj.info["duration"]))
+        proj.timeline = tl
     except timeline_mod.TimelineError as exc:
         raise HTTPException(400, str(exc))
     return {"timeline": proj.timeline}
@@ -836,16 +840,14 @@ def export_timeline(req: TimelineExportRequest):
         ass_path = None
         if burned:
             style = req.caption_style or {}
-            if style and (style.get("x") is not None or style.get("y") is not None
-                          or style.get("size_pct") is not None):
-                # Bake the box position the user dragged in the preview.
-                dw, dh = media_mod.display_size(proj.info.get("video") or {})
-                fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
-                os.close(fd)
-                captionmap_mod.write_ass(
-                    cues, ass_path, dw, dh,
-                    style={k: style[k] for k in ("x", "y", "size_pct", "align", "box_w")
-                           if k in style})
+            # Bake the box position the user dragged in the preview.
+            dw, dh = media_mod.display_size(proj.info.get("video") or {})
+            fd, ass_path = tempfile.mkstemp(suffix=".ass", prefix="vts_cap_")
+            os.close(fd)
+            captionmap_mod.write_ass(
+                cues, ass_path, dw, dh,
+                style=style)
+            opts["fonts_dir"] = FONT_LIBRARY.export_directory({style.get("font", "Lucida Console")} | {(c.get("style") or {}).get("font", "") for c in cues})
             opts["burn_srt"] = ass_path or srt_out
             opts["_burn_ass_cleanup"] = ass_path
         cap_info = {"mode": caption_mode, "srt": srt_out, "cues": len(cues),

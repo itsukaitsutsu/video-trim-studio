@@ -330,7 +330,7 @@ def test_burn_subtitles_renders_text_and_keeps_orientation(tmp_path):
     out = tmp_path / "src.captioned.mp4"
     before = _bright_pixels(src, t=1.0)
     assert before == 0                          # nothing bright in a dark clip
-    cap_mod.burn_subtitles(src, str(srt), str(out))
+    cap_mod.burn_subtitles(src, str(srt), str(out), style={"size_pct": 7})
 
     result = probe(str(out))
     # Same picture as the source shows: portrait pixels, no rotation tag.
@@ -792,7 +792,7 @@ def test_inline_edit_is_wired_between_html_and_js():
     for needle in ('setClipText', 'txt-edit', 'contenteditable', 'dblclick',
                    'startOverlayCaptionEdit'):
         assert needle in js, f"{needle} missing from the front-end scripts"
-    assert "click the text to edit it" in html
+    assert "click text to edit it" in html
     # Focusing the player on row click yanked the page up to the video, which
     # is what made inline editing unusable; keep it gone.
     assert "player.focus" not in js
@@ -973,11 +973,11 @@ def test_write_ass_places_every_cue_at_the_chosen_point(tmp_path):
         [{"start": 0.5, "end": 2.25, "text": "hello world"},
          {"start": 3.0, "end": 4.0, "text": ""}],        # empty cue skipped
         out, width=1280, height=720,
-        style={"x": 0.5, "y": 0.5, "size_pct": 10.0})
+        style={"x": 0.5, "y": 0.5, "size_pct": 10.0, "shadow_enabled": False})
     body = out.read_text(encoding="utf-8")
     assert "PlayResX: 1280" in body and "PlayResY: 720" in body
-    assert "{\\fs72\\an5\\pos(640,360)}hello world" in body
-    assert ",Arial,12," in body        # per-cue size lives in \fs overrides
+    assert "\\fs72" in body and "\\an5\\pos(640,360)}hello world" in body
+    assert ",Lucida Console,72," in body  # style and overrides agree
     assert body.count("Dialogue:") == 1                   # empty cue dropped
     assert "0:00:00.50,0:00:02.25," in body               # ASS centisecond stamps
 
@@ -985,7 +985,7 @@ def test_write_ass_places_every_cue_at_the_chosen_point(tmp_path):
 def test_write_ass_clamps_and_sanitises(tmp_path):
     out = tmp_path / "cap.ass"
     cmap_mod.write_ass([{"start": -1, "end": 1, "text": "a {tag} b"}],
-                       out, 320, 240, style={"x": 5, "y": -3, "size_pct": 99})
+                       out, 320, 240, style={"x": 5, "y": -3, "size_pct": 99, "box_w": 0, "shadow_enabled": False})
     body = out.read_text(encoding="utf-8")
     assert "\\pos(320,0)" in body                         # clamped to the frame
     assert "{tag}" not in body and "a (tag) b" in body    # tags neutralised
@@ -1021,7 +1021,7 @@ def test_export_burns_at_the_preview_position(client, tmp_path):
     assert not glob.glob(str(tmp_path / "*.ass"))
 
 
-def test_export_burn_without_style_keeps_plain_srt(client, tmp_path):
+def test_export_burn_without_style_uses_default_ass(client, tmp_path):
     video = tmp_path / "nostyle.mp4"
     _make_clip(video, 4)
     srt = tmp_path / "nostyle.srt"
@@ -1034,7 +1034,7 @@ def test_export_burn_without_style_keeps_plain_srt(client, tmp_path):
         "subtitles_path": str(srt), "caption_mode": "burn",
         "caption_style": {},
     })
-    assert res.json()["captions"]["positioned"] is False
+    assert res.json()["captions"]["positioned"] is True
     done = _wait_job(client, res.json()["id"])
     assert done["state"] == "done", done.get("error")
 
@@ -1176,7 +1176,7 @@ def test_alignment_and_resize_controls_are_wired():
                    "bindCaptionResize", "justify", "renderCaptionLines"):
         assert needle in js, f"{needle} missing from app.js"
     assert "justify_char" not in js and "justify_char" not in html  # JC mode removed
-    for needle in ("capAlign", "cap-handle", ">J<"):
+    for needle in ("capAlign", "cap-handle", 'data-align="justify"'):
         assert needle in html, f"{needle} missing from index.html"
     assert "app.js?v=" in html
 
@@ -1191,16 +1191,16 @@ def test_write_ass_justify_flushes_both_edges(tmp_path):
     # fs = 40 px, char 22 px, box 800 px (100..900), 36 chars/line
     cmap_mod.write_ass(cues, out, 1000, 1000, style={
                            "x": 0.5, "y": 0.5, "size_pct": 4.0,
-                           "align": "justify", "box_w": 0.8})
+                           "align": "justify", "box_w": 0.8, "shadow_enabled": False})
     events = [l for l in out.read_text(encoding="utf-8").splitlines()
               if l.startswith("Dialogue:")]
     assert len(events) == 8          # 7 words placed + 1 left-aligned last line
     first = events[0].split(",,")[-1]
-    assert first.startswith("{\\fs40\\an4\\pos(100,") and first.endswith("}this")
+    assert ("\\fs40" in first and "\\an4\\pos(100," in first) and first.endswith("}this")
     seventh = events[6].split(",,")[-1]   # "wrap" (88 px) ends at the right edge
-    assert seventh.startswith("{\\fs40\\an4\\pos(812,") and seventh.endswith("}wrap")
+    assert ("\\fs40" in seventh and "\\an4\\pos(812," in seventh) and seventh.endswith("}wrap")
     last = events[7].split(",,")[-1]      # final line left-aligned, not centred
-    assert last.startswith("{\\fs40\\an4\\pos(100,") and last.endswith("}into two lines")
+    assert ("\\fs40" in last and "\\an4\\pos(100," in last) and last.endswith("}into two lines")
 
 def test_resolve_fw_model_prefers_local_folder(tmp_path, monkeypatch):
     import vts.transcribe as t
