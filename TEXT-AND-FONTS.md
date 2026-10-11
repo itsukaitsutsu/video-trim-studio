@@ -24,6 +24,13 @@ Browser/CSS and FFmpeg/libass rasterizers and blur kernels differ; preview/expor
 
 ## Fonts
 
+The font-family field is searchable: click it and type part of a name (case-insensitive).
+Multiple words narrow the results, e.g. `sans pro`. Use Up/Down and Enter, or click a result.
+Escape, Tab or clicking outside dismisses the list without applying unselected search text.
+Typing alone does not change the caption. The picker stays synchronized with caption
+selection, Undo/Redo, imported fonts and refreshed installed/device font lists.
+
+
 - **Import fonts:** import `.ttf` / `.otf` files up to 20 MB each. The app reads the family/style names from the font metadata. Imports are deduplicated, and the last imported family is applied to the current caption or all captions if Apply to all is enabled.
 - **Refresh installed:** discover TTF/OTF fonts in common system/user directories on the machine running Python. TTC collections, WOFF/WOFF2, bitmap fonts, and OS-private formats are not included.
 - **Device fonts…:** supporting Chrome/Edge browsers on localhost or HTTPS can request permission to enumerate fonts on the browser's machine. Selecting a discovered family copies its faces into the app so exports can use it. If unsupported or denied, use manual import instead.

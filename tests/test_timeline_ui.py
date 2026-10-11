@@ -710,7 +710,8 @@ def test_font_import_shadow_history_and_reload(browser_page):
     assert page.locator("#capBox").evaluate("el => el.style.textShadow") == "none"
     page.locator("#capShadowEnabled").check()
     assert page.evaluate("S.tl.caps[0].style.shadow_enabled") is True
-    page.locator("#capFontFamily").select_option("Georgia")
+    page.locator("#capFontSearch").fill("georg")
+    page.locator("#capFontSearch").press("Enter")
     assert page.evaluate("S.tl.caps[0].style.font") == "Georgia"
     from vts.fonts import FontLibrary
     library = FontLibrary(ROOT / 'work/font-test-discovery')
@@ -774,4 +775,85 @@ def test_shadow_preview_uses_one_continuous_silhouette(browser_page):
     image = np.array(Image.open(BytesIO(page.locator('#shadowFixture').screenshot())))[:, :, 0]
     assert 120 <= int(image.max()) <= 135
     page.evaluate('document.getElementById("shadowFixture").remove()')
+    assert not errors
+
+
+def test_font_picker_search_keyboard_cancel_and_history(browser_page):
+    page, errors = browser_page
+    open_demo(page)
+    page.evaluate('''() => {
+        setTL({...S.tl, caps:[{id:'search-font',lane:0,start:0,end:4,text:'Find my font',style:{...CAPPOS,font:'Georgia'}}]});
+        setPlayhead(1); S.capSel='search-font'; layoutCapOverlay();
+        const fonts=['Adobe Arabic','Adobe Caslon Pro','Source Sans 3','Source Sans Pro','Plus Jakarta Sans',
+            'Georgia','Wingdings','Lucida Console',...Array.from({length:220},(_,i)=>`Test Font ${i}`)];
+        const select=$('capFontFamily');
+        select.replaceChildren(...fonts.map(name=>new Option(name,name)));
+        select.value='Georgia'; capFontPicker.sync(true);
+    }''')
+    search = page.locator('#capFontSearch')
+    assert search.input_value() == 'Georgia'
+    search.click()
+    assert search.get_attribute('aria-expanded') == 'true'
+    assert page.locator('#capFontResults [role=option]').count() >= 228
+    search.fill('sAnS pro')
+    assert page.locator('#capFontResults [role=option]').all_text_contents() == ['Source Sans Pro']
+    assert page.evaluate('S.tl.caps[0].style.font') == 'Georgia'  # typing isn't a style edit
+    # Frame/style refreshes cannot replace text being searched.
+    page.evaluate('layoutCapOverlay()')
+    assert search.input_value() == 'sAnS pro'
+    search.press('Enter')
+    assert page.evaluate('S.tl.caps[0].style.font') == 'Source Sans Pro'
+    assert search.input_value() == 'Source Sans Pro'
+    assert search.get_attribute('aria-expanded') == 'false'
+    page.evaluate('undoTL()')
+    assert search.input_value() == 'Georgia'
+    page.evaluate('redoTL()')
+    assert search.input_value() == 'Source Sans Pro'
+    search.fill('adobe')
+    search.press('ArrowDown')
+    active = search.get_attribute('aria-activedescendant')
+    assert page.locator('#' + active).inner_text() == 'Adobe Caslon Pro'
+    search.press('Enter')
+    assert page.evaluate('S.tl.caps[0].style.font') == 'Adobe Caslon Pro'
+    search.fill('font-that-does-not-exist')
+    assert page.locator('#capFontResults [role=option]').count() == 0
+    assert search.get_attribute('aria-activedescendant') is None
+    search.press('Enter')
+    assert page.evaluate('S.tl.caps[0].style.font') == 'Adobe Caslon Pro'
+    search.press('Escape')
+    assert search.input_value() == 'Adobe Caslon Pro'
+    search.fill('source')
+    search.press('Tab')
+    assert search.get_attribute('aria-expanded') == 'false'
+    assert search.input_value() == 'Adobe Caslon Pro'
+    # A new import/discovery is searchable without losing the current query.
+    search.fill('new custom')
+    page.evaluate("$('capFontFamily').add(new Option('New Custom Font', 'New Custom Font'))")
+    page.wait_for_function("document.querySelectorAll('#capFontResults [role=option]').length === 1")
+    assert search.input_value() == 'new custom'
+    page.locator('#capFontResults [role=option]').click()
+    assert search.input_value() == 'New Custom Font'
+    assert page.evaluate('S.tl.caps[0].style.font') == 'New Custom Font'
+    assert not errors
+
+
+def test_font_picker_popup_in_resized_panel_and_small_viewport(browser_page):
+    page, errors = browser_page
+    open_demo(page)
+    panel = page.locator('[data-workspace-panel="caption-style"]')
+    panel.evaluate("el => { el.style.height='190px'; el.classList.add('workspace-panel-resized'); }")
+    page.set_viewport_size({'width':390,'height':720})
+    search = page.locator('#capFontSearch')
+    search.scroll_into_view_if_needed()
+    search.fill('georg')
+    result = page.locator('#capFontResults [role=option]').first
+    assert result.is_visible()
+    box = page.locator('.font-picker-popup').bounding_box()
+    assert box['x'] >= 0 and box['x'] + box['width'] <= 390
+    assert box['y'] >= 0 and box['y'] + box['height'] <= 720
+    result.click()
+    assert search.input_value() == 'Georgia'
+    search.click()
+    search.press('Escape')
+    assert search.get_attribute('aria-expanded') == 'false'
     assert not errors

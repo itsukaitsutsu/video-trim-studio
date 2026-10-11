@@ -1298,6 +1298,7 @@ function layoutCapOverlay() {
       else input.value = String(value);
     }
   }
+  window.capFontPicker?.sync();
   if ($("capFontSizeValue")) $("capFontSizeValue").textContent = String(Math.round(1080 * (st.size_pct || 4.5) / 100));
   if ($("capFillOpacityValue")) $("capFillOpacityValue").textContent = String(st.fill_opacity ?? 100);
   if ($("capBackgroundOpacityValue")) $("capBackgroundOpacityValue").textContent = String(st.background_opacity ?? 72);
