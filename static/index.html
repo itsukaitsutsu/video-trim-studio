@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=41">
+<link rel="stylesheet" href="/static/style.css?v=42">
 </head>
 <body>
 <header id="menubar">
@@ -194,6 +194,10 @@
               <button id="capAddCue" class="mini">+ Add cue</button>
               <button id="capRevert" class="mini" title="Reload the last saved version">Undo changes</button>
               <button id="capSave" class="mini primary">Save captions</button>
+            </div>
+            <div class="row cap-layout-row">
+              <select id="cSeg" title="How many words share one caption. Used for the next transcription and for Re-split."></select>
+              <button id="capResplit" class="mini" title="Re-cut these captions with this layout - no new transcription">Re-split</button>
             </div>
             <div id="capSaved" class="dim small"></div>
             <div class="cap-editor-scroll">
@@ -633,7 +637,7 @@
 <script src="/static/stage.js?v=1"></script>
 <script src="/static/timeline.js?v=16"></script>
 <script src="/static/clip.js?v=1"></script>
-<script src="/static/app.js?v=42"></script>
+<script src="/static/app.js?v=43"></script>
 <script src="/static/font-picker.js?v=1"></script>
 <script src="/static/fonts.js?v=1"></script>
 </body>

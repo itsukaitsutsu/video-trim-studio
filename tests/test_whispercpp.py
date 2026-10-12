@@ -7,6 +7,8 @@ import time
 import wave
 from pathlib import Path
 
+import json
+
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -41,6 +43,59 @@ exit 1
 SLEEP_CLI = """#!/bin/sh
 echo "[00:00:00.000 --> 00:00:02.000]   start"
 sleep 20
+"""
+
+# A build new enough for --output-json-full: it writes the token-level JSON
+# that carries word timings (this is the shape whisper.cpp 1.8 emits).
+FULL_CLI = """#!/bin/sh
+OUT=""
+FULL=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -of|--output-file) shift; OUT="$1" ;;
+    --output-json-full) FULL=1 ;;
+  esac
+  shift
+done
+echo "system_info: fake build"
+echo "[00:00:00.000 --> 00:00:04.000]   halo dunia"
+printf '1\\n00:00:00,000 --> 00:00:04,000\\nhalo dunia\\n' > "$OUT.srt"
+if [ "$FULL" = "1" ]; then
+  cat > "$OUT.json" <<'JSON'
+{"transcription":[{"timestamps":{"from":"00:00:00,000","to":"00:00:04,000"},
+ "offsets":{"from":0,"to":4000},"text":" halo dunia.",
+ "tokens":[
+  {"text":"halo","timestamps":{"from":"00:00:00,000","to":"00:00:01,600"},"offsets":{"from":0,"to":1600}},
+  {"text":" dunia","timestamps":{"from":"00:00:01,600","to":"00:00:03,900"},"offsets":{"from":1600,"to":3900}},
+  {"text":".","timestamps":{"from":"00:00:03,900","to":"00:00:04,000"},"offsets":{"from":3900,"to":4000}}
+ ]}]}
+JSON
+else
+  echo '{}' > "$OUT.json"
+fi
+exit 0
+"""
+
+# An older build: it rejects the flag instead of ignoring it, which is what
+# real releases do (whisper.cpp grew --output-json-full in 1.7).
+OLD_CLI = """#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "--output-json-full" ]; then
+    echo "error: unknown argument: --output-json-full" >&2
+    exit 1
+  fi
+done
+OUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -of|--output-file) shift; OUT="$1" ;;
+  esac
+  shift
+done
+echo "[00:00:00.000 --> 00:00:02.000]   halo dunia"
+printf '1\\n00:00:00,000 --> 00:00:02,000\\nhalo dunia\\n' > "$OUT.srt"
+echo '{}' > "$OUT.json"
+exit 0
 """
 
 
@@ -198,6 +253,95 @@ def test_run_cancels(tmp_path, monkeypatch):
     with pytest.raises(tsc.Cancelled):
         wcpp.transcribe_step(str(wav), job, {"model": "medium"})
     assert time.time() - t0 < 10                     # did not wait for sleep 20
+
+
+# ------------------------------------------------- word timestamps (tokens)
+
+def test_parse_json_full_merges_tokens_into_words():
+    # whisper.cpp splits "halo" into sub-word tokens and emits "." on its own.
+    text = json.dumps({"transcription": [{
+        "timestamps": {"from": "00:00:00,000", "to": "00:00:04,000"},
+        "offsets": {"from": 0, "to": 4000},
+        "text": " halo dunia.",
+        "tokens": [
+            {"text": "halo", "offsets": {"from": 0, "to": 1600}},
+            {"text": " dunia", "offsets": {"from": 1600, "to": 3900}},
+            {"text": ".", "offsets": {"from": 3900, "to": 4000}},
+        ],
+    }]})
+    segs = wcpp.parse_json_full(text)
+    assert len(segs) == 1
+    assert segs[0]["text"] == "halo dunia."
+    assert segs[0]["words"] == [
+        {"w": "halo", "s": 0.0, "e": 1.6},
+        {"w": "dunia.", "s": 1.6, "e": 4.0},      # the "." rides along
+    ]
+
+
+def test_parse_json_full_returns_nothing_for_the_wrong_shape():
+    assert wcpp.parse_json_full("{}") == []
+    assert wcpp.parse_json_full('{"transcription": []}') == []
+
+
+def test_build_command_asks_for_tokens_and_dtw_only_when_wanted():
+    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4)
+    assert "--output-json-full" in cmd and "--dtw" not in cmd
+    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4,
+                             words=True, dtw="medium")
+    assert cmd[cmd.index("--dtw") + 1] == "medium"
+    # No word timing requested -> no token output, no DTW.
+    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4,
+                             words=False, dtw="medium")
+    assert "--output-json-full" not in cmd and "--dtw" not in cmd
+
+
+def test_dtw_preset_follows_the_model_family():
+    assert wcpp.dtw_preset_for("large-v3-turbo") == "large.v3.turbo"
+    assert wcpp.dtw_preset_for("Medium") == "medium"
+    assert wcpp.dtw_preset_for("not-a-model") is None
+
+
+def test_run_with_tokens_returns_words_and_burst_cues(tmp_path, monkeypatch):
+    cli = _mk_cli(tmp_path, FULL_CLI)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "ggml-medium.bin").write_bytes(b"x")
+    monkeypatch.setenv("VTS_WHISPER_CLI", str(cli))
+    monkeypatch.setenv("VTS_WHISPER_MODELS", str(models))
+    wav = _mk_wav(tmp_path / "in.wav")
+    job = tsc._new_job("caption", "fake.mp4")
+    segments, meta = wcpp.transcribe_step(str(wav), job, {"model": "medium"})
+    assert meta["words"] == "tokens"
+    assert [w["w"] for w in segments[0]["words"]] == ["halo", "dunia."]
+    # ... and the shared cue builder turns them into word-timed captions.
+    cues = tsc.build_cues(segments, {"segment_preset": "burst"}, "whispercpp")
+    # The burst policy caps a cue at 2.5 s, and this segment runs 4 s, so it
+    # comes out as two captions - cut exactly where the tokens say.
+    assert [c["text"] for c in cues] == ["halo", "dunia."]
+    assert [(c["start"], c["end"]) for c in cues] == [(0.0, 1.6), (1.6, 4.0)]
+    assert [c["word_source"] for c in cues] == ["whispercpp", "whispercpp"]
+    assert [w["w"] for w in cues[1]["words"]] == ["dunia."]
+
+
+def test_a_build_without_token_output_still_produces_captions(tmp_path, monkeypatch):
+    cli = _mk_cli(tmp_path, OLD_CLI)
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "ggml-medium.bin").write_bytes(b"x")
+    monkeypatch.setenv("VTS_WHISPER_CLI", str(cli))
+    monkeypatch.setenv("VTS_WHISPER_MODELS", str(models))
+    wav = _mk_wav(tmp_path / "in.wav")
+    job = tsc._new_job("caption", "fake.mp4")
+    segments, meta = wcpp.transcribe_step(str(wav), job, {"model": "medium"})
+    # Retried without the flag rather than failing the job.
+    assert meta["words"] == "none"
+    assert [s["text"] for s in segments] == ["halo dunia"]
+    assert not segments[0].get("words")
+    cues = tsc.build_cues(segments, {"segment_preset": "burst"}, "whispercpp")
+    assert cues[0]["text"] == "halo dunia"
+    # No token timings: the cue gets an honest estimate instead of silence.
+    assert cues[0]["word_source"] == "estimated"
+    assert [w["w"] for w in cues[0]["words"]] == ["halo", "dunia"]
 
 
 # ------------------------------------------------------------- downloads

@@ -20,7 +20,12 @@
  *   aud   = { id, src, atrack, start, end, in, name, fx }
  *           A sound-only item on an audio lane A1..An. Several may play at
  *           once: audio lanes MIX instead of stacking.
- *   cap   = { id, lane, start, end, text, style }   caption on a lane
+ *   cap   = { id, lane, start, end, text, style, words? }  caption on a lane
+ *           words = [{ w, s, e }] the words this caption displays, in
+ *                   TIMELINE seconds, so a move/trim/ripple shifts or
+ *                   slices them exactly like start/end. Optional: an
+ *                   .srt import gets a char-weighted estimate instead
+ *                   (word_source "estimated").
  *
  * clip.in is the source time that plays at clip.start; captions have no `in`.
  * Every function returns a new timeline and never changes its input.
@@ -60,6 +65,84 @@
   const byStart = (a, b) => a.start - b.start || a.end - b.end;
   const clamp = (x, lo, hi) => (hi < lo ? lo : Math.min(hi, Math.max(lo, x)));
   const num = (v, dflt) => (Number.isFinite(Number(v)) ? Number(v) : dflt);
+
+  // ------------------------------------------------------------ word timing
+  // A caption may carry the words it shows. Keeping them absolute (timeline
+  // seconds, not cue-relative) is what makes every existing operation a plain
+  // shift or slice on both the cue and its words.
+
+  const MAX_WORDS = 200;
+  const wordsOf = (arr) => (Array.isArray(arr) ? arr : []);
+  const capWords = (it) => wordsOf(it && it.words);
+  // Letters/digits only: a "word" made of nothing but punctuation is not one.
+  const HAS_LETTER = /[0-9A-Za-z\u00c0-\u024f\u0370-\u04ff\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/;
+
+  function cleanWords(raw) {
+    if (!Array.isArray(raw)) return [];
+    const out = [];
+    for (const item of raw.slice(0, MAX_WORDS * 2)) {
+      if (!item || typeof item !== "object") continue;
+      const w = String(item.w !== undefined ? item.w : (item.word || "")).trim();
+      if (!w) continue;
+      const s = num(item.s !== undefined ? item.s : item.start, NaN);
+      let e = num(item.e !== undefined ? item.e : item.end, NaN);
+      if (!Number.isFinite(s)) continue;
+      if (!Number.isFinite(e) || e <= s) e = s + 0.03;
+      out.push({ w, s: r3(s), e: r3(e) });
+    }
+    out.sort((a, b) => a.s - b.s || a.e - b.e);
+    for (let i = 1; i < out.length; i += 1) {
+      if (out[i].s < out[i - 1].e) out[i - 1].e = r3(Math.max(out[i - 1].s + 0.03, out[i].s));
+    }
+    // A punctuation-only token (whisper.cpp emits "." as its own token) rides
+    // with the word before it, exactly as the server glues it.
+    const glued = [];
+    for (const w of out) {
+      const last = glued[glued.length - 1];
+      if (last && !HAS_LETTER.test(w.w)) {
+        last.w += w.w;
+        last.e = r3(Math.max(last.e, w.e));
+      } else {
+        glued.push(w);
+      }
+    }
+    return glued.slice(0, MAX_WORDS);
+  }
+
+  function shiftWords(words, dt) {
+    const list = wordsOf(words);
+    if (!list.length || !dt) return list.map((w) => ({ w: w.w, s: w.s, e: w.e }));
+    return list.map((w) => ({ w: w.w, s: r3(w.s + dt), e: r3(w.e + dt) }));
+  }
+
+  // The words inside [from, to], clipped to it - what survives a trim, a
+  // razor or one kept piece of a rippled caption.
+  function sliceWords(words, from, to) {
+    const out = [];
+    for (const w of wordsOf(words)) {
+      if (w.e <= from + EPS || w.s >= to - EPS) continue;
+      const s = Math.max(w.s, from);
+      const e = Math.min(w.e, to);
+      if (e - s < 0.02) continue;
+      out.push({ w: w.w, s: r3(s), e: r3(e) });
+    }
+    return out;
+  }
+
+  // Text edited in place: the timings still describe the audio while the word
+  // count is unchanged (a spelling fix). Anything else re-words, and
+  // word_source "edited" says so out loud.
+  function rewordForText(cap, text) {
+    const words = capWords(cap);
+    const next = String(text || "").split(/\s+/).filter(Boolean);
+    if (!words.length || next.length !== words.length) {
+      return { words: [], word_source: null };
+    }
+    return {
+      words: words.map((w, i) => ({ w: next[i], s: w.s, e: w.e })),
+      word_source: "edited",
+    };
+  }
 
   function trackOf(it) {
     const t = Math.floor(num(it && it.track, 0));
@@ -270,10 +353,18 @@
         const a = Math.max(cs, k.in);
         const b = Math.min(ce, srcEnd);
         if (b - a < MIN_LEN - EPS) continue;
+        // Source word times -> timeline word times: same mapping as the cue.
+        const words = sliceWords(cue.words, a, b).map((w) => ({
+          w: w.w,
+          s: r3(k.start + (w.s - k.in)),
+          e: r3(k.start + (w.e - k.in)),
+        }));
         caps.push({
           id: newId("t"), lane: 0,
           start: r3(k.start + (a - k.in)), end: r3(k.start + (b - k.in)),
           text, style: cue.style ? clone(cue.style) : null,
+          words,
+          word_source: cue.word_source || null,
         });
       }
     }
@@ -296,6 +387,11 @@
       }
       const left = { ...it, end: r3(t) };
       const right = { ...it, id: newId(prefixOf(it)), start: r3(t) };
+      if (!isClip(it)) {
+        // A caption razor cuts the word list with the cue.
+        left.words = sliceWords(capWords(it), it.start, t);
+        right.words = sliceWords(capWords(it), t, it.end);
+      }
       if (isClip(it)) {
         const rel = t - it.start;
         right.in = r3(it.in + rel);
@@ -326,7 +422,9 @@
   // Move everything at or after t by span (used by insert).
   function shiftArr(arr, t, span) {
     return arr.map((it) => (it.start >= t - EPS
-      ? { ...it, start: r3(it.start + span), end: r3(it.end + span) }
+      ? { ...it,
+          start: r3(it.start + span), end: r3(it.end + span),
+          words: isClip(it) ? it.words : shiftWords(capWords(it), span) }
       : it));
   }
 
@@ -368,12 +466,16 @@
       if (cur < it.end - EPS) kept.push([cur, it.end]);
       kept.forEach(([s, e], i) => {
         if (e - s < 1e-3) return;
+        const removed = removedBefore(merged, s);
         const piece = {
           ...it,
           id: i === 0 ? it.id : newId(prefixOf(it)),
-          start: r3(s - removedBefore(merged, s)),
+          start: r3(s - removed),
           end: r3(e - removedBefore(merged, e)),
         };
+        if (!isClip(it)) {
+          piece.words = shiftWords(sliceWords(capWords(it), s, e), -removed);
+        }
         if (isClip(it)) {
           piece.in = r3(it.in + (s - it.start));
           withClipFx(piece, it);
@@ -499,6 +601,7 @@
       const moved = {
         ...c, start: r3(c.start + shift), end: r3(c.end + shift),
         lane: Math.max(0, c.lane + (dLane || 0)),
+        words: shiftWords(capWords(c), shift),
       };
       out.caps.push(placeCap(out.caps, moved));
     }
@@ -544,6 +647,10 @@
       if (isC && !isAud) it.kf = kfForPiece(it.kf, 0, ne - it.start);
       it.end = r3(ne);
     }
+    if (!isClip(it) && !isAud) {
+      // Trimming a caption clips the words it still shows.
+      it.words = sliceWords(capWords(it), it.start, it.end);
+    }
     out.vtracks = vtracksOf(out);
     out.atracks = atracksOf(out);
     return out;
@@ -555,7 +662,12 @@
     if (!items.length) return null;
     const base = Math.min(...items.map((it) => it.start));
     return {
-      items: clone(items).map((it) => ({ ...it, start: r3(it.start - base), end: r3(it.end - base) })),
+      items: clone(items).map((it) => ({
+        ...it,
+        start: r3(it.start - base),
+        end: r3(it.end - base),
+        words: isClip(it) ? it.words : shiftWords(capWords(it), -base),
+      })),
     };
   }
 
@@ -576,7 +688,11 @@
       out.caps = shiftArr(splitArr(out.caps, t0), t0, span);
     }
     for (const it of items) {
-      const copy = { ...it, id: newId(prefixOf(it)), start: r3(t0 + it.start), end: r3(t0 + it.end) };
+      const copy = {
+        ...it, id: newId(prefixOf(it)), start: r3(t0 + it.start), end: r3(t0 + it.end),
+        words: isClip(it) ? it.words
+          : shiftWords(capWords(it), r3(t0 + it.start) - it.start),
+      };
       if (isAudioItem(copy)) copy.atrack = atrackOf(copy);
       else if (isClip(copy)) copy.track = trackOf(copy);
       ids.push(copy.id);
@@ -606,7 +722,7 @@
     const out = normalise(tl);
     const cap = {
       id: newId("t"), lane: lane || 0, start: r3(at), end: r3(at + 2),
-      text, style: style ? clone(style) : null,
+      text, style: style ? clone(style) : null, words: [],
     };
     const placed = placeCap(out.caps, cap);
     out.caps.push(placed);
@@ -744,6 +860,7 @@
       for (const cap of out.caps) {
         if (cap.text === old && cap.start < clip.end - EPS && cap.end > clip.start + EPS) {
           cap.text = clip.text;
+          Object.assign(cap, rewordForText(cap, cap.text));
         }
       }
     }
@@ -758,9 +875,10 @@
     if (!cap) return out;
     const old = cap.text || "";
     cap.text = String(text || "");
+    Object.assign(cap, rewordForText(cap, cap.text));
     if (old) {
       for (const clip of out.clips) {
-        if (clip.text === old && clip.start < cap.end - EPS && clip.end > cap.start + EPS) {
+        if (clip.text === old && clip.start < cap.end - EPS && clip.end > clip.start + EPS) {
           clip.text = cap.text;
         }
       }
@@ -877,6 +995,7 @@
     placeClip, placeAudio, placeCap, makeClip, makeAudioItem, addMedia,
     firstFreeTrack, unlinkClipAudio, relinkClipAudio, linkedAudioOf,
     mergeRanges, validate,
+    cleanWords, shiftWords, sliceWords, capWords, rewordForText,
   };
   if (typeof module === "object" && module.exports) module.exports = api;
   root.TLM = api;

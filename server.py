@@ -181,6 +181,10 @@ class DetectRequest(BaseModel):
     use_cues: bool = True
     subtitles_path: str | None = None
     subtitles_text: str | None = None
+    # The caption card's own cue list, including the word timings its
+    # transcription produced. Preferred over re-parsing the .srt, which cannot
+    # carry word timing and would downgrade it to an estimate.
+    cues: list[dict] = []
 
 
 class ExportRequest(BaseModel):
@@ -206,8 +210,14 @@ class SubtitleEditRequest(BaseModel):
 
 
 class CaptionCuesRequest(BaseModel):
-    """Edited cue list: [{'start': s, 'end': s, 'text': str}, ...]."""
+    """Edited cue list: [{'start': s, 'end': s, 'text': str[, 'words': [...]]}]."""
     cues: list
+
+
+class ResegmentRequest(BaseModel):
+    """Re-cut a finished caption set into new cues (no re-transcription)."""
+    preset: str | None = None            # engine | line | burst | word | custom
+    segmentation: dict = {}
 
 
 class ManualCaptionRequest(BaseModel):
@@ -226,6 +236,11 @@ class CaptionRequest(BaseModel):
     compute_type: str = "auto"
     vad: bool = True
     word_timestamps: bool = True
+    dtw: bool = False                # whisper.cpp only: DTW word alignment
+    # Caption segmentation: how many words share one caption. "burst" is the
+    # short-form default; see vts/segmenter.py for the presets.
+    segment_preset: str = "burst"
+    segmentation: dict = {}
     beam_size: int = 1
     temperature_fallback: bool = False
     normalize_audio: bool = False
@@ -622,6 +637,14 @@ def detect(req: DetectRequest):
             text = Path(sp).read_text(encoding="utf-8-sig", errors="replace")
         if text:
             cues = detect_mod.parse_subtitles(text)
+        if req.cues:
+            # Cues from the caption editor carry word timings; the parsed file
+            # is only the fall-back. Text/timings come from the cue list, the
+            # path still decides where "Save captions" writes.
+            try:
+                cues = caption_mod.validate_cues(req.cues)
+            except caption_mod.CaptionError as exc:
+                raise HTTPException(400, str(exc))
 
     silences: list[tuple[float, float]] = []
     if req.detect_silence:
@@ -1142,6 +1165,18 @@ def caption_manual(req: ManualCaptionRequest):
         return caption_mod.start_manual_captions(proj.path, out_dir, sidecar=sidecar)
     except caption_mod.CaptionError as exc:
         raise HTTPException(400, str(exc))
+
+
+@app.post("/api/caption/{job_id}/resegment")
+def caption_resegment(job_id: str, req: ResegmentRequest):
+    """Re-split a finished caption set: words in, cues out, no new audio pass."""
+    try:
+        state = caption_mod.resegment_job(job_id, req.preset, req.segmentation)
+    except caption_mod.CaptionError as exc:
+        raise HTTPException(400, str(exc))
+    if state is None:
+        raise HTTPException(404, "Unknown caption job")
+    return state
 
 
 @app.put("/api/caption/{job_id}/cues")

@@ -22,6 +22,7 @@ process runs, and returns ``(segments, meta)`` in the identical shape.
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -31,6 +32,7 @@ import threading
 import time
 from pathlib import Path
 
+from vts import segmenter as tsc_segmenter
 from vts import transcribe as tsc
 from vts.transcribe import CaptionError, Cancelled
 
@@ -143,15 +145,145 @@ def parse_srt(text: str) -> list[dict]:
     return cues
 
 
+# DTW alignment presets (whisper.cpp --dtw): token timestamps computed by
+# cross-attention alignment instead of the default heuristic. Slower, sharper;
+# the name must match the model family.
+DTW_PRESETS = {
+    "tiny": "tiny", "tiny.en": "tiny.en",
+    "base": "base", "base.en": "base.en",
+    "small": "small", "small.en": "small.en",
+    "medium": "medium", "medium.en": "medium.en",
+    "large-v1": "large.v1", "large-v2": "large.v2", "large-v3": "large.v3",
+    "large-v3-turbo": "large.v3.turbo",
+}
+
+
+def dtw_preset_for(model_name: str) -> str | None:
+    return DTW_PRESETS.get(str(model_name or "").lower())
+
+
+def _ms_pair(obj) -> tuple[float, float] | None:
+    """{from,to} offsets (milliseconds) or {from,to} ASS stamps -> seconds."""
+    if not isinstance(obj, dict):
+        return None
+    off = obj.get("offsets")
+    if isinstance(off, dict):
+        try:
+            return float(off["from"]) / 1000.0, float(off["to"]) / 1000.0
+        except (KeyError, TypeError, ValueError):
+            pass
+    ts = obj.get("timestamps")
+    if isinstance(ts, dict):
+        try:
+            return _stamp(ts["from"]), _stamp(ts["to"])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return None
+
+
+def _stamp(value) -> float:
+    """whisper.cpp's "HH:MM:SS,mmm" (also accepts '.') -> seconds."""
+    txt = str(value or "").strip().replace(",", ".")
+    parts = txt.split(":")
+    if len(parts) == 3:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    if len(parts) == 2:
+        return int(parts[0]) * 60 + float(parts[1])
+    return float(txt)
+
+
+def words_from_tokens(tokens) -> list[dict]:
+    """Merge whisper.cpp tokens into words with start/end times.
+
+    A new word starts at a token whose text begins with whitespace (Whisper's
+    convention); continuation tokens are joined onto it, so CJK text (which
+    whisper.cpp splits across tokens, one per codepoint) stays intact. Special
+    tokens such as <|startoftranscript|> or [_BEG_] are dropped.
+    """
+    raw: list[dict] = []
+    cur: dict | None = None
+    for tok in tokens or []:
+        if not isinstance(tok, dict):
+            continue
+        text = str(tok.get("text", ""))
+        span = _ms_pair(tok)
+        clean = text.replace("\u0120", " ")          # \u0120 is a space in some builds
+        if "<|" in clean or "[_" in clean:
+            continue
+        if not clean.strip():
+            continue
+        starts_word = clean[:1].isspace() or cur is None
+        body = clean.strip()
+        if cur is not None and not starts_word:
+            cur["w"] += body
+            if span:
+                cur["e"] = max(cur["e"], span[1])
+            continue
+        if cur is not None:
+            raw.append(cur)
+        if span is None:
+            cur = None          # no timing: keep the text with the next word
+            continue
+        cur = {"w": body, "s": span[0], "e": span[1]}
+    if cur is not None:
+        raw.append(cur)
+    return tsc_segmenter.clean_words(raw)
+
+
+def parse_json_full(text: str) -> list[dict]:
+    """`--output-json-full` -> [{start, end, text, words}].
+
+    Returns [] when the file is not that shape (an older build, a truncated
+    write), so the caller can fall back to the SRT.
+    """
+    data = json.loads(text)
+    entries = data.get("transcription") or data.get("segments") or []
+    out: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        span = _ms_pair(entry)
+        if span is None:
+            continue
+        start, end = span
+        words = words_from_tokens(entry.get("tokens") or [])
+        body = tsc_segmenter.tidy(entry.get("text", "")) or tsc_segmenter.join_words(words)
+        if end <= start:
+            if words:
+                end = max(w["e"] for w in words)
+            else:
+                continue
+        seg = {"start": round(start, 3), "end": round(end, 3), "text": body,
+               "avg_logprob": None, "no_speech_prob": None}
+        seg["words"] = words or None
+        out.append(seg)
+    return out
+
+
+def looks_like_unknown_flag(log: str) -> bool:
+    """True when whisper-cli rejected an argument (build predates the flag)."""
+    low = str(log or "").lower()
+    return any(marker in low for marker in (
+        "unknown argument", "invalid argument", "unrecognized option",
+        "unknown option", "error: unknown", "unrecognised option"))
+
+
 def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
                   language: str, translate: bool, initial_prompt: str | None,
-                  threads: int) -> list[str]:
+                  threads: int, words: bool = True,
+                  dtw: str | None = None) -> list[str]:
     # Long option names only: the short aliases have changed across
     # whisper.cpp releases (e.g. -ojson -> -oj in v1.9), long flags are stable.
     cmd = [cli, "--model", model_path, "--file", wav_path,
            "--language", language or "auto",
            "--threads", str(max(1, threads)),
            "--output-file", out_base, "--output-srt", "--output-json"]
+    if words:
+        # --output-json-full writes one entry per token with its own
+        # timestamps; that is where word-level caption timings come from.
+        cmd.append("--output-json-full")
+    if dtw and words:
+        cmd += ["--dtw", dtw]
     if translate:
         cmd.append("--translate")
     if initial_prompt:
@@ -159,41 +291,14 @@ def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
     return cmd
 
 
-def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], dict]:
-    """Run whisper-cli on the wav; same contract as transcribe.transcribe_step."""
-    cli = find_cli()
-    if not cli:
-        raise CaptionError(
-            "whisper-cli not found. Build whisper.cpp with Vulkan support and "
-            "either put the binary in <app>/tools/, add it to PATH, or set "
-            "VTS_WHISPER_CLI to its full path.\nSource: " + CLI_URL_HINT)
+def _spawn(cmd: list[str], job: dict, total: float):
+    """Run whisper-cli, stream its log into `job`.
 
-    model_name = opts.get("model") or "medium"
-    mfile = model_file(model_name)
-    if not mfile.is_file():
-        names = ", ".join(m["name"] for m in list_models()) or "none yet"
-        raise CaptionError(
-            f"GGML model '{model_name}' not found in {models_dir()}.\n"
-            f"Download it with the button in the Auto-caption card, or from "
-            f"{HF_BASE}/{GGML_MODELS.get(model_name, ('', 'ggml-' + model_name + '.bin'))[1]}\n"
-            f"Models on disk: {names}")
-
-    language = opts.get("language") or "auto"
-    task_translate = bool(opts.get("translate_to_english"))
-    initial_prompt = opts.get("initial_prompt")
-    if not initial_prompt and not task_translate:
-        initial_prompt = tsc.DEFAULT_PROMPTS.get(language)
-    threads = int(opts.get("threads") or min(os.cpu_count() or 4, 16))
-
-    job["stage"] = "transcribe"
-    job["device"] = "whisper.cpp"
-    job["compute_type"] = "ggml"
-    total = tsc.wav_duration(wav_path)
-    out_base = os.path.join(os.path.dirname(wav_path), "wcpp_out")
-    cmd = build_command(cli, str(mfile), wav_path, out_base, language,
-                        task_translate, initial_prompt, threads)
-    job["note"] = f"running whisper-cli ({os.path.basename(cli)})"
-
+    Returns (rc, first_log, tail_log, backend, detected_language, segments):
+    `segments` are the ones seen on stdout, used for the live tail and the
+    progress bar. The result itself is read from the files on disk.
+    """
+    q: "queue.Queue[str | None]" = queue.Queue()
     backend = "cpu"
     detected_lang: str | None = None
     segments: list[dict] = []
@@ -209,7 +314,6 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
             q.put(line.rstrip("\n"))
         q.put(None)
 
-    q: "queue.Queue[str | None]" = queue.Queue()
     threading.Thread(target=_reader, daemon=True).start()
 
     # Keep the beginning as well as the tail: CLI argument/model errors are
@@ -273,6 +377,65 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
     rc = proc.wait()
     if job["_cancel"].is_set():
         raise Cancelled("cancelled")
+    return rc, first_log, tail_log, backend, detected_lang, segments
+
+
+def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], dict]:
+    """Run whisper-cli on the wav; same contract as transcribe.transcribe_step."""
+    cli = find_cli()
+    if not cli:
+        raise CaptionError(
+            "whisper-cli not found. Build whisper.cpp with Vulkan support and "
+            "either put the binary in <app>/tools/, add it to PATH, or set "
+            "VTS_WHISPER_CLI to its full path.\nSource: " + CLI_URL_HINT)
+
+    model_name = opts.get("model") or "medium"
+    mfile = model_file(model_name)
+    if not mfile.is_file():
+        names = ", ".join(m["name"] for m in list_models()) or "none yet"
+        raise CaptionError(
+            f"GGML model '{model_name}' not found in {models_dir()}.\n"
+            f"Download it with the button in the Auto-caption card, or from "
+            f"{HF_BASE}/{GGML_MODELS.get(model_name, ('', 'ggml-' + model_name + '.bin'))[1]}\n"
+            f"Models on disk: {names}")
+
+    language = opts.get("language") or "auto"
+    task_translate = bool(opts.get("translate_to_english"))
+    initial_prompt = opts.get("initial_prompt")
+    if not initial_prompt and not task_translate:
+        initial_prompt = tsc.DEFAULT_PROMPTS.get(language)
+    threads = int(opts.get("threads") or min(os.cpu_count() or 4, 16))
+
+    job["stage"] = "transcribe"
+    job["device"] = "whisper.cpp"
+    job["compute_type"] = "ggml"
+    total = tsc.wav_duration(wav_path)
+    out_base = os.path.join(os.path.dirname(wav_path), "wcpp_out")
+
+    # Word timings need --output-json-full (token timestamps). Builds older
+    # than whisper.cpp 1.7 reject that flag, so a failure that smells like an
+    # unknown argument is retried once without it: captions still arrive, they
+    # just carry estimated word timing instead of real token timing.
+    want_words = bool(opts.get("word_timestamps", True))
+    dtw = dtw_preset_for(model_name) if (want_words and opts.get("dtw")) else None
+    cmd = build_command(cli, str(mfile), wav_path, out_base, language,
+                        task_translate, initial_prompt, threads,
+                        words=want_words, dtw=dtw)
+    job["note"] = f"running whisper-cli ({os.path.basename(cli)})"
+    rc, first_log, tail_log, backend, detected_lang, _streamed = _spawn(cmd, job, total)
+    word_tokens = want_words
+
+    if rc != 0 and want_words and looks_like_unknown_flag("\n".join(first_log + tail_log)):
+        word_tokens = False
+        job["note"] = ("this whisper-cli build has no token timestamps - "
+                       "retrying without word timings")
+        cmd = build_command(cli, str(mfile), wav_path, out_base, language,
+                            task_translate, initial_prompt, threads, words=False)
+        rc, first_log, tail_log, backend, detected_lang, _streamed = _spawn(
+            cmd, job, total)
+
+    if job["_cancel"].is_set():
+        raise Cancelled("cancelled")
 
     srt_path = out_base + ".srt"
     if rc != 0 or not os.path.exists(srt_path):
@@ -284,7 +447,23 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
             f"whisper-cli exited with code {rc}. Diagnostic output "
             f"(beginning first, then final lines):\n{details or '(no output)'}")
 
-    segments = parse_srt(Path(srt_path).read_text(encoding="utf-8", errors="replace"))
+    # Prefer the token-level JSON: it carries the word timings the SRT cannot.
+    segments: list[dict] = []
+    words_mode = "none"
+    if word_tokens:
+        try:
+            parsed = parse_json_full(
+                Path(out_base + ".json").read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            parsed = []
+        if parsed and any(s.get("words") for s in parsed):
+            segments = parsed
+            words_mode = "tokens"
+    if not segments:
+        segments = parse_srt(Path(srt_path).read_text(encoding="utf-8", errors="replace"))
+        if word_tokens:
+            job["note"] = ("no token timestamps in this run - word timing will be "
+                           "estimated from the cue text")
     elapsed = time.time() - job["started"]
     meta = {
         "model": model_name,
@@ -298,6 +477,8 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
         "task": "translate" if task_translate else "transcribe",
         "transcribe_seconds": round(elapsed, 1),
         "segments": len(segments),
+        "words": words_mode,           # "tokens" | "none"
+        "dtw": bool(dtw),
     }
     return segments, meta
 

@@ -27,6 +27,15 @@ Examples:
 
     # Also burn the subtitles into a new video file
     python auto_caption.py video.mp4 --language id --model medium --burn
+
+    # Short-form captions: 3 words at a time (Reels / Shorts / TikTok look)
+    python auto_caption.py video.mp4 --language id --layout burst
+
+    # One word per caption, or your own numbers
+    python auto_caption.py video.mp4 --language id --layout word
+    python auto_caption.py video.mp4 --layout custom --max-words 4 --max-chars 24
+
+Layouts: engine (default, unchanged), line, burst, word, custom.
 """
 
 from __future__ import annotations
@@ -94,7 +103,41 @@ def parse_args() -> argparse.Namespace:
                         "per-language hint.")
     p.add_argument("--keep-audio", action="store_true", default=KEEP_AUDIO,
                    help="Keep the extracted 16 kHz WAV next to the outputs")
+    # ---------------------------------------------------------------- layout
+    # How words are grouped into captions. Same presets the web UI uses
+    # (vts/segmenter.py): engine = leave the recogniser's own cuts alone.
+    p.add_argument("--layout", default="engine",
+                   choices=["engine", "line", "burst", "word", "custom"],
+                   help="Caption layout: engine (default, as transcribed), "
+                        "line (<=7 words), burst (<=3 words, short-form), "
+                        "word (one word per caption), custom (use the flags below)")
+    p.add_argument("--max-words", type=int, default=0,
+                   help="Custom layout: most words in one caption (0 = no limit)")
+    p.add_argument("--max-chars", type=int, default=0,
+                   help="Custom layout: most characters in one caption (0 = no limit)")
+    p.add_argument("--max-seconds", type=float, default=0.0,
+                   help="Custom layout: longest caption in seconds (0 = no limit)")
+    p.add_argument("--merge-under", type=float, default=0.0,
+                   help="Custom layout: merge captions shorter than this forward")
+    p.add_argument("--break-pause", type=float, default=0.0,
+                   help="Custom layout: a gap this long always starts a new caption")
+    p.add_argument("--uppercase", action="store_true",
+                   help="Custom layout: display the caption text in capitals")
+    p.add_argument("--strip-trailing-punct", action="store_true",
+                   help="Custom layout: drop a trailing . , ; : from the caption")
     return p.parse_args()
+
+
+def segmentation_options(args) -> dict:
+    """--layout/--max-* -> the segmentation fields the engine understands."""
+    if args.layout != "custom":
+        return {"segment_preset": args.layout, "segmentation": {}}
+    return {"segment_preset": "custom", "segmentation": {
+        "max_words": args.max_words, "max_chars": args.max_chars,
+        "max_duration": args.max_seconds, "min_duration": args.merge_under,
+        "pause": args.break_pause, "break_punct": True,
+        "uppercase": args.uppercase, "strip_trailing": args.strip_trailing_punct,
+    }}
 
 
 def main() -> None:
@@ -137,6 +180,7 @@ def main() -> None:
         "keep_audio": args.keep_audio,
         "burn": args.burn,
         "output_dir": str(args.output_dir) if args.output_dir else None,
+        **segmentation_options(args),
     }
     device, compute = cap.pick_device_and_compute(opts["device"], opts["compute_type"])
     opts["device"], opts["compute_type"] = device, compute
@@ -145,6 +189,12 @@ def main() -> None:
     print(f"Output: {Path(opts['output_dir'] or cap.default_output_dir(str(args.video))).resolve()}/")
     print(f"        model={args.model} device={device} compute={compute} "
           f"language={args.language} task={'translate' if args.translate_to_english else 'transcribe'}")
+    print(f"        layout={args.layout}", end="")
+    if args.layout == "custom":
+        print(f" (max {args.max_words or '-'} words / {args.max_chars or '-'} chars / "
+              f"{args.max_seconds or '-'} s)")
+    else:
+        print()
 
     job = cap.start_caption(str(args.video), opts)
     job_id = job["id"]

@@ -30,6 +30,7 @@ import math
 import uuid
 
 from . import fx as fx_mod
+from . import segmenter
 from .medialib import MAIN_ID
 
 MIN_LEN = 0.05          # shortest clip or caption that may exist (seconds)
@@ -180,14 +181,23 @@ def normalize(raw: dict, duration: float, media=None) -> dict:
         if start < -_EPS or end - start < MIN_LEN - _EPS:
             raise TimelineError(f"Caption {cid} is shorter than {MIN_LEN}s.")
         style = item.get("style") if isinstance(item.get("style"), dict) else None
-        caps.append({
+        cap = {
             "id": cid,
             "lane": lane,
             "start": max(0.0, start),
             "end": end,
             "text": str(item.get("text") or "")[:2000],
             "style": style,
-        })
+        }
+        # Word-level timings ride with the caption: absolute timeline seconds,
+        # so every move/trim/ripple is a plain shift or slice on both.
+        words = segmenter.clean_words(item.get("words"), cap["start"], cap["end"])
+        if words:
+            cap["words"] = words
+            src = segmenter.clean_word_source(item.get("word_source"))
+            if src:
+                cap["word_source"] = src
+        caps.append(cap)
         lanes = max(lanes, lane + 1)
     caps.sort(key=lambda c: (c["lane"], c["start"]))
     for a, b in zip(caps, caps[1:]):
@@ -226,19 +236,26 @@ def timeline_length(tl: dict) -> float:
 
 
 def export_cues(tl: dict, length: float) -> list[dict]:
-    """Caption cues on the exported timeline (same times as the editor)."""
+    """Caption cues on the exported timeline (same times as the editor).
+
+    Word timings travel with the cue; a cue that had to be clipped at the end
+    of the picture has its words clipped the same way.
+    """
     cues: list[dict] = []
     for item in tl.get("caps", []):
         text = (item.get("text") or "").strip()
         if not text or item["start"] >= length - 1e-6:
             continue
-        cue = {
-            "start": round(item["start"], 3),
-            "end": round(min(item["end"], length), 3),
-            "text": text,
-        }
+        start = round(item["start"], 3)
+        end = round(min(item["end"], length), 3)
+        cue = {"start": start, "end": end, "text": text}
         if item.get("style"):
             cue["style"] = item["style"]
+        words = segmenter.clean_words(item.get("words"), start, end)
+        if words:
+            cue["words"] = words
+            if item.get("word_source"):
+                cue["word_source"] = item["word_source"]
         cues.append(cue)
     cues.sort(key=lambda c: (c["start"], c["end"]))
     return cues

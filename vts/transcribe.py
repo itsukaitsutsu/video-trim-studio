@@ -12,6 +12,12 @@ tells the UI what to show when it is missing.
 Word timestamps are always requested through faster-whisper's own
 `word_timestamps=True`, which works for every language (WhisperX-style forced
 alignment only covers ~14), so the JSON is karaoke-ready everywhere.
+
+The engine's *words* are the atom: a caption cue is a group of them chosen by
+the segmentation policy in `vts/segmenter.py` (Auto-caption card ->
+"Caption segmentation"), not by the recogniser's own sentence splitting.
+`build_cues()` is the one place that turns engine segments into cues, and
+`resegment_job()` re-runs it on a finished transcription.
 """
 
 from __future__ import annotations
@@ -30,6 +36,8 @@ import uuid
 import wave
 from collections import deque
 from pathlib import Path
+
+from vts import segmenter
 
 # Keep HuggingFace's cosmetic Windows symlink warning out of the log.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -62,6 +70,7 @@ def get_job(job_id: str) -> dict | None:
         snapshot = {k: v for k, v in job.items() if k not in ("_cancel", "segments")}
         snapshot["tail"] = list(job["tail"])
         snapshot["segment_count"] = len(job.get("cues") or job.get("segments") or [])
+        snapshot["cue_count"] = len(job.get("cues") or [])
         return snapshot
 
 
@@ -93,7 +102,9 @@ def _new_job(kind: str, source: str) -> dict:
         "started": time.time(),
         "outputs": {},
         "meta": {},
-        "cues": [],                  # editable [{start, end, text}]
+        "cues": [],                  # editable [{start,end,text,words}]
+        "word_count": 0,             # words carried by those cues
+        "segmentation": None,        # the policy the cues were cut with
         "edited": False,
         "edited_at": None,
         "tail": deque(maxlen=8),     # last transcript lines, for the live view
@@ -304,10 +315,20 @@ def write_vtt(segments: list[dict], path: str | Path) -> None:
             f.write(f"{seg['text'].strip()}\n\n")
 
 
-def write_json(segments: list[dict], info: dict, path: str | Path) -> None:
+def write_json(segments: list[dict], info: dict, path: str | Path,
+               cues: list[dict] | None = None) -> None:
+    """Write the sidecar.
+
+    `segments` stays the recogniser's own output (with its word probabilities,
+    one entry per engine segment). `cues` is the caption list the editor and
+    the timeline use - the grouped, word-carrying form - and is the only place
+    word timings survive, because .srt/.vtt cannot carry them.
+    """
+    payload: dict = {"info": info, "segments": segments}
+    if cues is not None:
+        payload["cues"] = cues
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"info": info, "segments": segments}, f,
-                  ensure_ascii=False, indent=2)
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def srt_to_cues_text(segments: list[dict]) -> str:
@@ -360,10 +381,104 @@ def validate_cues(raw) -> list[dict]:
                                f"({start:.3f}).")
         if end > MAX_CUE_SECONDS:
             raise CaptionError(f"Cue {i}: end goes beyond the 24-hour limit.")
-        clean.append({"start": round(start, 3), "end": round(end, 3),
-                      "text": text.strip()})
+        item = {"start": round(start, 3), "end": round(end, 3),
+                "text": text.strip()}
+        words = segmenter.clean_words(cue.get("words"), item["start"], item["end"])
+        if words:
+            item["words"] = words
+            src = segmenter.clean_word_source(cue.get("word_source"))
+            if src:
+                item["word_source"] = src
+        clean.append(item)
     clean.sort(key=lambda c: (c["start"], c["end"]))
     return clean
+
+
+def build_cues(segments: list[dict], opts: dict, engine: str) -> list[dict]:
+    """Engine segments -> caption cues, following the segmentation policy.
+
+    This is the single place where the two halves of auto-captioning meet:
+    the recogniser supplies the words (and their times), the policy decides
+    how many of them share a caption. Cues keep the words they were built
+    from, so word-level editing and word-pop rendering have something to
+    work with later.
+
+    Two fall-backs keep the feature honest rather than silent:
+      * "engine" preset -> the recogniser's own segmentation is kept;
+      * no word data at all (SRT-only import, a whisper.cpp build without
+        token timestamps) -> the segments are kept and each cue gets a
+        char-weighted estimate, marked `estimated`.
+    """
+    preset = str(opts.get("segment_preset") or segmenter.DEFAULT_PRESET)
+    policy = segmenter.normalize_policy(opts.get("segmentation"), preset)
+    source = "whispercpp" if engine == "whispercpp" else "whisper"
+    raw: list[dict] = []
+    for seg in segments or []:
+        try:
+            start, end = float(seg["start"]), float(seg["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        raw.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": " ".join(str(seg.get("text") or "").split()),
+            "words": segmenter.clean_words(seg.get("words"), start, end),
+            "word_source": source if seg.get("words") else None,
+        })
+    if policy["keep_segments"]:
+        return segmenter.with_estimated_words(raw)
+    words = [w for cue in raw for w in cue["words"]]
+    if not words:
+        return segmenter.with_estimated_words(raw)
+    cues = segmenter.group_words(words, policy)
+    for cue in cues:
+        cue.setdefault("word_source", source)
+    return cues
+
+
+def inherit_words(clean: list[dict], previous: list[dict]) -> list[dict]:
+    """Keep the word timings of an edited cue whose text did not change.
+
+    The caption editor posts start/end/text rows and knows nothing about
+    words. Rewriting those timings out of the payload would quietly destroy
+    word data on every save, so a cue that still matches the previous cue at
+    the same index (same text) inherits its words; an edited one starts over
+    as `edited` (its existing timings no longer describe the new words).
+    """
+    out = []
+    for i, cue in enumerate(clean):
+        item = dict(cue)
+        prev = previous[i] if i < len(previous) else None
+        if item.get("words"):
+            # Words came with the row: keep them honest about the text. A
+            # spelling fix keeps its timing and is labelled "edited"; a row
+            # whose words and text disagree loses them rather than lying.
+            words, src = segmenter.reword_for_text(item["words"], item.get("text"),
+                                                   item.get("word_source"))
+            if words:
+                item["words"] = words
+                item["word_source"] = src
+            else:
+                item["words"] = []
+                item.pop("word_source", None)
+        elif prev is not None:
+            if prev.get("text") == item.get("text") and prev.get("words"):
+                item["words"] = [dict(w) for w in prev["words"]]
+                if prev.get("word_source"):
+                    item["word_source"] = prev["word_source"]
+            elif prev.get("words"):
+                words, _ = segmenter.reword_for_text(prev["words"], item.get("text"))
+                if words:
+                    item["words"] = words
+                    item["word_source"] = "edited"
+                else:
+                    item["word_source"] = "edited"
+            else:
+                item["word_source"] = "edited"
+        out.append(item)
+    return out
 
 
 def write_outputs(job: dict, cues: list[dict]) -> None:
@@ -377,8 +492,9 @@ def write_outputs(job: dict, cues: list[dict]) -> None:
     meta = dict(job.get("meta") or {})
     meta["edited"] = True
     meta["cue_count"] = len(cues)
+    meta["word_count"] = segmenter.word_count(cues)
     if out.get("json"):
-        write_json(cues, meta, out["json"])
+        write_json(job.get("segments") or cues, meta, out["json"], cues=cues)
 
 
 def update_cues(job_id: str, cues) -> dict | None:
@@ -393,15 +509,62 @@ def update_cues(job_id: str, cues) -> dict | None:
         if job["state"] == "running":
             raise CaptionError("Transcription is still running — wait for it "
                                "to finish before editing its captions.")
-    clean = validate_cues(cues)
+    with _JOBS_LOCK:
+        previous = [dict(c) for c in (job.get("cues") or [])]
+    clean = inherit_words(validate_cues(cues), previous)
     write_outputs(job, clean)
     with _JOBS_LOCK:
         job["cues"] = clean
         job["cues_text"] = srt_to_cues_text(clean)
+        job["word_count"] = segmenter.word_count(clean)
         job["edited"] = True
         job["edited_at"] = time.time()
         job["progress"] = 100.0
-        job["note"] = f"{len(clean)} cue(s) saved to {job['outputs'].get('srt')}"
+        job["note"] = (f"{len(clean)} cue(s), "
+                       f"{job['word_count']} word(s) - saved to "
+                       f"{job['outputs'].get('srt')}")
+    return get_job(job_id)
+
+
+def resegment_job(job_id: str, preset: str | None = None,
+                  segmentation: dict | None = None) -> dict | None:
+    """Re-cut a finished caption set into new cues, without re-transcribing.
+
+    Works from the *current* cues (which carry words, real or estimated), not
+    from the raw engine output: hand edits - a moved cue, a fixed word, a
+    deleted line - must survive the re-split, and text the user typed is
+    re-estimated rather than dropped.
+    """
+    with _JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            return None
+        if job["state"] == "running":
+            raise CaptionError("Transcription is still running - wait for it "
+                               "to finish before re-splitting.")
+        current = [dict(c) for c in (job.get("cues") or [])]
+    if not current:
+        raise CaptionError("There are no cues to re-split yet.")
+    if preset is not None and str(preset) not in segmenter.PRESETS:
+        raise CaptionError("segment_preset must be one of: "
+                           + ", ".join(segmenter.PRESET_ORDER))
+    policy = segmenter.normalize_policy(segmentation, preset)
+    cues = segmenter.segment_cues(current, policy)
+    if not cues:
+        raise CaptionError("Re-splitting produced no cues - the current cues "
+                           "carry no words or text.")
+    write_outputs(job, cues)
+    with _JOBS_LOCK:
+        job["cues"] = cues
+        job["cues_text"] = srt_to_cues_text(cues)
+        job["word_count"] = segmenter.word_count(cues)
+        job["segmentation"] = policy
+        job["segment_preset"] = preset or segmenter.preset_of(policy)
+        job["edited"] = True
+        job["edited_at"] = time.time()
+        job["progress"] = 100.0
+        job["note"] = (f"re-split into {len(cues)} cue(s) "
+                       f"({job['word_count']} word(s))")
     return get_job(job_id)
 
 
@@ -438,7 +601,8 @@ def start_manual_captions(source: str, output_dir: str | None = None,
                 JOBS.pop(job["id"], None)
             raise CaptionError(f"Cannot read '{sidecar}': {exc}")
         from vts import detect as detect_mod     # lazy: parser lives there
-        cues = validate_cues(detect_mod.parse_subtitles(text))
+        cues = segmenter.with_estimated_words(
+            validate_cues(detect_mod.parse_subtitles(text)))
         job["note"] = (f"Loaded {len(cues)} cue(s) from {os.path.basename(sidecar)}"
                        " — edit and press Save.")
     else:
@@ -735,32 +899,48 @@ def _run(job: dict, source: str, opts: dict) -> None:
 
         job["stage"] = "writing"
         job["progress"] = 100.0
+
+        # Words -> cues: the recogniser's words, grouped by the user's policy.
+        # From here on the cue list is what everything sees (files, editor,
+        # detection, burn); the engine's own segments stay server-side so a
+        # re-split never has to transcribe twice.
+        cues = build_cues(segments, opts, engine)
+
         srt_path = os.path.join(output_dir, f"{stem}.srt")
         vtt_path = os.path.join(output_dir, f"{stem}.vtt")
         json_path = os.path.join(output_dir, f"{stem}.json")
-        write_srt(segments, srt_path)
-        write_vtt(segments, vtt_path)
-        write_json(segments, meta, json_path)
+        write_srt(cues, srt_path)
+        write_vtt(cues, vtt_path)
+        write_json(segments, meta, json_path, cues=cues)
         job["outputs"].update({"srt": srt_path, "vtt": vtt_path, "json": json_path})
 
         if opts.get("burn"):
             job["stage"] = "burn"
             burned = os.path.join(output_dir, f"{stem}.captioned.mp4")
             job["note"] = "burning subtitles into a new video file"
-            burn_subtitles(source, segments, burned, opts.get("caption_style"))
+            burn_subtitles(source, cues, burned, opts.get("caption_style"))
             job["outputs"]["video"] = burned
 
         job["meta"] = meta
-        job["segments"] = segments
-        job["cues"] = [{"start": s["start"], "end": s["end"], "text": s["text"]}
-                       for s in segments]
-        job["cues_text"] = srt_to_cues_text(segments)
+        job["segments"] = segments          # raw engine output (server-side)
+        job["cues"] = cues
+        job["cues_text"] = srt_to_cues_text(cues)
+        job["word_count"] = segmenter.word_count(cues)
+        job["segmentation"] = segmenter.normalize_policy(
+            opts.get("segmentation"), opts.get("segment_preset"))
+        job["segment_preset"] = str(opts.get("segment_preset")
+                                    or segmenter.DEFAULT_PRESET)
         job["eta"] = 0
         job["state"] = "done"
-        if segments:
-            job["note"] = (f"{meta['segments']} segments · {meta['language']} "
+        if cues:
+            words = job["word_count"]
+            job["note"] = (f"{len(cues)} captions · {words} words · "
+                           f"{meta['language']} "
                            f"({meta['language_probability']:.0%} confident) · "
                            f"{fmt_clock(meta['transcribe_seconds'])} on {meta['device']}")
+            if not segmenter.has_words([c for c in cues if c.get("word_source") != "estimated"]):
+                job["note"] += (" · word timing estimated (no token timestamps "
+                                "from this engine)")
         else:
             # VAD filtered everything out, or the track really is silent.
             job["note"] = ("No speech detected — the caption files are empty. "
@@ -828,12 +1008,21 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
         if not 1 <= beam <= 10:
             raise CaptionError("beam_size must be between 1 and 10.")
 
+    preset = str(opts.get("segment_preset") or segmenter.DEFAULT_PRESET)
+    if preset not in segmenter.PRESETS:
+        raise CaptionError("segment_preset must be one of: "
+                           + ", ".join(segmenter.PRESET_ORDER))
+    opts["segment_preset"] = preset
+    opts["segmentation"] = segmenter.normalize_policy(opts.get("segmentation"), preset)
+
     job = _new_job("caption", source)
+    job["segmentation"] = opts["segmentation"]
+    job["segment_preset"] = preset
     job["options"] = {k: opts.get(k) for k in (
         "engine", "model", "language", "translate_to_english", "device",
-        "compute_type", "vad", "word_timestamps", "beam_size",
+        "compute_type", "vad", "word_timestamps", "dtw", "beam_size",
         "temperature_fallback", "normalize_audio", "initial_prompt",
-        "keep_audio", "burn", "output_dir")}
+        "keep_audio", "burn", "output_dir", "segment_preset", "segmentation")}
     threading.Thread(target=_run, args=(job, source, opts), daemon=True).start()
     return get_job(job["id"])                       # type: ignore[return-value]
 
@@ -848,6 +1037,10 @@ def format_for_ui() -> dict:
         "compute_types": list(COMPUTE_TYPES),
         "status": dependency_status(),
         "python": sys.version.split()[0],
+        # Segmentation presets + field metadata: the caption card builds its
+        # "Caption segmentation" controls from this, not from a hard-coded
+        # <select>, so a preset added in vts/segmenter.py shows up by itself.
+        "segmentation": segmenter.catalog(),
     }
     try:
         from vts import whispercpp as wcpp

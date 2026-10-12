@@ -21,9 +21,33 @@ import re
 MIN_PIECE_S = 0.05
 
 
+def _clip_words(words, seg_start: float, seg_end: float,
+                removed_before: float) -> list[dict]:
+    """Words of a cue inside a kept range, moved onto the export timeline.
+
+    A word straddling the cut is clipped (it is heard on both sides of the
+    join); a word entirely inside a removed range disappears with the video.
+    """
+    out: list[dict] = []
+    for w in words or []:
+        try:
+            ws, we = float(w["s"]), float(w["e"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if we <= seg_start or ws >= seg_end:
+            continue
+        a, b = max(ws, seg_start), min(we, seg_end)
+        if b - a < 1e-6:
+            continue
+        out.append({"w": str(w.get("w", "")),
+                    "s": round(a - removed_before, 3),
+                    "e": round(b - removed_before, 3)})
+    return out
+
+
 def remap_cues(cues: list[dict], kept_segments: list[tuple[float, float]],
                min_piece_s: float = MIN_PIECE_S) -> list[dict]:
-    """Map [{start,end,text}] onto the export timeline of `kept_segments`."""
+    """Map [{start,end,text,words}] onto the export timeline of `kept_segments`."""
     pieces: list[dict] = []
     removed_before = 0.0          # total deleted time ahead of the cursor
     prev_kept_end = 0.0
@@ -42,15 +66,27 @@ def remap_cues(cues: list[dict], kept_segments: list[tuple[float, float]],
                 for k in ("style", "id", "track"):
                     if k in cue:
                         piece[k] = cue[k]
+                words = _clip_words(cue.get("words"), a, b, removed_before)
+                if words:
+                    piece["words"] = words
+                    if cue.get("word_source"):
+                        piece["word_source"] = cue["word_source"]
                 pieces.append(piece)
     pieces.sort(key=lambda c: (c["start"], c["end"]))
 
-    # Rejoin fragments of one sentence that a cut merely interrupted.
+    # Rejoin fragments of one sentence that a cut merely interrupted. The
+    # words of both fragments follow the cue, minus a word that landed on the
+    # join and would otherwise be listed twice.
     merged: list[dict] = []
     for piece in pieces:
         if (merged and merged[-1]["text"] == piece["text"]
                 and abs(merged[-1]["end"] - piece["start"]) <= 1e-6):
             merged[-1]["end"] = piece["end"]
+            if piece.get("words"):
+                seen = {(w["w"], w["s"]) for w in merged[-1].get("words") or []}
+                merged[-1].setdefault("words", [])
+                merged[-1]["words"] += [w for w in piece["words"]
+                                        if (w["w"], w["s"]) not in seen]
         else:
             merged.append(dict(piece))
     return merged
@@ -126,8 +162,16 @@ DEFAULT_STYLE = {"x": 0.5, "y": 0.92, "size_pct": 4.5,
 
 
 def _cue_events(cue: dict, st: dict, width: int, height: int,
-                style_name: str = "Default") -> list[str]:
-    """One positioned Dialogue per wrapped line for a single cue."""
+                style_name: str = "Default",
+                shadow_name: str | None = None) -> list[str]:
+    """One positioned Dialogue per wrapped line for a single cue.
+
+    `shadow_name` is the style the shadow Dialogues reference. It is normally
+    `<style_name>Shadow`, but the writer may have collapsed two cues onto one
+    shared style, so the name it actually declared is passed in.
+    """
+    if shadow_name is None:
+        shadow_name = style_name + "Shadow"
     x = min(1.0, max(0.0, float(st.get("x", 0.5))))
     y = min(1.0, max(0.0, float(st.get("y", 0.88))))
     size_pct = min(25.0, max(1.0, float(st.get("size_pct", 5.5))))
@@ -197,7 +241,7 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
                            f"\\1a{alpha}\\3a{alpha}\\4a&HFF&\\shad0"
                            f"\\bord{shadow_size:.2f}\\blur{shadow_blur:.2f}"
                            f"\\an{an}\\pos({round(px + shadow_x)},{round(py + shadow_y)})")
-            out.append(f"Dialogue: 0,{start},{end},{style_name}Shadow,,0,0,0,,{{{shadow_tags}}}{text}")
+            out.append(f"Dialogue: 0,{start},{end},{shadow_name},,0,0,0,,{{{shadow_tags}}}{text}")
         main_tags = f"{common_tags}\\shad0\\blur0\\an{an}\\pos({round(px)},{round(py)})"
         out.append(f"Dialogue: 1,{start},{end},{style_name},,0,0,0,,{{{main_tags}}}{text}")
         return out
@@ -290,14 +334,33 @@ def write_ass(cues: list[dict], path, width: int, height: int,
     ]
     events: list[str] = []
     style_lines: list[str] = []
+    # Word-granular captions mean hundreds of cues, and a style line per cue
+    # (plus its shadow) turns into thousands of styles that libass has to look
+    # up by name for every event. Identical styles collapse onto one name -
+    # the first cue that needed it keeps it, so nothing else changes.
+    style_cache: dict[str, str] = {}
+
+    def name_for(cue_style: dict, shadow: bool, idx: int) -> str:
+        st2 = {**cue_style, "background_opacity": 0} if shadow else cue_style
+        # The prefix keeps a shadow from collapsing onto a main style that
+        # happens to be identical (a cue with no box background), so the
+        # Cue<n> / Cue<n>Shadow pairing stays what it always was. A cue whose
+        # style no earlier cue used keeps its own number - which is why the
+        # styles of a normal project are named exactly as before.
+        key = ("S|" if shadow else "P|") + _ass_style_line("X", st2, height)
+        hit = style_cache.get(key)
+        if hit:
+            return hit
+        name = f"Cue{idx}" + ("Shadow" if shadow else "")
+        style_cache[key] = name
+        style_lines.append(_ass_style_line(name, st2, height))
+        return name
+
     for i, cue in enumerate(cues):
         cue_style = dict(base, **(cue.get("style") or {}))
-        style_name = f"Cue{i}"
-        style_lines.append(_ass_style_line(style_name, cue_style, height))
-        # Shadow must never inherit an opaque caption-background rectangle.
-        style_lines.append(_ass_style_line(style_name + "Shadow",
-            {**cue_style, "background_opacity": 0}, height))
-        events += _cue_events(cue, cue_style, width, height, style_name)
+        style_name = name_for(cue_style, False, i)
+        shadow_name = name_for(cue_style, True, i)
+        events += _cue_events(cue, cue_style, width, height, style_name, shadow_name)
     # Place each per-cue ASS style before [Events].
     events_at = header.index("[Events]")
     header[events_at:events_at] = style_lines + ([""] if style_lines else [])

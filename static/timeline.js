@@ -1915,6 +1915,9 @@ async function runDetect() {
       use_cues: $("dCues").checked,
       subtitles_text: S.subsText,
       subtitles_path: $("dSubPath").value.trim() || null,
+      // Cues straight from the caption card: they carry the word timings an
+      // .srt cannot, so the seeded captions keep them.
+      cues: S.subsCues || [],
     };
     const data = await api("/api/detect", { method: "POST", body: JSON.stringify(body) });
     const clips = TLM.clipsFromSections(data.sections, S.duration);
@@ -2093,6 +2096,7 @@ function bindUI() {
     try {
       const data = await api("/api/parse-subtitles", { method: "POST", body: fd });
       S.subsText = null;
+      S.subsCues = null;             // a typed-in .srt has no word timings
       $("dSubPath").value = data.saved_path || "";
       $("subInfo").textContent = `${data.count} cues loaded (${f.name}) — editable`;
       $("dCues").checked = true;
@@ -2106,6 +2110,7 @@ function bindUI() {
   $("capUse").onclick = useCaptions;
   $("capNewBtn").onclick = newBlankCaptions;
   $("capOpenSrtBtn").onclick = openCaptionsFile;
+  $("capResplit").onclick = resplitCaptions;
   $("capAddCue").onclick = addCueRow;
   $("capRevert").onclick = revertCues;
   $("capSave").onclick = () => saveCues(false);
@@ -2179,6 +2184,7 @@ async function onProjectOpen(data) {
   S.thumbs = null;
   S.thumbImgs = [];
   S.subsText = null;
+  S.subsCues = null;
   $("subInfo").textContent = data.demo_subtitles ? "Bundled demo subtitles ready" : "";
   $("dSubPath").value = data.demo_subtitles || "";
   $("pathInput").value = data.info.path;

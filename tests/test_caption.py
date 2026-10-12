@@ -564,10 +564,18 @@ def test_manual_set_loads_an_existing_sidecar(tmp_path):
                    "2\n00:00:03,000 --> 00:00:04,000\nSecond line\n\n",
                    encoding="utf-8")
     job = cap_mod.start_manual_captions(str(video), sidecar=str(srt))
-    assert job["cues"] == [
-        {"start": 1.0, "end": 2.5, "text": "Hello there"},
-        {"start": 3.0, "end": 4.0, "text": "Second line"},
+    # A subtitle file carries no word timing, so the cues arrive with a
+    # char-weighted estimate - honest about itself, and enough for the
+    # burst/word layouts and for word-level editing to work on an import.
+    assert [(c["start"], c["end"], c["text"]) for c in job["cues"]] == [
+        (1.0, 2.5, "Hello there"),
+        (3.0, 4.0, "Second line"),
     ]
+    first = job["cues"][0]
+    assert [w["w"] for w in first["words"]] == ["Hello", "there"]
+    assert first["word_source"] == "estimated"
+    assert first["words"][0]["s"] == 1.0
+    assert first["words"][-1]["e"] == 2.5
     assert "2 cue(s)" in job["note"]
 
 
@@ -662,6 +670,100 @@ def test_caption_editor_roundtrip_over_http(client, tmp_path):
     assert data["cue_count"] == 2
     texts = [s["text"] for s in data["sections"] if s["kind"] == "caption"]
     assert "fixed text" in texts and "moved later" in texts
+
+
+def test_words_survive_the_cue_editor_and_the_re_split(client, tmp_path):
+    """The whole point of the word layer: edit cues, re-split them, keep the
+    timings - and never touch the audio again."""
+    video = tmp_path / "wordy.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=8",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(video),
+    ], check=True, capture_output=True)
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+
+    job = client.post("/api/caption/manual", json={}).json()
+    words = [{"w": "Halo", "s": 0.2, "e": 0.6}, {"w": "dunia", "s": 0.7, "e": 1.1},
+             {"w": "apa", "s": 1.2, "e": 1.5}, {"w": "kabar", "s": 1.6, "e": 2.1}]
+    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
+        {"start": 0.0, "end": 2.4, "text": "Halo dunia apa kabar", "words": words,
+         "word_source": "whisper"},
+    ]})
+    assert res.status_code == 200, res.text
+    saved = res.json()
+    assert saved["word_count"] == 4
+    assert [w["w"] for w in saved["cues"][0]["words"]] == ["Halo", "dunia", "apa", "kabar"]
+    assert saved["cues"][0]["word_source"] == "whisper"
+
+    # A text edit that keeps the word count keeps the timings (spelling fix).
+    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
+        {"start": 0.0, "end": 2.4, "text": "Halo duniaku apa kabar", "words": words,
+         "word_source": "whisper"},
+    ]})
+    fixed = res.json()["cues"][0]
+    assert [w["w"] for w in fixed["words"]] == ["Halo", "duniaku", "apa", "kabar"]
+    assert fixed["words"][1]["s"] == 0.7        # the timing survived the fix
+    assert fixed["word_source"] == "edited"     # ... and says where it came from
+
+    # Re-split into the burst layout: same words, new cues, no re-transcription.
+    res = client.post(f"/api/caption/{job['id']}/resegment",
+                      json={"preset": "burst", "segmentation": {}})
+    assert res.status_code == 200, res.text
+    burst = res.json()
+    assert [c["text"] for c in burst["cues"]] == ["Halo duniaku apa", "kabar"]
+    assert burst["word_count"] == 4
+    assert burst["segment_preset"] == "burst"
+    # The cue was hand-fixed, so its words are labelled "edited" - never
+    # "estimated", which would claim the timings are guesses.
+    assert [c["word_source"] for c in burst["cues"]] == ["edited", "edited"]
+    assert burst["cues"][0]["words"][0]["s"] == 0.2
+
+    # ... and into one word per cue, which is what a word-pop burn needs.
+    res = client.post(f"/api/caption/{job['id']}/resegment", json={"preset": "word"})
+    words_only = res.json()
+    assert [c["text"] for c in words_only["cues"]] == ["Halo", "duniaku", "apa", "kabar"]
+    assert all(len(c["words"]) == 1 for c in words_only["cues"])
+    assert words_only["cues"][-1]["words"][0]["e"] == 2.1
+
+    # The .srt on disk cannot carry word times, but the JSON sidecar can, and
+    # the cue list the route returns stays the source of truth for the editor.
+    meta = json.loads(Path(words_only["outputs"]["json"]).read_text(encoding="utf-8"))
+    assert meta["info"]["word_count"] == 4
+    srt = Path(words_only["outputs"]["srt"]).read_text(encoding="utf-8")
+    assert "kabar" in srt and "words" not in srt
+
+    # A rewrite with a different word count has no timing to map: the row is
+    # kept, the words are dropped rather than guessed at.
+    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
+        {"start": 0.0, "end": 2.4, "text": "Halo dunia dan kawan kawan"},
+    ]})
+    assert not res.json()["cues"][0].get("words")
+    assert res.json()["word_count"] == 0
+
+
+def test_resplit_rejects_a_bad_preset_and_an_unknown_job(client, tmp_path):
+    video = tmp_path / "resplit.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        str(video),
+    ], check=True, capture_output=True)
+    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
+    job = client.post("/api/caption/manual", json={}).json()
+
+    empty = client.post(f"/api/caption/{job['id']}/resegment", json={"preset": "burst"})
+    assert empty.status_code == 400 and "no cues" in empty.json()["detail"].lower()
+
+    client.put(f"/api/caption/{job['id']}/cues",
+               json={"cues": [{"start": 0, "end": 1, "text": "one line"}]})
+    bad = client.post(f"/api/caption/{job['id']}/resegment",
+                      json={"preset": "gigantic"})
+    assert bad.status_code == 400 and "segment_preset" in bad.json()["detail"]
+    assert client.post("/api/caption/deadbeef/resegment",
+                       json={"preset": "burst"}).status_code == 404
 
 
 def test_manual_caption_open_srt_over_http(client, tmp_path):

@@ -364,3 +364,64 @@ test("captions map through the V1 track only", () => {
   assert.equal(caps.length, 1);
   assert.equal(caps[0].start, 1);
 });
+
+test("moving a caption carries its word timings along", () => {
+  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
+  const tl = {
+    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
+    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
+  };
+  const out = TLM.moveItems(tl, ["w1"], 2, 0);
+  const moved = out.caps[0];
+  assert.deepEqual([moved.start, moved.end], [3, 4]);
+  assert.deepEqual(moved.words.map((w) => [w.s, w.e]), [[3, 3.4], [3.5, 4]]);
+});
+
+test("trimming a caption drops the words that fell outside it", () => {
+  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
+  const tl = {
+    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
+    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
+  };
+  const out = TLM.trimItem(tl, "w1", "l", 1.5);
+  assert.deepEqual(out.caps[0].words.map((w) => w.w), ["dunia"]);
+});
+
+test("razor-splitting a caption slices the words at the cut", () => {
+  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
+  const tl = {
+    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
+    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
+  };
+  const parts = TLM.splitSelection(tl, 1.5, ["w1"]);
+  assert.equal(parts.caps.length, 2);
+  assert.deepEqual(parts.caps[0].words.map((w) => w.w), ["Halo"]);
+  assert.deepEqual(parts.caps[1].words.map((w) => w.w), ["dunia"]);
+});
+
+test("cues seeded from a transcription keep their word timings on the timeline", () => {
+  const cues = [{
+    start: 1, end: 2, text: "Halo dunia",
+    words: [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }],
+    word_source: "whisper",
+  }];
+  const { caps } = TLM.capsFromCues(TLM.clipsFromSource(10), cues);
+  assert.equal(caps.length, 1);
+  assert.deepEqual(caps[0].words.map((w) => w.w), ["Halo", "dunia"]);
+  assert.equal(caps[0].word_source, "whisper");
+});
+
+test("editing caption text keeps the timings of a same-length rewrite", () => {
+  const tl = {
+    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
+    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"),
+              words: [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }] }],
+  };
+  const fixed = TLM.setCaptionText(tl, "w1", "halo duniaku");
+  assert.deepEqual(fixed.caps[0].words.map((w) => [w.w, w.s, w.e]),
+                   [["halo", 1, 1.4], ["duniaku", 1.5, 2]]);
+  assert.equal(fixed.caps[0].word_source, "edited");
+  const longer = TLM.setCaptionText(tl, "w1", "Halo dunia semuanya");
+  assert.deepEqual(longer.caps[0].words, []);        // no timings to guess from
+  assert.equal(longer.caps[0].word_source, null);
+});

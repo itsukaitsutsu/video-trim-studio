@@ -1,0 +1,2938 @@
+diff --git a/auto_caption.py b/auto_caption.py
+index ae71856..3a4398d 100644
+--- a/auto_caption.py
++++ b/auto_caption.py
+@@ -27,6 +27,15 @@ Examples:
+ 
+     # Also burn the subtitles into a new video file
+     python auto_caption.py video.mp4 --language id --model medium --burn
++
++    # Short-form captions: 3 words at a time (Reels / Shorts / TikTok look)
++    python auto_caption.py video.mp4 --language id --layout burst
++
++    # One word per caption, or your own numbers
++    python auto_caption.py video.mp4 --language id --layout word
++    python auto_caption.py video.mp4 --layout custom --max-words 4 --max-chars 24
++
++Layouts: engine (default, unchanged), line, burst, word, custom.
+ """
+ 
+ from __future__ import annotations
+@@ -94,9 +103,43 @@ def parse_args() -> argparse.Namespace:
+                         "per-language hint.")
+     p.add_argument("--keep-audio", action="store_true", default=KEEP_AUDIO,
+                    help="Keep the extracted 16 kHz WAV next to the outputs")
++    # ---------------------------------------------------------------- layout
++    # How words are grouped into captions. Same presets the web UI uses
++    # (vts/segmenter.py): engine = leave the recogniser's own cuts alone.
++    p.add_argument("--layout", default="engine",
++                   choices=["engine", "line", "burst", "word", "custom"],
++                   help="Caption layout: engine (default, as transcribed), "
++                        "line (<=7 words), burst (<=3 words, short-form), "
++                        "word (one word per caption), custom (use the flags below)")
++    p.add_argument("--max-words", type=int, default=0,
++                   help="Custom layout: most words in one caption (0 = no limit)")
++    p.add_argument("--max-chars", type=int, default=0,
++                   help="Custom layout: most characters in one caption (0 = no limit)")
++    p.add_argument("--max-seconds", type=float, default=0.0,
++                   help="Custom layout: longest caption in seconds (0 = no limit)")
++    p.add_argument("--merge-under", type=float, default=0.0,
++                   help="Custom layout: merge captions shorter than this forward")
++    p.add_argument("--break-pause", type=float, default=0.0,
++                   help="Custom layout: a gap this long always starts a new caption")
++    p.add_argument("--uppercase", action="store_true",
++                   help="Custom layout: display the caption text in capitals")
++    p.add_argument("--strip-trailing-punct", action="store_true",
++                   help="Custom layout: drop a trailing . , ; : from the caption")
+     return p.parse_args()
+ 
+ 
++def segmentation_options(args) -> dict:
++    """--layout/--max-* -> the segmentation fields the engine understands."""
++    if args.layout != "custom":
++        return {"segment_preset": args.layout, "segmentation": {}}
++    return {"segment_preset": "custom", "segmentation": {
++        "max_words": args.max_words, "max_chars": args.max_chars,
++        "max_duration": args.max_seconds, "min_duration": args.merge_under,
++        "pause": args.break_pause, "break_punct": True,
++        "uppercase": args.uppercase, "strip_trailing": args.strip_trailing_punct,
++    }}
++
++
+ def main() -> None:
+     args = parse_args()
+     if not args.video.is_file():
+@@ -137,6 +180,7 @@ def main() -> None:
+         "keep_audio": args.keep_audio,
+         "burn": args.burn,
+         "output_dir": str(args.output_dir) if args.output_dir else None,
++        **segmentation_options(args),
+     }
+     device, compute = cap.pick_device_and_compute(opts["device"], opts["compute_type"])
+     opts["device"], opts["compute_type"] = device, compute
+@@ -145,6 +189,12 @@ def main() -> None:
+     print(f"Output: {Path(opts['output_dir'] or cap.default_output_dir(str(args.video))).resolve()}/")
+     print(f"        model={args.model} device={device} compute={compute} "
+           f"language={args.language} task={'translate' if args.translate_to_english else 'transcribe'}")
++    print(f"        layout={args.layout}", end="")
++    if args.layout == "custom":
++        print(f" (max {args.max_words or '-'} words / {args.max_chars or '-'} chars / "
++              f"{args.max_seconds or '-'} s)")
++    else:
++        print()
+ 
+     job = cap.start_caption(str(args.video), opts)
+     job_id = job["id"]
+diff --git a/server.py b/server.py
+index a0a31d2..f942ba8 100644
+--- a/server.py
++++ b/server.py
+@@ -181,6 +181,10 @@ class DetectRequest(BaseModel):
+     use_cues: bool = True
+     subtitles_path: str | None = None
+     subtitles_text: str | None = None
++    # The caption card's own cue list, including the word timings its
++    # transcription produced. Preferred over re-parsing the .srt, which cannot
++    # carry word timing and would downgrade it to an estimate.
++    cues: list[dict] = []
+ 
+ 
+ class ExportRequest(BaseModel):
+@@ -206,10 +210,16 @@ class SubtitleEditRequest(BaseModel):
+ 
+ 
+ class CaptionCuesRequest(BaseModel):
+-    """Edited cue list: [{'start': s, 'end': s, 'text': str}, ...]."""
++    """Edited cue list: [{'start': s, 'end': s, 'text': str[, 'words': [...]]}]."""
+     cues: list
+ 
+ 
++class ResegmentRequest(BaseModel):
++    """Re-cut a finished caption set into new cues (no re-transcription)."""
++    preset: str | None = None            # engine | line | burst | word | custom
++    segmentation: dict = {}
++
++
+ class ManualCaptionRequest(BaseModel):
+     """An editable caption set without transcription."""
+     load: str | None = None            # existing .srt / .vtt to open
+@@ -226,6 +236,12 @@ class CaptionRequest(BaseModel):
+     compute_type: str = "auto"
+     vad: bool = True
+     word_timestamps: bool = True
++    dtw: bool = False                # whisper.cpp only: DTW word alignment
++    # Caption segmentation: how many words share one caption. Default "engine"
++    # = the recogniser's own segments, i.e. exactly the old behaviour; pass
++    # line/burst/word/custom (see vts/segmenter.py) to re-cut them.
++    segment_preset: str = "engine"
++    segmentation: dict = {}
+     beam_size: int = 1
+     temperature_fallback: bool = False
+     normalize_audio: bool = False
+@@ -622,6 +638,14 @@ def detect(req: DetectRequest):
+             text = Path(sp).read_text(encoding="utf-8-sig", errors="replace")
+         if text:
+             cues = detect_mod.parse_subtitles(text)
++        if req.cues:
++            # Cues from the caption editor carry word timings; the parsed file
++            # is only the fall-back. Text/timings come from the cue list, the
++            # path still decides where "Save captions" writes.
++            try:
++                cues = caption_mod.validate_cues(req.cues)
++            except caption_mod.CaptionError as exc:
++                raise HTTPException(400, str(exc))
+ 
+     silences: list[tuple[float, float]] = []
+     if req.detect_silence:
+@@ -1144,6 +1168,18 @@ def caption_manual(req: ManualCaptionRequest):
+         raise HTTPException(400, str(exc))
+ 
+ 
++@app.post("/api/caption/{job_id}/resegment")
++def caption_resegment(job_id: str, req: ResegmentRequest):
++    """Re-split a finished caption set: words in, cues out, no new audio pass."""
++    try:
++        state = caption_mod.resegment_job(job_id, req.preset, req.segmentation)
++    except caption_mod.CaptionError as exc:
++        raise HTTPException(400, str(exc))
++    if state is None:
++        raise HTTPException(404, "Unknown caption job")
++    return state
++
++
+ @app.put("/api/caption/{job_id}/cues")
+ def caption_save_cues(job_id: str, req: CaptionCuesRequest):
+     """Overwrite the job's cues and rewrite its .srt/.vtt/.json files."""
+diff --git a/static/app.js b/static/app.js
+index ae5b6e4..b73b91a 100644
+--- a/static/app.js
++++ b/static/app.js
+@@ -2285,7 +2285,7 @@ function bindCaptionOverlay() {
+ /* ------------------------------------------------------------ auto-caption */
+ 
+ const CAP = { job: null, timer: null, poll: 700, editorSig: null,
+-              fwStatus: null, wcpp: null };
++              fwStatus: null, wcpp: null, segmentation: null, segPreset: null };
+ const TRANSLATION_MODEL_PRIORITY = [
+   "medium", "large-v3", "small", "base", "tiny", "large-v2", "large-v1",
+ ];
+@@ -2369,9 +2369,64 @@ function fillCaptionCard(caption) {
+     $("capUnavailable").hidden = true;
+     $("capRecheck").hidden = true;
+   }
++  fillSegmentation(caption.segmentation);
+   updateEngineUI();
+ }
+ 
++/* ------------------------------------------------- caption layout (words) */
++
++// How words are grouped into captions. The presets come from the server
++// (vts/segmenter.py, via /api/env), so they never drift out of sync. The
++// choice applies to the next transcription and to "Re-split".
++const SEG_DEFAULT = "burst";
++
++function fillSegmentation(cat) {
++  CAP.segmentation = cat || null;
++  const sel = $("cSeg");
++  if (!sel || !cat) return;
++  sel.textContent = "";
++  // "Custom" needs the numeric limit fields, which this one-row control has
++  // no space for: keep it to the four named layouts here, custom limits stay
++  // available over the API / auto_caption.py --layout custom.
++  (cat.presets || []).filter((p) => p.id !== "custom").forEach((p) => {
++    const o = document.createElement("option");
++    o.value = p.id;
++    o.textContent = p.label;
++    o.title = p.hint || "";
++    sel.appendChild(o);
++  });
++  CAP.segPreset = CAP.segPreset || cat.default || SEG_DEFAULT;
++  if ([...sel.options].some((o) => o.value === CAP.segPreset)) sel.value = CAP.segPreset;
++  sel.onchange = () => { CAP.segPreset = sel.value; };
++  const btn = $("capResplit");
++  if (btn) btn.onclick = resplitCaptions;
++}
++
++// Re-cut the captions that are in the editor right now - transcribed or
++// imported - from the words they already carry. No new pass over the audio.
++async function resplitCaptions() {
++  if (!CAP.job) return;
++  const btn = $("capResplit");
++  const preset = ($("cSeg") && $("cSeg").value) || CAP.segPreset || SEG_DEFAULT;
++  btn.disabled = true;
++  const label = btn.textContent;
++  btn.textContent = "Re-splitting…";
++  try {
++    const job = await api(`/api/caption/${CAP.job.id}/resegment`, {
++      method: "POST", body: JSON.stringify({ preset }),
++    });
++    CAP.editorSig = null;                  // force the table to be rebuilt
++    renderCaptionJob(job);
++    $("capNote").textContent = "";
++    $("capSaved").textContent = job.note || `${job.cues.length} caption(s)`;
++  } catch (e) {
++    alert("Could not re-split the captions: " + e.message);
++  } finally {
++    btn.disabled = false;
++    btn.textContent = label;
++  }
++}
++
+ /* --------------------------------------------------- whisper.cpp engine UI */
+ 
+ function engineIsWcpp() {
+@@ -2562,6 +2617,7 @@ function captionOptions() {
+     initial_prompt: $("cPrompt").value.trim() || null,
+     output_dir: $("cOutDir").value.trim() || null,
+     caption_style: { ...CAPPOS },
++    segment_preset: ($("cSeg") && $("cSeg").value) || CAP.segPreset || SEG_DEFAULT,
+   };
+   if (opts.engine === "whispercpp") opts.model = $("wModel").value;
+   return opts;
+diff --git a/static/index.html b/static/index.html
+index 8ccb6c8..8c7ddcb 100644
+--- a/static/index.html
++++ b/static/index.html
+@@ -4,7 +4,7 @@
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>Video Trim Studio</title>
+-<link rel="stylesheet" href="/static/style.css?v=41">
++<link rel="stylesheet" href="/static/style.css?v=42">
+ </head>
+ <body>
+ <header id="menubar">
+@@ -195,6 +195,10 @@
+               <button id="capRevert" class="mini" title="Reload the last saved version">Undo changes</button>
+               <button id="capSave" class="mini primary">Save captions</button>
+             </div>
++            <div class="row cap-layout-row">
++              <select id="cSeg" title="How many words share one caption. Used for the next transcription and for Re-split."></select>
++              <button id="capResplit" class="mini" title="Re-cut these captions with this layout - no new transcription">Re-split</button>
++            </div>
+             <div id="capSaved" class="dim small"></div>
+             <div class="cap-editor-scroll">
+               <table id="capCueTable">
+@@ -633,7 +637,7 @@
+ <script src="/static/stage.js?v=1"></script>
+ <script src="/static/timeline.js?v=16"></script>
+ <script src="/static/clip.js?v=1"></script>
+-<script src="/static/app.js?v=42"></script>
++<script src="/static/app.js?v=43"></script>
+ <script src="/static/font-picker.js?v=1"></script>
+ <script src="/static/fonts.js?v=1"></script>
+ </body>
+diff --git a/static/style.css b/static/style.css
+index 555a43d..1eb0e6a 100644
+--- a/static/style.css
++++ b/static/style.css
+@@ -245,6 +245,10 @@ button.small { font-size: 11.5px; padding: 5px; }
+   display: flex; align-items: center; gap: 8px; margin: 8px 0 2px;
+ }
+ .cap-editor-head .grow { flex: 1; }
++/* One compact row: the caption layout + Re-split (inside the caption editor). */
++.cap-layout-row { margin: 6px 0 4px; }
++.cap-layout-row select { flex: 1; min-width: 0; }
++.cap-layout-row button { flex: none; }
+ #capCueTable { width: 100%; border-collapse: collapse; font-size: 12px; }
+ #capCueTable thead th {
+   text-align: left; font-weight: 600; color: var(--dim);
+diff --git a/static/timeline-model.js b/static/timeline-model.js
+index d43c4a8..9f3c444 100644
+--- a/static/timeline-model.js
++++ b/static/timeline-model.js
+@@ -20,7 +20,12 @@
+  *   aud   = { id, src, atrack, start, end, in, name, fx }
+  *           A sound-only item on an audio lane A1..An. Several may play at
+  *           once: audio lanes MIX instead of stacking.
+- *   cap   = { id, lane, start, end, text, style }   caption on a lane
++ *   cap   = { id, lane, start, end, text, style, words? }  caption on a lane
++ *           words = [{ w, s, e }] the words this caption displays, in
++ *                   TIMELINE seconds, so a move/trim/ripple shifts or
++ *                   slices them exactly like start/end. Optional: an
++ *                   .srt import gets a char-weighted estimate instead
++ *                   (word_source "estimated").
+  *
+  * clip.in is the source time that plays at clip.start; captions have no `in`.
+  * Every function returns a new timeline and never changes its input.
+@@ -61,6 +66,84 @@
+   const clamp = (x, lo, hi) => (hi < lo ? lo : Math.min(hi, Math.max(lo, x)));
+   const num = (v, dflt) => (Number.isFinite(Number(v)) ? Number(v) : dflt);
+ 
++  // ------------------------------------------------------------ word timing
++  // A caption may carry the words it shows. Keeping them absolute (timeline
++  // seconds, not cue-relative) is what makes every existing operation a plain
++  // shift or slice on both the cue and its words.
++
++  const MAX_WORDS = 200;
++  const wordsOf = (arr) => (Array.isArray(arr) ? arr : []);
++  const capWords = (it) => wordsOf(it && it.words);
++  // Letters/digits only: a "word" made of nothing but punctuation is not one.
++  const HAS_LETTER = /[0-9A-Za-z\u00c0-\u024f\u0370-\u04ff\u3040-\u30ff\u4e00-\u9fff\uac00-\ud7af]/;
++
++  function cleanWords(raw) {
++    if (!Array.isArray(raw)) return [];
++    const out = [];
++    for (const item of raw.slice(0, MAX_WORDS * 2)) {
++      if (!item || typeof item !== "object") continue;
++      const w = String(item.w !== undefined ? item.w : (item.word || "")).trim();
++      if (!w) continue;
++      const s = num(item.s !== undefined ? item.s : item.start, NaN);
++      let e = num(item.e !== undefined ? item.e : item.end, NaN);
++      if (!Number.isFinite(s)) continue;
++      if (!Number.isFinite(e) || e <= s) e = s + 0.03;
++      out.push({ w, s: r3(s), e: r3(e) });
++    }
++    out.sort((a, b) => a.s - b.s || a.e - b.e);
++    for (let i = 1; i < out.length; i += 1) {
++      if (out[i].s < out[i - 1].e) out[i - 1].e = r3(Math.max(out[i - 1].s + 0.03, out[i].s));
++    }
++    // A punctuation-only token (whisper.cpp emits "." as its own token) rides
++    // with the word before it, exactly as the server glues it.
++    const glued = [];
++    for (const w of out) {
++      const last = glued[glued.length - 1];
++      if (last && !HAS_LETTER.test(w.w)) {
++        last.w += w.w;
++        last.e = r3(Math.max(last.e, w.e));
++      } else {
++        glued.push(w);
++      }
++    }
++    return glued.slice(0, MAX_WORDS);
++  }
++
++  function shiftWords(words, dt) {
++    const list = wordsOf(words);
++    if (!list.length || !dt) return list.map((w) => ({ w: w.w, s: w.s, e: w.e }));
++    return list.map((w) => ({ w: w.w, s: r3(w.s + dt), e: r3(w.e + dt) }));
++  }
++
++  // The words inside [from, to], clipped to it - what survives a trim, a
++  // razor or one kept piece of a rippled caption.
++  function sliceWords(words, from, to) {
++    const out = [];
++    for (const w of wordsOf(words)) {
++      if (w.e <= from + EPS || w.s >= to - EPS) continue;
++      const s = Math.max(w.s, from);
++      const e = Math.min(w.e, to);
++      if (e - s < 0.02) continue;
++      out.push({ w: w.w, s: r3(s), e: r3(e) });
++    }
++    return out;
++  }
++
++  // Text edited in place: the timings still describe the audio while the word
++  // count is unchanged (a spelling fix). Anything else re-words, and
++  // word_source "edited" says so out loud.
++  function rewordForText(cap, text) {
++    const words = capWords(cap);
++    const next = String(text || "").split(/\s+/).filter(Boolean);
++    if (!words.length || next.length !== words.length) {
++      return { words: [], word_source: null };
++    }
++    return {
++      words: words.map((w, i) => ({ w: next[i], s: w.s, e: w.e })),
++      word_source: "edited",
++    };
++  }
++
+   function trackOf(it) {
+     const t = Math.floor(num(it && it.track, 0));
+     return Math.max(0, Math.min(MAX_VTRACKS - 1, t));
+@@ -270,10 +353,18 @@
+         const a = Math.max(cs, k.in);
+         const b = Math.min(ce, srcEnd);
+         if (b - a < MIN_LEN - EPS) continue;
++        // Source word times -> timeline word times: same mapping as the cue.
++        const words = sliceWords(cue.words, a, b).map((w) => ({
++          w: w.w,
++          s: r3(k.start + (w.s - k.in)),
++          e: r3(k.start + (w.e - k.in)),
++        }));
+         caps.push({
+           id: newId("t"), lane: 0,
+           start: r3(k.start + (a - k.in)), end: r3(k.start + (b - k.in)),
+           text, style: cue.style ? clone(cue.style) : null,
++          words,
++          word_source: cue.word_source || null,
+         });
+       }
+     }
+@@ -296,6 +387,11 @@
+       }
+       const left = { ...it, end: r3(t) };
+       const right = { ...it, id: newId(prefixOf(it)), start: r3(t) };
++      if (!isClip(it)) {
++        // A caption razor cuts the word list with the cue.
++        left.words = sliceWords(capWords(it), it.start, t);
++        right.words = sliceWords(capWords(it), t, it.end);
++      }
+       if (isClip(it)) {
+         const rel = t - it.start;
+         right.in = r3(it.in + rel);
+@@ -326,7 +422,9 @@
+   // Move everything at or after t by span (used by insert).
+   function shiftArr(arr, t, span) {
+     return arr.map((it) => (it.start >= t - EPS
+-      ? { ...it, start: r3(it.start + span), end: r3(it.end + span) }
++      ? { ...it,
++          start: r3(it.start + span), end: r3(it.end + span),
++          words: isClip(it) ? it.words : shiftWords(capWords(it), span) }
+       : it));
+   }
+ 
+@@ -368,12 +466,16 @@
+       if (cur < it.end - EPS) kept.push([cur, it.end]);
+       kept.forEach(([s, e], i) => {
+         if (e - s < 1e-3) return;
++        const removed = removedBefore(merged, s);
+         const piece = {
+           ...it,
+           id: i === 0 ? it.id : newId(prefixOf(it)),
+-          start: r3(s - removedBefore(merged, s)),
++          start: r3(s - removed),
+           end: r3(e - removedBefore(merged, e)),
+         };
++        if (!isClip(it)) {
++          piece.words = shiftWords(sliceWords(capWords(it), s, e), -removed);
++        }
+         if (isClip(it)) {
+           piece.in = r3(it.in + (s - it.start));
+           withClipFx(piece, it);
+@@ -499,6 +601,7 @@
+       const moved = {
+         ...c, start: r3(c.start + shift), end: r3(c.end + shift),
+         lane: Math.max(0, c.lane + (dLane || 0)),
++        words: shiftWords(capWords(c), shift),
+       };
+       out.caps.push(placeCap(out.caps, moved));
+     }
+@@ -544,6 +647,10 @@
+       if (isC && !isAud) it.kf = kfForPiece(it.kf, 0, ne - it.start);
+       it.end = r3(ne);
+     }
++    if (!isClip(it) && !isAud) {
++      // Trimming a caption clips the words it still shows.
++      it.words = sliceWords(capWords(it), it.start, it.end);
++    }
+     out.vtracks = vtracksOf(out);
+     out.atracks = atracksOf(out);
+     return out;
+@@ -555,7 +662,12 @@
+     if (!items.length) return null;
+     const base = Math.min(...items.map((it) => it.start));
+     return {
+-      items: clone(items).map((it) => ({ ...it, start: r3(it.start - base), end: r3(it.end - base) })),
++      items: clone(items).map((it) => ({
++        ...it,
++        start: r3(it.start - base),
++        end: r3(it.end - base),
++        words: isClip(it) ? it.words : shiftWords(capWords(it), -base),
++      })),
+     };
+   }
+ 
+@@ -576,7 +688,11 @@
+       out.caps = shiftArr(splitArr(out.caps, t0), t0, span);
+     }
+     for (const it of items) {
+-      const copy = { ...it, id: newId(prefixOf(it)), start: r3(t0 + it.start), end: r3(t0 + it.end) };
++      const copy = {
++        ...it, id: newId(prefixOf(it)), start: r3(t0 + it.start), end: r3(t0 + it.end),
++        words: isClip(it) ? it.words
++          : shiftWords(capWords(it), r3(t0 + it.start) - it.start),
++      };
+       if (isAudioItem(copy)) copy.atrack = atrackOf(copy);
+       else if (isClip(copy)) copy.track = trackOf(copy);
+       ids.push(copy.id);
+@@ -606,7 +722,7 @@
+     const out = normalise(tl);
+     const cap = {
+       id: newId("t"), lane: lane || 0, start: r3(at), end: r3(at + 2),
+-      text, style: style ? clone(style) : null,
++      text, style: style ? clone(style) : null, words: [],
+     };
+     const placed = placeCap(out.caps, cap);
+     out.caps.push(placed);
+@@ -744,6 +860,7 @@
+       for (const cap of out.caps) {
+         if (cap.text === old && cap.start < clip.end - EPS && cap.end > clip.start + EPS) {
+           cap.text = clip.text;
++          Object.assign(cap, rewordForText(cap, cap.text));
+         }
+       }
+     }
+@@ -758,9 +875,10 @@
+     if (!cap) return out;
+     const old = cap.text || "";
+     cap.text = String(text || "");
++    Object.assign(cap, rewordForText(cap, cap.text));
+     if (old) {
+       for (const clip of out.clips) {
+-        if (clip.text === old && clip.start < cap.end - EPS && clip.end > cap.start + EPS) {
++        if (clip.text === old && clip.start < cap.end - EPS && clip.end > clip.start + EPS) {
+           clip.text = cap.text;
+         }
+       }
+@@ -877,6 +995,7 @@
+     placeClip, placeAudio, placeCap, makeClip, makeAudioItem, addMedia,
+     firstFreeTrack, unlinkClipAudio, relinkClipAudio, linkedAudioOf,
+     mergeRanges, validate,
++    cleanWords, shiftWords, sliceWords, capWords, rewordForText,
+   };
+   if (typeof module === "object" && module.exports) module.exports = api;
+   root.TLM = api;
+diff --git a/tests/js/timeline-model.test.js b/tests/js/timeline-model.test.js
+index 146b28d..7c6db5d 100644
+--- a/tests/js/timeline-model.test.js
++++ b/tests/js/timeline-model.test.js
+@@ -364,3 +364,64 @@ test("captions map through the V1 track only", () => {
+   assert.equal(caps.length, 1);
+   assert.equal(caps[0].start, 1);
+ });
++
++test("moving a caption carries its word timings along", () => {
++  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
++  const tl = {
++    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
++    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
++  };
++  const out = TLM.moveItems(tl, ["w1"], 2, 0);
++  const moved = out.caps[0];
++  assert.deepEqual([moved.start, moved.end], [3, 4]);
++  assert.deepEqual(moved.words.map((w) => [w.s, w.e]), [[3, 3.4], [3.5, 4]]);
++});
++
++test("trimming a caption drops the words that fell outside it", () => {
++  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
++  const tl = {
++    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
++    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
++  };
++  const out = TLM.trimItem(tl, "w1", "l", 1.5);
++  assert.deepEqual(out.caps[0].words.map((w) => w.w), ["dunia"]);
++});
++
++test("razor-splitting a caption slices the words at the cut", () => {
++  const words = [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }];
++  const tl = {
++    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
++    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"), words }],
++  };
++  const parts = TLM.splitSelection(tl, 1.5, ["w1"]);
++  assert.equal(parts.caps.length, 2);
++  assert.deepEqual(parts.caps[0].words.map((w) => w.w), ["Halo"]);
++  assert.deepEqual(parts.caps[1].words.map((w) => w.w), ["dunia"]);
++});
++
++test("cues seeded from a transcription keep their word timings on the timeline", () => {
++  const cues = [{
++    start: 1, end: 2, text: "Halo dunia",
++    words: [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }],
++    word_source: "whisper",
++  }];
++  const { caps } = TLM.capsFromCues(TLM.clipsFromSource(10), cues);
++  assert.equal(caps.length, 1);
++  assert.deepEqual(caps[0].words.map((w) => w.w), ["Halo", "dunia"]);
++  assert.equal(caps[0].word_source, "whisper");
++});
++
++test("editing caption text keeps the timings of a same-length rewrite", () => {
++  const tl = {
++    clips: TLM.clipsFromSource(20), auds: [], vtracks: 1, atracks: 1, lanes: 1,
++    caps: [{ ...cap("w1", 0, 1, 2, "Halo dunia"),
++              words: [{ w: "Halo", s: 1, e: 1.4 }, { w: "dunia", s: 1.5, e: 2 }] }],
++  };
++  const fixed = TLM.setCaptionText(tl, "w1", "halo duniaku");
++  assert.deepEqual(fixed.caps[0].words.map((w) => [w.w, w.s, w.e]),
++                   [["halo", 1, 1.4], ["duniaku", 1.5, 2]]);
++  assert.equal(fixed.caps[0].word_source, "edited");
++  const longer = TLM.setCaptionText(tl, "w1", "Halo dunia semuanya");
++  assert.deepEqual(longer.caps[0].words, []);        // no timings to guess from
++  assert.equal(longer.caps[0].word_source, null);
++});
+diff --git a/tests/test_caption.py b/tests/test_caption.py
+index 70c8f26..7cf21b0 100644
+--- a/tests/test_caption.py
++++ b/tests/test_caption.py
+@@ -564,10 +564,18 @@ def test_manual_set_loads_an_existing_sidecar(tmp_path):
+                    "2\n00:00:03,000 --> 00:00:04,000\nSecond line\n\n",
+                    encoding="utf-8")
+     job = cap_mod.start_manual_captions(str(video), sidecar=str(srt))
+-    assert job["cues"] == [
+-        {"start": 1.0, "end": 2.5, "text": "Hello there"},
+-        {"start": 3.0, "end": 4.0, "text": "Second line"},
++    # A subtitle file carries no word timing, so the cues arrive with a
++    # char-weighted estimate - honest about itself, and enough for the
++    # burst/word layouts and for word-level editing to work on an import.
++    assert [(c["start"], c["end"], c["text"]) for c in job["cues"]] == [
++        (1.0, 2.5, "Hello there"),
++        (3.0, 4.0, "Second line"),
+     ]
++    first = job["cues"][0]
++    assert [w["w"] for w in first["words"]] == ["Hello", "there"]
++    assert first["word_source"] == "estimated"
++    assert first["words"][0]["s"] == 1.0
++    assert first["words"][-1]["e"] == 2.5
+     assert "2 cue(s)" in job["note"]
+ 
+ 
+@@ -664,6 +672,100 @@ def test_caption_editor_roundtrip_over_http(client, tmp_path):
+     assert "fixed text" in texts and "moved later" in texts
+ 
+ 
++def test_words_survive_the_cue_editor_and_the_re_split(client, tmp_path):
++    """The whole point of the word layer: edit cues, re-split them, keep the
++    timings - and never touch the audio again."""
++    video = tmp_path / "wordy.mp4"
++    subprocess.run([
++        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
++        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=8",
++        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
++        str(video),
++    ], check=True, capture_output=True)
++    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
++
++    job = client.post("/api/caption/manual", json={}).json()
++    words = [{"w": "Halo", "s": 0.2, "e": 0.6}, {"w": "dunia", "s": 0.7, "e": 1.1},
++             {"w": "apa", "s": 1.2, "e": 1.5}, {"w": "kabar", "s": 1.6, "e": 2.1}]
++    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
++        {"start": 0.0, "end": 2.4, "text": "Halo dunia apa kabar", "words": words,
++         "word_source": "whisper"},
++    ]})
++    assert res.status_code == 200, res.text
++    saved = res.json()
++    assert saved["word_count"] == 4
++    assert [w["w"] for w in saved["cues"][0]["words"]] == ["Halo", "dunia", "apa", "kabar"]
++    assert saved["cues"][0]["word_source"] == "whisper"
++
++    # A text edit that keeps the word count keeps the timings (spelling fix).
++    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
++        {"start": 0.0, "end": 2.4, "text": "Halo duniaku apa kabar", "words": words,
++         "word_source": "whisper"},
++    ]})
++    fixed = res.json()["cues"][0]
++    assert [w["w"] for w in fixed["words"]] == ["Halo", "duniaku", "apa", "kabar"]
++    assert fixed["words"][1]["s"] == 0.7        # the timing survived the fix
++    assert fixed["word_source"] == "edited"     # ... and says where it came from
++
++    # Re-split into the burst layout: same words, new cues, no re-transcription.
++    res = client.post(f"/api/caption/{job['id']}/resegment",
++                      json={"preset": "burst", "segmentation": {}})
++    assert res.status_code == 200, res.text
++    burst = res.json()
++    assert [c["text"] for c in burst["cues"]] == ["Halo duniaku apa", "kabar"]
++    assert burst["word_count"] == 4
++    assert burst["segment_preset"] == "burst"
++    # The cue was hand-fixed, so its words are labelled "edited" - never
++    # "estimated", which would claim the timings are guesses.
++    assert [c["word_source"] for c in burst["cues"]] == ["edited", "edited"]
++    assert burst["cues"][0]["words"][0]["s"] == 0.2
++
++    # ... and into one word per cue, which is what a word-pop burn needs.
++    res = client.post(f"/api/caption/{job['id']}/resegment", json={"preset": "word"})
++    words_only = res.json()
++    assert [c["text"] for c in words_only["cues"]] == ["Halo", "duniaku", "apa", "kabar"]
++    assert all(len(c["words"]) == 1 for c in words_only["cues"])
++    assert words_only["cues"][-1]["words"][0]["e"] == 2.1
++
++    # The .srt on disk cannot carry word times, but the JSON sidecar can, and
++    # the cue list the route returns stays the source of truth for the editor.
++    meta = json.loads(Path(words_only["outputs"]["json"]).read_text(encoding="utf-8"))
++    assert meta["info"]["word_count"] == 4
++    srt = Path(words_only["outputs"]["srt"]).read_text(encoding="utf-8")
++    assert "kabar" in srt and "words" not in srt
++
++    # A rewrite with a different word count has no timing to map: the row is
++    # kept, the words are dropped rather than guessed at.
++    res = client.put(f"/api/caption/{job['id']}/cues", json={"cues": [
++        {"start": 0.0, "end": 2.4, "text": "Halo dunia dan kawan kawan"},
++    ]})
++    assert not res.json()["cues"][0].get("words")
++    assert res.json()["word_count"] == 0
++
++
++def test_resplit_rejects_a_bad_preset_and_an_unknown_job(client, tmp_path):
++    video = tmp_path / "resplit.mp4"
++    subprocess.run([
++        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
++        "-f", "lavfi", "-i", "color=c=gray:size=160x120:rate=10:duration=3",
++        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
++        str(video),
++    ], check=True, capture_output=True)
++    assert client.post("/api/open", json={"path": str(video)}).status_code == 200
++    job = client.post("/api/caption/manual", json={}).json()
++
++    empty = client.post(f"/api/caption/{job['id']}/resegment", json={"preset": "burst"})
++    assert empty.status_code == 400 and "no cues" in empty.json()["detail"].lower()
++
++    client.put(f"/api/caption/{job['id']}/cues",
++               json={"cues": [{"start": 0, "end": 1, "text": "one line"}]})
++    bad = client.post(f"/api/caption/{job['id']}/resegment",
++                      json={"preset": "gigantic"})
++    assert bad.status_code == 400 and "segment_preset" in bad.json()["detail"]
++    assert client.post("/api/caption/deadbeef/resegment",
++                       json={"preset": "burst"}).status_code == 404
++
++
+ def test_manual_caption_open_srt_over_http(client, tmp_path):
+     video = tmp_path / "side.mp4"
+     subprocess.run([
+diff --git a/tests/test_segmenter.py b/tests/test_segmenter.py
+new file mode 100644
+index 0000000..96956d2
+--- /dev/null
++++ b/tests/test_segmenter.py
+@@ -0,0 +1,419 @@
++"""Unit tests for vts/segmenter.py - words in, caption cues out.
++
++Pure functions, so these run everywhere (no ffmpeg, no model, no browser).
++The policy is the contract the UI, the transcription worker and the
++"Re-split captions" endpoint all share; anything that changes here changes
++what the user sees on screen.
++"""
++
++import os
++import sys
++
++import pytest
++
++sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++
++from vts import segmenter as seg          # noqa: E402
++
++
++def words(*flat):
++    """("Halo", 0.0, 0.4, "dunia", 0.5, 0.9) -> [{w,s,e}, ...]"""
++    assert len(flat) % 3 == 0, "pass name/start/end triples"
++    return [{"w": flat[i], "s": flat[i + 1], "e": flat[i + 2]}
++            for i in range(0, len(flat), 3)]
++
++
++SPOKEN = words(
++    "Halo", 0.0, 0.4, "dunia", 0.45, 0.9, "apa", 1.5, 1.75, "kabar", 1.8, 2.2,
++    "hari", 2.3, 2.6, "ini", 2.65, 2.9, "cerah", 2.95, 3.4,
++)
++
++
++# ---------------------------------------------------------------------------
++# Catalog / presets
++# ---------------------------------------------------------------------------
++
++def test_catalog_offers_every_preset_in_a_fixed_order():
++    cat = seg.catalog()
++    assert cat["default"] == seg.DEFAULT_PRESET
++    ids = [p["id"] for p in cat["presets"]]
++    assert ids == list(seg.PRESET_ORDER)
++    assert set(ids) == set(seg.PRESETS)
++    # The UI builds its fields from this, so it must be complete.
++    assert set(cat["fields"]) == {"max_words", "max_chars", "max_duration",
++                                  "min_duration", "pause"}
++    assert {f["id"] for f in cat["flags"]} == {"break_punct", "uppercase",
++                                              "strip_trailing"}
++
++
++def test_every_preset_policy_is_a_complete_policy():
++    for pid in seg.PRESET_ORDER:
++        pol = seg.normalize_policy(None, pid)
++        assert set(pol) == set(seg.DEFAULTS), pid
++
++
++def test_the_short_form_preset_is_the_default_and_word_is_one_at_a_time():
++    assert seg.normalize_policy(None, "burst")["max_words"] == 3
++    word = seg.normalize_policy(None, "word")
++    assert word["max_words"] == 1 and word["max_duration"] == 0
++    assert seg.normalize_policy(None, "line")["max_words"] == 7
++
++
++# ---------------------------------------------------------------------------
++# Policy normalisation
++# ---------------------------------------------------------------------------
++
++def test_an_unknown_preset_falls_back_to_the_defaults_plus_the_raw_dict():
++    pol = seg.normalize_policy({"max_words": 5}, "nonsense")
++    assert pol["max_words"] == 5
++    assert pol["max_chars"] == seg.DEFAULTS["max_chars"]
++
++
++@pytest.mark.parametrize("raw,key,expected", [
++    ({"max_words": -4}, "max_words", 0),
++    ({"max_words": 99999}, "max_words", seg.MAX_WORDS),
++    ({"max_chars": -1}, "max_chars", 0),
++    ({"max_duration": 1e9}, "max_duration", 600.0),
++    ({"pause": -2}, "pause", 0.0),
++])
++def test_out_of_range_numbers_are_clamped_not_rejected(raw, key, expected):
++    assert seg.normalize_policy(raw, "custom")[key] == expected
++
++
++@pytest.mark.parametrize("value,expected", [
++    ("false", False), ("off", False), ("no", False), ("", False),
++    ("true", True), ("yes", True), (1, True), (0, False),
++])
++def test_flags_accept_strings_from_json(value, expected):
++    assert seg.normalize_policy({"uppercase": value}, "custom")["uppercase"] is expected
++
++
++def test_garbage_numbers_keep_the_default_instead_of_exploding():
++    pol = seg.normalize_policy({"max_words": "three", "pause": None}, "custom")
++    assert pol["max_words"] == seg.DEFAULTS["max_words"]
++    assert pol["pause"] == seg.DEFAULTS["pause"]
++
++
++def test_the_engine_preset_cannot_be_talked_out_of_itself():
++    # "engine" means "leave the recogniser's segmentation alone"; a stray
++    # segmentation dict must not silently re-cut it.
++    pol = seg.normalize_policy({"keep_segments": False, "max_words": 2}, "engine")
++    assert pol["keep_segments"] is True
++
++
++def test_preset_of_reads_a_policy_back():
++    assert seg.preset_of(seg.normalize_policy(None, "burst")) == "burst"
++    assert seg.preset_of(seg.normalize_policy(None, "word")) == "word"
++    assert seg.preset_of(seg.normalize_policy(None, "engine")) == "engine"
++    assert seg.preset_of({"max_words": 4, "max_chars": 19}) == "custom"
++
++
++# ---------------------------------------------------------------------------
++# clean_words
++# ---------------------------------------------------------------------------
++
++def test_clean_words_accepts_both_spellings_and_sorts():
++    raw = [{"word": "kabar", "start": 2.0, "end": 2.4},
++           {"w": "Halo", "s": 1.0, "e": 1.4}]
++    assert seg.clean_words(raw) == [{"w": "Halo", "s": 1.0, "e": 1.4},
++                                    {"w": "kabar", "s": 2.0, "e": 2.4}]
++
++
++def test_clean_words_clips_to_the_window_and_never_overlaps():
++    ws = seg.clean_words(words("Halo", 0.0, 1.0, "dunia", 1.1, 2.0),
++                         lo=0.5, hi=1.5)
++    assert ws[0]["s"] == 0.5 and ws[0]["e"] == 1.0
++    assert ws[1]["s"] == 1.1 and ws[1]["e"] == 1.5
++    for a, b in zip(ws, ws[1:]):
++        assert b["s"] >= a["e"]
++
++
++def test_clean_words_drops_what_fell_outside_entirely():
++    assert seg.clean_words(words("gone", 0.0, 0.4), lo=1.0, hi=2.0) == []
++    assert seg.clean_words(words("late", 5.0, 5.4), lo=1.0, hi=2.0) == []
++
++
++def test_a_punctuation_token_rides_with_the_word_before_it():
++    # whisper.cpp emits "." as its own token, starting exactly where the
++    # previous word ended; the caption must read "cerah." not "cerah .".
++    ws = seg.clean_words(words("cerah", 2.0, 2.4, ".", 2.4, 2.5))
++    assert len(ws) == 1
++    assert ws[0]["w"] == "cerah." and ws[0]["e"] == 2.5
++
++
++def test_clean_words_gives_a_zero_length_word_somethging_to_display():
++    ws = seg.clean_words([{"w": "uh", "s": 1.0, "e": 1.0}])
++    assert ws[0]["e"] > ws[0]["s"]
++
++
++def test_clean_words_skips_junk_and_caps_the_list():
++    raw = [None, "Halo", {"no": "time"}, {"w": "", "s": 0, "e": 1},
++           {"w": "Halo", "s": "nope", "e": 1}] + \
++          [{"w": f"w{i}", "s": i, "e": i + 0.5} for i in range(seg.MAX_WORDS + 40)]
++    ws = seg.clean_words(raw)
++    assert len(ws) == seg.MAX_WORDS
++    assert ws[0]["w"].startswith("w")
++
++
++def test_clean_words_is_stable_when_words_share_a_start():
++    ws = seg.clean_words(words("a", 1.0, 1.2, "b", 1.0, 1.1, "c", 1.0, 1.3))
++    assert [w["w"] for w in ws] == ["b", "a", "c"]
++    # Same start for all three: each later word begins where the previous ended
++    # (the earlier word keeps the end the engine gave it).
++    assert [w["s"] for w in ws] == [1.0, 1.1, 1.2]
++    for a, b in zip(ws, ws[1:]):
++        assert b["s"] >= a["e"]
++
++
++# ---------------------------------------------------------------------------
++# Estimated words
++# ---------------------------------------------------------------------------
++
++def test_words_from_text_spans_the_cue_exactly():
++    ws = seg.words_from_text("satu dua tiga", 10.0, 13.0)
++    assert ws[0]["s"] == 10.0 and ws[-1]["e"] == 13.0
++    assert [w["w"] for w in ws] == ["satu", "dua", "tiga"]
++    # Time is shared by character count, so "dua" gets less than "satu".
++    assert ws[1]["e"] - ws[1]["s"] < ws[0]["e"] - ws[0]["s"]
++    assert ws[2]["e"] - ws[2]["s"] == pytest.approx(ws[0]["e"] - ws[0]["s"])
++    assert seg.words_from_text("", 0, 1) == []
++    assert seg.words_from_text("   ", 0, 1) == []
++
++
++def test_with_estimated_words_only_touches_cues_without_words():
++    cues = [
++        {"start": 0, "end": 1, "text": "one two"},
++        {"start": 1, "end": 2, "text": "three four", "words": words("three", 1.0, 1.4,
++                                                                     "four", 1.5, 2.0),
++         "word_source": "whisper"},
++    ]
++    out = seg.with_estimated_words(cues)
++    assert out[0]["word_source"] == "estimated" and len(out[0]["words"]) == 2
++    assert out[1]["word_source"] == "whisper"
++    assert out[1]["words"] == cues[1]["words"]
++    # The input is never mutated: the same cue list is reused by the caller.
++    assert "words" not in cues[0]
++
++
++def test_word_count_and_has_words():
++    assert seg.has_words([]) is False
++    assert seg.word_count([]) == 0
++    cues = [{"words": words("a", 0, 1, "b", 1, 2)}, {}]
++    assert seg.has_words(cues) is True
++    assert seg.word_count(cues) == 2
++
++
++def test_only_known_word_sources_survive():
++    assert seg.clean_word_source("Whisper") == "whisper"
++    assert seg.clean_word_source("estimated") == "estimated"
++    assert seg.clean_word_source("someone-elses-guess") is None
++    assert seg.clean_word_source(None) is None
++
++
++def test_reword_for_text_keeps_timings_for_a_same_length_fix():
++    ws = words("Halo", 0.2, 0.6, "dunia.", 0.7, 1.1)
++    same, src = seg.reword_for_text(ws, "Halo dunia.", "whisper")
++    assert [w["w"] for w in same] == ["Halo", "dunia."]
++    assert src == "whisper"                     # nothing changed at all
++    fixed, src = seg.reword_for_text(ws, "Halo duniaku.", "whisper")
++    assert [w["w"] for w in fixed] == ["Halo", "duniaku."]
++    assert [w["s"] for w in fixed] == [0.2, 0.7]
++    assert src == "edited"
++    dropped, src = seg.reword_for_text(ws, "Halo dunia semuanya", "whisper")
++    assert dropped == [] and src is None
++    assert seg.reword_for_text([], "anything") == ([], None)
++
++
++# ---------------------------------------------------------------------------
++# Text of a group
++# ---------------------------------------------------------------------------
++
++def test_join_words_uses_spaces_for_latin_and_none_for_cjk():
++    assert seg.join_words(words("Halo", 0, 1, "dunia", 1, 2)) == "Halo dunia"
++    assert seg.join_words(words("你好", 0, 1, "世界", 1, 2)) == "你好世界"
++
++
++def test_tidy_pulls_punctuation_back_onto_its_word():
++    assert seg.tidy("cerah .") == "cerah."
++    assert seg.tidy("( halo )") == "(halo)"
++    assert seg.tidy("  many   spaces  ") == "many spaces"
++
++
++def test_sentence_and_clause_ends_look_through_quotes():
++    assert seg.ends_sentence("cerah.") is True
++    assert seg.ends_sentence('"cerah!"') is True
++    assert seg.ends_sentence("cerah, ") is False
++    assert seg.ends_clause("cerah,") is True
++    assert seg.ends_clause("cerah") is False
++
++
++# ---------------------------------------------------------------------------
++# group_words
++# ---------------------------------------------------------------------------
++
++def test_burst_groups_three_words_at_a_time():
++    cues = seg.group_words(SPOKEN, seg.normalize_policy(None, "burst"))
++    # "Halo dunia" then a 0.6 s pause, then "apa kabar" ...
++    assert cues[0]["text"] == "Halo dunia"
++    assert cues[0]["start"] == 0.0 and cues[0]["end"] == 0.9
++    # The third word of each cue is cut by the 3-word limit, except where the
++    # 0.6 s pause after "dunia" got there first.
++    assert [len(c["words"]) for c in cues] == [2, 3, 2]
++    assert [c["text"] for c in cues][1] == "apa kabar hari"
++    assert [c["text"] for c in cues][-1] == "ini cerah"
++
++
++def test_a_pause_always_starts_a_new_cue():
++    policy = {"max_words": 6, "max_chars": 0, "max_duration": 0,
++              "min_duration": 0, "pause": 0.5, "break_punct": False}
++    cues = seg.group_words(SPOKEN, policy)
++    assert cues[0]["text"] == "Halo dunia"
++    assert cues[1]["start"] == 1.5
++
++
++def test_sentence_punctuation_ends_a_cue_early():
++    policy = {"max_words": 8, "max_chars": 0, "max_duration": 0,
++              "min_duration": 0, "pause": 0, "break_punct": True}
++    ws = words("halo", 0.0, 0.3, "dunia", 0.35, 0.6, ".", 0.6, 0.7,
++               "apa", 0.75, 1.0, "kabar", 1.05, 1.3)
++    cues = seg.group_words(ws, policy)
++    assert [c["text"] for c in cues] == ["halo dunia.", "apa kabar"]
++
++
++def test_character_limit_keeps_a_cue_off_the_third_line():
++    policy = {"max_words": 0, "max_chars": 12, "max_duration": 0,
++              "min_duration": 0, "pause": 0, "break_punct": False}
++    cues = seg.group_words(words("pneumonia", 0, 1, "extraordinarily", 1, 2,
++                                 "ok", 2, 3), policy)
++    # "pneumonia" alone already eats 9 of the 12 characters.
++    assert cues[0]["text"] == "pneumonia"
++    assert cues[1]["text"] == "extraordinarily"
++    assert cues[2]["text"] == "ok"
++
++
++def test_duration_limit_ends_a_cue():
++    policy = {"max_words": 0, "max_chars": 0, "max_duration": 1.0,
++              "min_duration": 0, "pause": 0, "break_punct": False}
++    cues = seg.group_words(words("a", 0.0, 0.6, "b", 0.6, 1.2, "c", 1.2, 1.8), policy)
++    assert [len(c["words"]) for c in cues] == [1, 1, 1]
++    assert cues[0]["end"] == 0.6
++
++
++def test_a_flash_of_text_is_merged_forward_when_the_limits_allow_it():
++    policy = {"max_words": 4, "max_chars": 0, "max_duration": 0,
++              "min_duration": 1.0, "pause": 0, "break_punct": False}
++    cues = seg.group_words(words("ya", 0.0, 0.15, "baiklah", 0.2, 0.9), policy)
++    assert len(cues) == 1
++    assert cues[0]["text"] == "ya baiklah"
++
++
++def test_uppercase_and_strip_trailing_are_display_only():
++    policy = {"max_words": 3, "max_chars": 0, "max_duration": 0,
++              "min_duration": 0, "pause": 0, "break_punct": False,
++              "uppercase": True, "strip_trailing": True}
++    cues = seg.group_words(words("halo", 0, 1, "dunia.", 1, 2), policy)
++    assert cues[0]["text"] == "HALO DUNIA"
++
++
++def test_group_words_with_no_words_is_an_empty_list():
++    assert seg.group_words([], {"max_words": 3}) == []
++    assert seg.group_words(SPOKEN, seg.normalize_policy(None, "engine")) == []
++
++
++def test_cues_carry_the_words_they_were_built_from():
++    cues = seg.group_words(SPOKEN, seg.normalize_policy(None, "burst"))
++    first = cues[0]
++    assert first["words"] == [{"w": "Halo", "s": 0.0, "e": 0.4},
++                              {"w": "dunia", "s": 0.45, "e": 0.9}]
++    assert first["start"] == first["words"][0]["s"]
++    assert first["end"] == first["words"][-1]["e"]
++
++
++# ---------------------------------------------------------------------------
++# segment_cues - re-splitting without re-transcribing
++# ---------------------------------------------------------------------------
++
++def test_resplitting_a_word_preset_into_burst_keeps_every_word():
++    one = seg.segment_cues(
++        [{"start": 0.0, "end": 3.4, "text": seg.join_words(SPOKEN), "words": SPOKEN,
++          "word_source": "whisper"}],
++        seg.normalize_policy(None, "word"))
++    assert [c["text"] for c in one] == [w["w"] for w in SPOKEN]
++    assert all(c["word_source"] == "whisper" for c in one)
++
++    burst = seg.segment_cues(one, seg.normalize_policy(None, "burst"))
++    assert sum(len(c["words"]) for c in burst) == len(SPOKEN)
++    assert burst[0]["text"] == "Halo dunia"
++    assert all(c["word_source"] == "whisper" for c in burst)
++
++
++def test_resplitting_a_cue_without_words_estimates_them():
++    cues = seg.segment_cues(
++        [{"start": 2.0, "end": 4.0, "text": "satu dua tiga empat"}],
++        seg.normalize_policy(None, "burst"))
++    assert [c["text"] for c in cues] == ["satu dua tiga", "empat"]
++    assert all(c["word_source"] == "estimated" for c in cues)
++    assert cues[0]["words"][0]["s"] == 2.0
++    assert cues[-1]["words"][-1]["e"] == 4.0
++
++
++def test_resplitting_keeps_the_engine_segmentation_when_asked_to():
++    cues = [{"start": 0, "end": 2, "text": "Hello  there", "words": words("Hello", 0, 1,
++                                                                          "there", 1, 2),
++             "word_source": "whisper"},
++            {"start": 2, "end": 3, "text": "again"}]
++    out = seg.segment_cues(cues, seg.normalize_policy(None, "engine"))
++    assert [c["text"] for c in out] == ["Hello there", "again"]
++    assert out[0]["words"] == cues[0]["words"]
++    assert out[0]["word_source"] == "whisper"
++    assert out[1]["words"] == []          # typed text, nothing to guess from
++
++
++def test_resplitting_ignores_junk_and_keeps_real_words_with_estimated_neighbours():
++    cues = [
++        "not a cue",
++        {"start": 0.0, "end": 1.0, "text": "real words here",
++         "words": words("real", 0.0, 0.3, "words", 0.35, 0.7, "here", 0.75, 1.0),
++         "word_source": "whisper"},
++        {"start": 1.0, "end": 2.0, "text": "guessed line"},
++    ]
++    out = seg.segment_cues(cues, seg.normalize_policy(None, "word"))
++    assert [c["text"] for c in out] == ["real", "words", "here", "guessed", "line"]
++    assert [c["word_source"] for c in out] == ["whisper"] * 3 + ["estimated"] * 2
++
++
++def test_resplitting_nothing_is_an_empty_list():
++    assert seg.segment_cues([], {"max_words": 3}) == []
++    assert seg.segment_cues([{"start": 0, "end": 0, "text": ""}],
++                            {"max_words": 3}) == []
++
++
++def test_resplit_output_survives_a_json_round_trip():
++    import json
++    cues = seg.segment_cues(
++        [{"start": 0, "end": 2, "text": "Halo dunia apa kabar",
++          "words": words("Halo", 0.0, 0.4, "dunia", 0.45, 0.9,
++                         "apa", 1.0, 1.3, "kabar", 1.35, 1.9),
++          "word_source": "whispercpp"}],
++        seg.normalize_policy(None, "burst"))
++    again = json.loads(json.dumps(cues))
++    assert seg.word_count(again) == 4
++    assert seg.segment_cues(again, seg.normalize_policy(None, "burst")) == again
++
++
++# ---------------------------------------------------------------------------
++# describe
++# ---------------------------------------------------------------------------
++
++def test_describe_mentions_the_limits_that_are_actually_on():
++    text = seg.describe(seg.normalize_policy(None, "burst"), "burst")
++    assert "3 words" in text and "18 chars" in text and "2.5 s" in text
++    assert "sentence ends" in text
++    assert seg.describe({"max_words": 1, "max_chars": 0, "max_duration": 0,
++                         "min_duration": 0, "pause": 0, "break_punct": False},
++                        "word") == "1 word"
++
++
++def test_describe_explains_the_engine_preset():
++    assert seg.describe(seg.normalize_policy(None, "engine"), "engine") == \
++        seg.PRESETS["engine"]["hint"]
+diff --git a/tests/test_whispercpp.py b/tests/test_whispercpp.py
+index ecf20f5..910d3d6 100644
+--- a/tests/test_whispercpp.py
++++ b/tests/test_whispercpp.py
+@@ -7,6 +7,8 @@ import time
+ import wave
+ from pathlib import Path
+ 
++import json
++
+ import pytest
+ 
+ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@@ -43,6 +45,59 @@ echo "[00:00:00.000 --> 00:00:02.000]   start"
+ sleep 20
+ """
+ 
++# A build new enough for --output-json-full: it writes the token-level JSON
++# that carries word timings (this is the shape whisper.cpp 1.8 emits).
++FULL_CLI = """#!/bin/sh
++OUT=""
++FULL=0
++while [ $# -gt 0 ]; do
++  case "$1" in
++    -of|--output-file) shift; OUT="$1" ;;
++    --output-json-full) FULL=1 ;;
++  esac
++  shift
++done
++echo "system_info: fake build"
++echo "[00:00:00.000 --> 00:00:04.000]   halo dunia"
++printf '1\\n00:00:00,000 --> 00:00:04,000\\nhalo dunia\\n' > "$OUT.srt"
++if [ "$FULL" = "1" ]; then
++  cat > "$OUT.json" <<'JSON'
++{"transcription":[{"timestamps":{"from":"00:00:00,000","to":"00:00:04,000"},
++ "offsets":{"from":0,"to":4000},"text":" halo dunia.",
++ "tokens":[
++  {"text":"halo","timestamps":{"from":"00:00:00,000","to":"00:00:01,600"},"offsets":{"from":0,"to":1600}},
++  {"text":" dunia","timestamps":{"from":"00:00:01,600","to":"00:00:03,900"},"offsets":{"from":1600,"to":3900}},
++  {"text":".","timestamps":{"from":"00:00:03,900","to":"00:00:04,000"},"offsets":{"from":3900,"to":4000}}
++ ]}]}
++JSON
++else
++  echo '{}' > "$OUT.json"
++fi
++exit 0
++"""
++
++# An older build: it rejects the flag instead of ignoring it, which is what
++# real releases do (whisper.cpp grew --output-json-full in 1.7).
++OLD_CLI = """#!/bin/sh
++for a in "$@"; do
++  if [ "$a" = "--output-json-full" ]; then
++    echo "error: unknown argument: --output-json-full" >&2
++    exit 1
++  fi
++done
++OUT=""
++while [ $# -gt 0 ]; do
++  case "$1" in
++    -of|--output-file) shift; OUT="$1" ;;
++  esac
++  shift
++done
++echo "[00:00:00.000 --> 00:00:02.000]   halo dunia"
++printf '1\\n00:00:00,000 --> 00:00:02,000\\nhalo dunia\\n' > "$OUT.srt"
++echo '{}' > "$OUT.json"
++exit 0
++"""
++
+ 
+ def _mk_cli(tmp_path: Path, body: str, name: str = "whisper-cli") -> Path:
+     cli = tmp_path / name
+@@ -200,6 +255,95 @@ def test_run_cancels(tmp_path, monkeypatch):
+     assert time.time() - t0 < 10                     # did not wait for sleep 20
+ 
+ 
++# ------------------------------------------------- word timestamps (tokens)
++
++def test_parse_json_full_merges_tokens_into_words():
++    # whisper.cpp splits "halo" into sub-word tokens and emits "." on its own.
++    text = json.dumps({"transcription": [{
++        "timestamps": {"from": "00:00:00,000", "to": "00:00:04,000"},
++        "offsets": {"from": 0, "to": 4000},
++        "text": " halo dunia.",
++        "tokens": [
++            {"text": "halo", "offsets": {"from": 0, "to": 1600}},
++            {"text": " dunia", "offsets": {"from": 1600, "to": 3900}},
++            {"text": ".", "offsets": {"from": 3900, "to": 4000}},
++        ],
++    }]})
++    segs = wcpp.parse_json_full(text)
++    assert len(segs) == 1
++    assert segs[0]["text"] == "halo dunia."
++    assert segs[0]["words"] == [
++        {"w": "halo", "s": 0.0, "e": 1.6},
++        {"w": "dunia.", "s": 1.6, "e": 4.0},      # the "." rides along
++    ]
++
++
++def test_parse_json_full_returns_nothing_for_the_wrong_shape():
++    assert wcpp.parse_json_full("{}") == []
++    assert wcpp.parse_json_full('{"transcription": []}') == []
++
++
++def test_build_command_asks_for_tokens_and_dtw_only_when_wanted():
++    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4)
++    assert "--output-json-full" in cmd and "--dtw" not in cmd
++    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4,
++                             words=True, dtw="medium")
++    assert cmd[cmd.index("--dtw") + 1] == "medium"
++    # No word timing requested -> no token output, no DTW.
++    cmd = wcpp.build_command("wc", "/m.bin", "/a.wav", "/o", "id", False, None, 4,
++                             words=False, dtw="medium")
++    assert "--output-json-full" not in cmd and "--dtw" not in cmd
++
++
++def test_dtw_preset_follows_the_model_family():
++    assert wcpp.dtw_preset_for("large-v3-turbo") == "large.v3.turbo"
++    assert wcpp.dtw_preset_for("Medium") == "medium"
++    assert wcpp.dtw_preset_for("not-a-model") is None
++
++
++def test_run_with_tokens_returns_words_and_burst_cues(tmp_path, monkeypatch):
++    cli = _mk_cli(tmp_path, FULL_CLI)
++    models = tmp_path / "models"
++    models.mkdir()
++    (models / "ggml-medium.bin").write_bytes(b"x")
++    monkeypatch.setenv("VTS_WHISPER_CLI", str(cli))
++    monkeypatch.setenv("VTS_WHISPER_MODELS", str(models))
++    wav = _mk_wav(tmp_path / "in.wav")
++    job = tsc._new_job("caption", "fake.mp4")
++    segments, meta = wcpp.transcribe_step(str(wav), job, {"model": "medium"})
++    assert meta["words"] == "tokens"
++    assert [w["w"] for w in segments[0]["words"]] == ["halo", "dunia."]
++    # ... and the shared cue builder turns them into word-timed captions.
++    cues = tsc.build_cues(segments, {"segment_preset": "burst"}, "whispercpp")
++    # The burst policy caps a cue at 2.5 s, and this segment runs 4 s, so it
++    # comes out as two captions - cut exactly where the tokens say.
++    assert [c["text"] for c in cues] == ["halo", "dunia."]
++    assert [(c["start"], c["end"]) for c in cues] == [(0.0, 1.6), (1.6, 4.0)]
++    assert [c["word_source"] for c in cues] == ["whispercpp", "whispercpp"]
++    assert [w["w"] for w in cues[1]["words"]] == ["dunia."]
++
++
++def test_a_build_without_token_output_still_produces_captions(tmp_path, monkeypatch):
++    cli = _mk_cli(tmp_path, OLD_CLI)
++    models = tmp_path / "models"
++    models.mkdir()
++    (models / "ggml-medium.bin").write_bytes(b"x")
++    monkeypatch.setenv("VTS_WHISPER_CLI", str(cli))
++    monkeypatch.setenv("VTS_WHISPER_MODELS", str(models))
++    wav = _mk_wav(tmp_path / "in.wav")
++    job = tsc._new_job("caption", "fake.mp4")
++    segments, meta = wcpp.transcribe_step(str(wav), job, {"model": "medium"})
++    # Retried without the flag rather than failing the job.
++    assert meta["words"] == "none"
++    assert [s["text"] for s in segments] == ["halo dunia"]
++    assert not segments[0].get("words")
++    cues = tsc.build_cues(segments, {"segment_preset": "burst"}, "whispercpp")
++    assert cues[0]["text"] == "halo dunia"
++    # No token timings: the cue gets an honest estimate instead of silence.
++    assert cues[0]["word_source"] == "estimated"
++    assert [w["w"] for w in cues[0]["words"]] == ["halo", "dunia"]
++
++
+ # ------------------------------------------------------------- downloads
+ 
+ def test_start_download_unknown_model():
+diff --git a/vts/captionmap.py b/vts/captionmap.py
+index 7a06a99..d9d7d88 100644
+--- a/vts/captionmap.py
++++ b/vts/captionmap.py
+@@ -21,9 +21,33 @@ import re
+ MIN_PIECE_S = 0.05
+ 
+ 
++def _clip_words(words, seg_start: float, seg_end: float,
++                removed_before: float) -> list[dict]:
++    """Words of a cue inside a kept range, moved onto the export timeline.
++
++    A word straddling the cut is clipped (it is heard on both sides of the
++    join); a word entirely inside a removed range disappears with the video.
++    """
++    out: list[dict] = []
++    for w in words or []:
++        try:
++            ws, we = float(w["s"]), float(w["e"])
++        except (KeyError, TypeError, ValueError):
++            continue
++        if we <= seg_start or ws >= seg_end:
++            continue
++        a, b = max(ws, seg_start), min(we, seg_end)
++        if b - a < 1e-6:
++            continue
++        out.append({"w": str(w.get("w", "")),
++                    "s": round(a - removed_before, 3),
++                    "e": round(b - removed_before, 3)})
++    return out
++
++
+ def remap_cues(cues: list[dict], kept_segments: list[tuple[float, float]],
+                min_piece_s: float = MIN_PIECE_S) -> list[dict]:
+-    """Map [{start,end,text}] onto the export timeline of `kept_segments`."""
++    """Map [{start,end,text,words}] onto the export timeline of `kept_segments`."""
+     pieces: list[dict] = []
+     removed_before = 0.0          # total deleted time ahead of the cursor
+     prev_kept_end = 0.0
+@@ -42,15 +66,27 @@ def remap_cues(cues: list[dict], kept_segments: list[tuple[float, float]],
+                 for k in ("style", "id", "track"):
+                     if k in cue:
+                         piece[k] = cue[k]
++                words = _clip_words(cue.get("words"), a, b, removed_before)
++                if words:
++                    piece["words"] = words
++                    if cue.get("word_source"):
++                        piece["word_source"] = cue["word_source"]
+                 pieces.append(piece)
+     pieces.sort(key=lambda c: (c["start"], c["end"]))
+ 
+-    # Rejoin fragments of one sentence that a cut merely interrupted.
++    # Rejoin fragments of one sentence that a cut merely interrupted. The
++    # words of both fragments follow the cue, minus a word that landed on the
++    # join and would otherwise be listed twice.
+     merged: list[dict] = []
+     for piece in pieces:
+         if (merged and merged[-1]["text"] == piece["text"]
+                 and abs(merged[-1]["end"] - piece["start"]) <= 1e-6):
+             merged[-1]["end"] = piece["end"]
++            if piece.get("words"):
++                seen = {(w["w"], w["s"]) for w in merged[-1].get("words") or []}
++                merged[-1].setdefault("words", [])
++                merged[-1]["words"] += [w for w in piece["words"]
++                                        if (w["w"], w["s"]) not in seen]
+         else:
+             merged.append(dict(piece))
+     return merged
+@@ -126,8 +162,16 @@ DEFAULT_STYLE = {"x": 0.5, "y": 0.92, "size_pct": 4.5,
+ 
+ 
+ def _cue_events(cue: dict, st: dict, width: int, height: int,
+-                style_name: str = "Default") -> list[str]:
+-    """One positioned Dialogue per wrapped line for a single cue."""
++                style_name: str = "Default",
++                shadow_name: str | None = None) -> list[str]:
++    """One positioned Dialogue per wrapped line for a single cue.
++
++    `shadow_name` is the style the shadow Dialogues reference. It is normally
++    `<style_name>Shadow`, but the writer may have collapsed two cues onto one
++    shared style, so the name it actually declared is passed in.
++    """
++    if shadow_name is None:
++        shadow_name = style_name + "Shadow"
+     x = min(1.0, max(0.0, float(st.get("x", 0.5))))
+     y = min(1.0, max(0.0, float(st.get("y", 0.88))))
+     size_pct = min(25.0, max(1.0, float(st.get("size_pct", 5.5))))
+@@ -197,7 +241,7 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
+                            f"\\1a{alpha}\\3a{alpha}\\4a&HFF&\\shad0"
+                            f"\\bord{shadow_size:.2f}\\blur{shadow_blur:.2f}"
+                            f"\\an{an}\\pos({round(px + shadow_x)},{round(py + shadow_y)})")
+-            out.append(f"Dialogue: 0,{start},{end},{style_name}Shadow,,0,0,0,,{{{shadow_tags}}}{text}")
++            out.append(f"Dialogue: 0,{start},{end},{shadow_name},,0,0,0,,{{{shadow_tags}}}{text}")
+         main_tags = f"{common_tags}\\shad0\\blur0\\an{an}\\pos({round(px)},{round(py)})"
+         out.append(f"Dialogue: 1,{start},{end},{style_name},,0,0,0,,{{{main_tags}}}{text}")
+         return out
+@@ -290,14 +334,33 @@ def write_ass(cues: list[dict], path, width: int, height: int,
+     ]
+     events: list[str] = []
+     style_lines: list[str] = []
++    # Word-granular captions mean hundreds of cues, and a style line per cue
++    # (plus its shadow) turns into thousands of styles that libass has to look
++    # up by name for every event. Identical styles collapse onto one name -
++    # the first cue that needed it keeps it, so nothing else changes.
++    style_cache: dict[str, str] = {}
++
++    def name_for(cue_style: dict, shadow: bool, idx: int) -> str:
++        st2 = {**cue_style, "background_opacity": 0} if shadow else cue_style
++        # The prefix keeps a shadow from collapsing onto a main style that
++        # happens to be identical (a cue with no box background), so the
++        # Cue<n> / Cue<n>Shadow pairing stays what it always was. A cue whose
++        # style no earlier cue used keeps its own number - which is why the
++        # styles of a normal project are named exactly as before.
++        key = ("S|" if shadow else "P|") + _ass_style_line("X", st2, height)
++        hit = style_cache.get(key)
++        if hit:
++            return hit
++        name = f"Cue{idx}" + ("Shadow" if shadow else "")
++        style_cache[key] = name
++        style_lines.append(_ass_style_line(name, st2, height))
++        return name
++
+     for i, cue in enumerate(cues):
+         cue_style = dict(base, **(cue.get("style") or {}))
+-        style_name = f"Cue{i}"
+-        style_lines.append(_ass_style_line(style_name, cue_style, height))
+-        # Shadow must never inherit an opaque caption-background rectangle.
+-        style_lines.append(_ass_style_line(style_name + "Shadow",
+-            {**cue_style, "background_opacity": 0}, height))
+-        events += _cue_events(cue, cue_style, width, height, style_name)
++        style_name = name_for(cue_style, False, i)
++        shadow_name = name_for(cue_style, True, i)
++        events += _cue_events(cue, cue_style, width, height, style_name, shadow_name)
+     # Place each per-cue ASS style before [Events].
+     events_at = header.index("[Events]")
+     header[events_at:events_at] = style_lines + ([""] if style_lines else [])
+diff --git a/vts/captions.py b/vts/captions.py
+index 75218c9..ae655b6 100644
+--- a/vts/captions.py
++++ b/vts/captions.py
+@@ -5,14 +5,24 @@ Each cue carries its own position/size/alignment (`style`) and a `track`
+ (the visual lane on the timeline), which is what lets several captions
+ share one frame - the burn writes one positioned ASS Dialogue per cue.
+ 
++A cue also carries the *words* it displays, each with its own start/end
++(`[{w,s,e}]`, absolute seconds), because that is what word-level layouts,
++word editing and (later) word-pop rendering need. Words are optional: a cue
++imported from an .srt has none, and anything that needs them falls back to
++`vts.segmenter`. `word_source` records where they came from - "whisper",
++"whispercpp", "estimated" (char-weighted) or "edited" - so the UI can be
++honest about how trustworthy the timings are.
++
+ The plain subtitle file (.srt/.vtt) stays the exchange format: it is
+ rewritten from the store after every edit (sorted by start; overlapping
+-entries are fine for players and for our ASS burn), and parsing an
+-uploaded/generated file seeds the store."""
++entries are fine for players and for our ASS burn), and it cannot carry word
++timings - that is what the .json sidecar and the project state are for.
++"""
+ 
+ import uuid
+ 
+ from .captionmap import DEFAULT_STYLE
++from .segmenter import MIN_WORD, clean_word_source, clean_words
+ 
+ MIN_LEN = 0.1  # seconds; a cue shorter than this is useless to edit/burn
+ 
+@@ -38,7 +48,13 @@ def clean_style(st: dict | None) -> dict:
+ 
+ 
+ def normalize(cues: list[dict], duration: float) -> list[dict]:
+-    """Validate/sort a client-submitted cue list into store form."""
++    """Validate/sort a client-submitted cue list into store form.
++
++    Word-level cues are short by design (a fast talker's "a" can be 0.08 s), so
++    the floor that keeps a cue visible is word-aware and, when a cue is padded
++    to reach it, the padding stops at the next cue's start instead of piling
++    cues onto extra lanes.
++    """
+     out: list[dict] = []
+     seen: set[str] = set()
+     for c in cues or []:
+@@ -50,8 +66,13 @@ def normalize(cues: list[dict], duration: float) -> list[dict]:
+         except (TypeError, ValueError):
+             continue
+         start = min(max(0.0, start), duration)
+-        end = min(max(start + MIN_LEN, end), max(start + MIN_LEN, duration))
+-        if end - start < MIN_LEN / 2 or duration and start >= duration:
++        if duration and start >= duration:
++            continue
++        raw_end = max(start, end)
++        words = clean_words(c.get("words"), start, raw_end)
++        pad = MIN_WORD if words else MIN_LEN
++        end = min(max(start + pad, raw_end), max(start + pad, duration))
++        if end - start < pad / 2:
+             continue
+         cid = str(c.get("id") or "").strip()
+         if not cid or cid in seen:
+@@ -61,15 +82,29 @@ def normalize(cues: list[dict], duration: float) -> list[dict]:
+             track = max(0, int(c.get("track", 0)))
+         except (TypeError, ValueError):
+             track = 0
++        text = " ".join(str(c.get("text") or "").split()) or "Caption"
+         out.append({
+             "id": cid,
+             "start": round(start, 3),
+             "end": round(end, 3),
+-            "text": " ".join(str(c.get("text") or "").split()) or "Caption",
++            "text": text,
+             "track": min(track, 31),
+             "style": clean_style(c.get("style")),
++            "words": words,
++            "_raw_end": round(raw_end, 3),
+         })
++        out[-1]["word_source"] = clean_word_source(c.get("word_source")) or (
++            "edited" if words else None)
+     out.sort(key=lambda c: (c["start"], c["end"], c["id"]))
++    # Padding must never tread on the cue that follows: pull it back to the
++    # next start (an original overlap the user made on purpose is kept).
++    for i in range(len(out) - 1):
++        cur, nxt = out[i], out[i + 1]
++        if (cur["end"] > nxt["start"] + 1e-6
++                and cur["_raw_end"] <= nxt["start"] + 1e-6):
++            cur["end"] = nxt["start"]
++    for c in out:
++        c.pop("_raw_end", None)
+     return out
+ 
+ 
+@@ -91,16 +126,36 @@ def lane_pack(cues: list[dict]) -> list[dict]:
+ 
+ 
+ def from_parsed(cues: list[dict]) -> list[dict]:
+-    """Seed the store from parse_subtitles() output (import/generation)."""
++    """Seed the store from parse_subtitles() output (import/generation).
++
++    An .srt/.vtt parse has no word data, so cues that arrive with `words`
++    (the transcription job's own cue list, or a project reload) keep them and
++    a bare subtitle import gets a char-weighted estimate - enough for the
++    burst/word layouts and for word-level editing to have something to work
++    with, clearly labelled as an estimate.
++    """
++    from .segmenter import words_from_text
+     store = []
+     for c in cues or []:
++        try:
++            start = round(float(c["start"]), 3)
++            end = round(float(c["end"]), 3)
++        except (KeyError, TypeError, ValueError):
++            continue
++        words = clean_words(c.get("words"))
++        src = clean_word_source(c.get("word_source"))
++        if not words:
++            words = words_from_text(c.get("text", ""), start, end)
++            src = "estimated" if words else None
+         store.append({
+             "id": new_id(),
+-            "start": round(float(c["start"]), 3),
+-            "end": round(float(c["end"]), 3),
++            "start": start,
++            "end": end,
+             "text": " ".join(str(c.get("text") or "").split()) or "Caption",
+             "track": 0,
+-            "style": clean_style(None),
++            "style": clean_style(c.get("style")),
++            "words": words,
++            "word_source": src,
+         })
+     return lane_pack(store)
+ 
+diff --git a/vts/segmenter.py b/vts/segmenter.py
+new file mode 100644
+index 0000000..996b806
+--- /dev/null
++++ b/vts/segmenter.py
+@@ -0,0 +1,575 @@
++"""Word-level caption segmentation: how words become caption cues.
++
++A transcription engine returns *words* with their own start/end times
++(faster-whisper's `word_timestamps`, whisper.cpp's token timestamps). A caption
++cue is only a *group* of those words that fits on screen long enough to read,
++so the interesting knob is the grouping policy, not the ASR:
++
++    words  ->  group_words(words, policy)  ->  [{start, end, text, words}]
++
++Policies are plain dicts so they survive the JSON trip to the browser, can be
++saved with a project and are cheap to test. `PRESETS` holds the named ones:
++
++    engine  keep the engine's own segments (no re-grouping)
++    line    readable subtitles: <= 7 words / 42 chars / 6 s, breaks on pauses
++    burst   vertical short-form: <= 3 words / 18 chars / 2.5 s  (default)
++    word    one word at a time
++    custom  whatever the UI fields say
++
++Every function here is pure: no I/O, no global state, no imports from the rest
++of the app, so the transcription worker, the "Re-split captions" endpoint, the
++tests and (through the API) the browser all share one implementation.
++
++Words are plain dicts - short keys because a ten-minute video carries a few
++thousand of them into the browser on every project load:
++
++    {"w": "kabar", "s": 12.34, "e": 12.71}      # word, start, end (seconds)
++"""
++
++from __future__ import annotations
++
++import re
++
++# A cue never holds more words than this (a guard against a pathological run
++# of one-word cues being merged by the UI).
++MAX_WORDS = 200
++# Shortest word we keep: below this a word is displayable but not editable.
++MIN_WORD = 0.02
++MIN_WORD_R = 0.03          # floor used when padding a zero-length word
++
++# Sentence enders and clause separators, ASCII + the CJK/Thai punctuation a
++# translated transcript can carry.
++_SENTENCE_END = ".!?…。！？"
++_CLAUSE_END = ",;:，、；：、"
++# Trailing noise that should not stop a break decision (quotes, brackets).
++_TRAILING = "\"'”’)]}»"
++
++_UPPER_SAFE = re.compile(r"^[^\W\d_]+$", re.UNICODE)
++
++
++def _r3(x: float) -> float:
++    return round(x * 1000) / 1000
++
++
++def _num(v, default=None):
++    try:
++        f = float(v)
++    except (TypeError, ValueError):
++        return default
++    if f != f or f in (float("inf"), float("-inf")):     # NaN / inf
++        return default
++    return f
++
++
++def _flag(v, default: bool) -> bool:
++    if v is None:
++        return default
++    if isinstance(v, str):
++        return v.strip().lower() not in ("", "0", "false", "no", "off")
++    return bool(v)
++
++
++# ---------------------------------------------------------------------------
++# Policy
++# ---------------------------------------------------------------------------
++
++# Field semantics (0 means "no limit" everywhere):
++#   max_words      most words in one cue
++#   max_chars      most characters in one cue's text
++#   max_duration   longest cue, in seconds
++#   min_duration   shorter cues are merged forward when the limits allow it
++#   pause          a silence this long always starts a new cue
++#   break_punct    end the cue after . ! ? (and after , ; : once the cue
++#                  already holds two words)
++#   uppercase      display the text in capitals (the short-form look)
++#   strip_trailing drop a trailing . , ; : from the displayed text
++#   keep_segments  do not group at all (use the engine's own segments)
++DEFAULTS: dict = {
++    "max_words": 3,
++    "max_chars": 18,
++    "max_duration": 2.5,
++    "min_duration": 0.4,
++    "pause": 0.35,
++    "break_punct": True,
++    "uppercase": False,
++    "strip_trailing": False,
++    "keep_segments": False,
++}
++
++PRESETS: dict[str, dict] = {
++    "engine": {
++        "label": "Engine segments (as transcribed)",
++        "hint": "Whatever the recogniser produced - usually whole sentences.",
++        "policy": {"keep_segments": True},
++    },
++    "line": {
++        "label": "Readable lines (subtitles)",
++        "hint": "Up to 7 words, 42 characters or 6 s - the classic subtitle line.",
++        "policy": {
++            "max_words": 7, "max_chars": 42, "max_duration": 6.0,
++            "min_duration": 0.8, "pause": 0.6, "break_punct": True,
++        },
++    },
++    "burst": {
++        "label": "Burst - 3 words (vertical video)",
++        "hint": "Up to 3 words, 18 characters or 2.5 s - the short-form look.",
++        "policy": {
++            "max_words": 3, "max_chars": 18, "max_duration": 2.5,
++            "min_duration": 0.4, "pause": 0.35, "break_punct": True,
++        },
++    },
++    "word": {
++        "label": "One word at a time",
++        "hint": "Every word gets its own cue - the karaoke / word-pop layout.",
++        "policy": {
++            "max_words": 1, "max_chars": 0, "max_duration": 0,
++            "min_duration": 0, "pause": 0, "break_punct": False,
++        },
++    },
++    "custom": {
++        "label": "Custom",
++        "hint": "Use the fields below.",
++        "policy": {},
++    },
++}
++
++PRESET_ORDER = ("engine", "line", "burst", "word", "custom")
++DEFAULT_PRESET = "burst"
++
++
++def normalize_policy(raw: dict | None = None, preset: str | None = None) -> dict:
++    """Validate a policy dict / preset name into a complete policy.
++
++    `preset` (when it names a real preset) wins over `raw`; "custom" or an
++    unknown/absent name means "use `raw` on top of the defaults".
++    """
++    name = str(preset or "").strip().lower()
++    pol = dict(DEFAULTS)
++    if name in PRESETS and name != "custom":
++        pol.update(PRESETS[name]["policy"])
++    src = raw if isinstance(raw, dict) else {}
++    # Never let a raw dict un-keep the engine segments of an explicit preset.
++    if name == "engine":
++        return pol
++    det = {
++        "max_words": (0, MAX_WORDS),
++        "max_chars": (0, 500),
++        "max_duration": (0.0, 600.0),
++        "min_duration": (0.0, 60.0),
++        "pause": (0.0, 10.0),
++    }
++    for key, (lo, hi) in det.items():
++        if key in src and src[key] is not None:
++            v = _num(src[key])
++            if v is not None:
++                pol[key] = min(hi, max(lo, int(v) if key == "max_words" else v))
++    for key in ("break_punct", "uppercase", "strip_trailing", "keep_segments"):
++        if key in src and src[key] is not None:
++            pol[key] = _flag(src[key], pol[key])
++    if name == "engine":
++        pol["keep_segments"] = True
++    return pol
++
++
++def preset_of(policy: dict | None) -> str:
++    """The preset a policy matches, for showing it back in the UI."""
++    pol = normalize_policy(policy)
++    for name in PRESET_ORDER:
++        if name in ("custom", "engine"):
++            continue
++        if normalize_policy(None, name) == pol:
++            return name
++    return "engine" if pol.get("keep_segments") else "custom"
++
++
++# ---------------------------------------------------------------------------
++# Words
++# ---------------------------------------------------------------------------
++
++def clean_words(raw, lo: float | None = None, hi: float | None = None) -> list[dict]:
++    """Coerce anything JSON-ish into sorted `[{w,s,e}]` inside [lo, hi].
++
++    Accepts the app's `{w,s,e}` and the engines' `{word,start,end}` spelling.
++    Words fully outside the window are dropped, straddling ones are clipped;
++    a word is never allowed to overlap its neighbour. A punctuation-only token
++    ("." from whisper.cpp's token timestamps) is glued onto the word before it,
++    so the display text reads "cerah." and not "cerah .".
++    """
++    out: list[dict] = []
++    for item in raw or []:
++        if not isinstance(item, dict):
++            continue
++        w = str(item.get("w", item.get("word", "")) or "").strip()
++        if not w:
++            continue
++        s = _num(item.get("s", item.get("start")))
++        e = _num(item.get("e", item.get("end")))
++        if s is None:
++            continue
++        if e is None or e <= s:
++            e = s + MIN_WORD_R
++        punct_only = not any(ch.isalnum() for ch in w)
++        if punct_only and out:
++            # Punctuation rides with the word before it, even when it lands a
++            # hair outside the window (whisper.cpp emits "." as its own token,
++            # starting exactly where the previous word ends).
++            out[-1]["w"] = out[-1]["w"] + w
++            out[-1]["e"] = _r3(max(out[-1]["e"], min(e, hi) if hi is not None else e))
++            continue
++        if hi is not None and s >= hi - 1e-6:
++            continue
++        if lo is not None and e <= lo + 1e-6:
++            continue
++        if lo is not None:
++            s = max(s, lo)
++        if hi is not None:
++            e = min(e, hi)
++        if e - s < MIN_WORD:
++            e = s + MIN_WORD
++        out.append({"w": w, "s": _r3(s), "e": _r3(e)})
++    out.sort(key=lambda x: (x["s"], x["e"]))
++    # Two words may not share the same slice of the timeline: the later one
++    # starts where the earlier one ended. Everything downstream (the ASS
++    # writer, the karaoke timing, the word editor) assumes this.
++    for i in range(1, len(out)):
++        prev, cur = out[i - 1], out[i]
++        if cur["s"] < prev["e"]:
++            cur["s"] = _r3(prev["e"])
++            if cur["e"] <= cur["s"]:
++                cur["e"] = _r3(cur["s"] + MIN_WORD_R)
++    return out[:MAX_WORDS]
++
++
++def words_from_text(text: str, start: float, end: float) -> list[dict]:
++    """Char-weighted word timings for a cue that has no word data.
++
++    Used for .srt/.vtt imports and hand-typed cues so the burst/word layouts
++    still work; the result is always labelled `estimated`.
++    """
++    parts = str(text or "").split()
++    if not parts:
++        return []
++    a = _num(start, 0.0) or 0.0
++    b = _num(end, a + 0.1)
++    span = max(0.05, b - a)
++    weights = [len(p) + 1 for p in parts]
++    total = sum(weights) or 1
++    out: list[dict] = []
++    t = a
++    for p, wt in zip(parts, weights):
++        dur = span * wt / total
++        out.append({"w": p, "s": _r3(t), "e": _r3(t + dur)})
++        t += dur
++    return out
++
++
++def reword_for_text(words, text, source=None):
++    """Re-point word timings at edited text.
++
++    A caption whose text was fixed ("dunia" -> "duniaku") still describes the
++    same speech, so when the word count is unchanged the timings are kept and
++    only their labels change; the result is marked `edited` to say so. A text
++    with a different number of words has no timing to map, so the words are
++    dropped (the cue falls back to an estimate at render time).
++
++    Returns `(words, word_source)`.
++    """
++    ws = clean_words(words)
++    parts = str(text or "").split()
++    if not ws or len(parts) != len(ws):
++        return [], None
++    if [w["w"] for w in ws] == parts:
++        return ws, clean_word_source(source)
++    return ([{"w": part, "s": w["s"], "e": w["e"]} for part, w in zip(parts, ws)],
++            "edited")
++
++
++WORD_SOURCES = (None, "whisper", "whispercpp", "estimated", "edited")
++
++
++def clean_word_source(src) -> str | None:
++    """Only the sources we know about survive; anything else becomes None."""
++    s = str(src or "").strip().lower()
++    return s if s in WORD_SOURCES else None
++
++
++def has_words(cues) -> bool:
++    return any(c.get("words") for c in (cues or []))
++
++
++def word_count(cues) -> int:
++    return sum(len(c.get("words") or []) for c in (cues or []))
++
++
++def with_estimated_words(cues) -> list[dict]:
++    """Fill in `words` for cues that have none (marked `estimated`).
++
++    Keeping an estimate on hand means Burst/Word layouts and word-level edits
++    work on an imported .srt too - it is a starting point, not a claim about
++    the audio, which is exactly what `word_source` says.
++    """
++    out = []
++    for c in cues or []:
++        c2 = dict(c)
++        if not c2.get("words"):
++            est = words_from_text(c2.get("text", ""), c2.get("start", 0.0),
++                                  c2.get("end", 0.0))
++            if est:
++                c2["words"] = est
++                c2["word_source"] = "estimated"
++        out.append(c2)
++    return out
++
++
++# ---------------------------------------------------------------------------
++# Text of a group of words
++# ---------------------------------------------------------------------------
++
++# Languages written without spaces between words: joining with " " would put a
++# space inside every sentence.
++_CJK_RANGES = (
++    (0x1100, 0x11FF), (0x2E80, 0x303F), (0x3040, 0x30FF), (0x3400, 0x4DBF),
++    (0x4E00, 0x9FFF), (0xAC00, 0xD7AF), (0xF900, 0xFAFF), (0x0E00, 0x0E7F),
++    (0x0E80, 0x0EFF), (0x1000, 0x109F), (0x1780, 0x17FF),
++)
++
++
++def _is_cjk(ch: str) -> bool:
++    cp = ord(ch)
++    return any(lo <= cp <= hi for lo, hi in _CJK_RANGES)
++
++
++def joiner(words) -> str:
++    body = "".join(str(w.get("w", "")) for w in words or [])
++    letters = [ch for ch in body if not ch.isspace()]
++    if letters and all(_is_cjk(ch) for ch in letters):
++        return ""
++    return " "
++
++
++def tidy(text: str) -> str:
++    """Collapse whitespace and pull punctuation back onto its word."""
++    t = " ".join(str(text or "").split())
++    t = re.sub(r"\s+([,.;:!?…，。、；：！？)\]}»])", r"\1", t)
++    t = re.sub(r"([(\[{«])\s+", r"\1", t)
++    return t
++
++
++def join_words(words) -> str:
++    return tidy(joiner(words).join(str(w.get("w", "")) for w in words or []))
++
++
++# ---------------------------------------------------------------------------
++# Grouping
++# ---------------------------------------------------------------------------
++
++def _last_index(word: str) -> str:
++    s = str(word or "").rstrip()
++    while s and s[-1] in _TRAILING:
++        s = s[:-1].rstrip()
++    return s[-1] if s else ""
++
++
++def ends_sentence(word: str) -> bool:
++    return _last_index(word) in _SENTENCE_END
++
++
++def ends_clause(word: str) -> bool:
++    return _last_index(word) in _CLAUSE_END
++
++
++def _group_text(group, pol: dict) -> str:
++    text = join_words(group)
++    if pol.get("strip_trailing"):
++        stripped = re.sub(r"[.,;:]+$", "", text).strip()
++        if stripped:
++            text = stripped
++    if pol.get("uppercase"):
++        text = text.upper()
++    return text
++
++
++def _cue(group, pol: dict, src=None) -> dict:
++    return {
++        "start": _r3(group[0]["s"]),
++        "end": _r3(group[-1]["e"]),
++        "text": _group_text(group, pol),
++        "words": [{"w": w["w"], "s": _r3(w["s"]), "e": _r3(w["e"])} for w in group],
++        **({"word_source": src} if src else {}),
++    }
++
++
++def _fits(cur: list[dict], w: dict, pol: dict) -> bool:
++    gap = w["s"] - cur[-1]["e"]
++    if pol["pause"] and gap > pol["pause"]:
++        return False
++    if pol["max_words"] and len(cur) + 1 > pol["max_words"]:
++        return False
++    if pol["max_duration"] and (w["e"] - cur[0]["s"]) > pol["max_duration"] + 1e-9:
++        return False
++    last = cur[-1]["w"]
++    if pol["break_punct"]:
++        if ends_sentence(last):
++            return False
++        if len(cur) >= 2 and ends_clause(last):
++            return False
++    if pol["max_chars"]:
++        if len(_group_text(cur + [w], pol)) > pol["max_chars"]:
++            return False
++    return True
++
++
++def _can_merge(a: list[dict], b: list[dict], pol: dict) -> bool:
++    if pol["max_words"] and len(a) + len(b) > pol["max_words"]:
++        return False
++    if pol["max_duration"] and (b[-1]["e"] - a[0]["s"]) > pol["max_duration"] + 1e-9:
++        return False
++    if pol["max_chars"] and len(_group_text(a + b, pol)) > pol["max_chars"]:
++        return False
++    gap_limit = (pol["pause"] or 0.5) + 0.3
++    return (b[0]["s"] - a[-1]["e"]) <= gap_limit
++
++
++def _merge_short(groups: list[list[dict]], pol: dict) -> list[list[dict]]:
++    """Merge cues shorter than `min_duration` forward, when limits allow.
++
++    A one-second flash of text is a reading problem, not a timing problem; the
++    merge is what makes 0.2 s of speech visible at all.
++    """
++    out: list[list[dict]] = []
++    for g in groups:
++        prev = out[-1] if out else None
++        dur = (prev[-1]["e"] - prev[0]["s"]) if prev else 0.0
++        if (prev is not None and dur + 1e-9 < pol["min_duration"]
++                and _can_merge(prev, g, pol)):
++            out[-1] = prev + list(g)
++        else:
++            out.append(list(g))
++    return out
++
++
++def _group_lists(words: list[dict], pol: dict) -> list[list[dict]]:
++    """The grouping itself: word dicts in, groups of word dicts out."""
++    if not words or pol["keep_segments"]:
++        return []
++    groups: list[list[dict]] = [[words[0]]]
++    for w in words[1:]:
++        if _fits(groups[-1], w, pol):
++            groups[-1].append(w)
++        else:
++            groups.append([w])
++    if pol["min_duration"] > 0:
++        groups = _merge_short(groups, pol)
++    return groups
++
++
++def group_words(words, policy: dict | None = None) -> list[dict]:
++    """Group words into cues following `policy`. Empty list for keep_segments."""
++    pol = normalize_policy(policy)
++    return [_cue(g, pol) for g in _group_lists(clean_words(words), pol)]
++
++
++def segment_cues(cues, policy: dict | None = None) -> list[dict]:
++    """Re-split an existing cue list into new cues without re-transcribing.
++
++    Words are taken from `words` when a cue has them, otherwise char-weighted
++    per word. The returned cues carry `word_source`: "estimated" when a cue is
++    built only from estimated words, otherwise the source the input declared.
++    """
++    pol = normalize_policy(policy)
++    src = []
++    for c in cues or []:
++        if not isinstance(c, dict):
++            continue
++        est = not c.get("words")
++        words = clean_words(c.get("words")) or words_from_text(
++            c.get("text", ""), _num(c.get("start"), 0.0) or 0.0,
++            _num(c.get("end"), 0.0) or 0.0)
++        for w in words:
++            w["_est"] = est
++            w["_src"] = c.get("word_source") or ("estimated" if est else None)
++        src.extend(words)
++    if pol["keep_segments"]:
++        out = []
++        for c in cues or []:
++            if not isinstance(c, dict):
++                continue
++            out.append({
++                "start": _r3(_num(c.get("start"), 0.0) or 0.0),
++                "end": _r3(_num(c.get("end"), 0.0) or 0.0),
++                "text": tidy(c.get("text", "")),
++                "words": clean_words(c.get("words")),
++                **({"word_source": c["word_source"]} if c.get("word_source") else {}),
++            })
++        return out
++    if not src:
++        return []
++    src.sort(key=lambda x: (x["s"], x["e"]))
++    out = []
++    for group in _group_lists(src, pol):
++        # A cue is "estimated" only when every word in it is estimated;
++        # otherwise it keeps the best real source its words came from.
++        if all(w.get("_est") for w in group):
++            word_src = "estimated"
++        else:
++            word_src = next((w.get("_src") for w in group if not w.get("_est")), None)
++        out.append(_cue(group, pol, word_src))
++    return out
++
++
++def describe(policy: dict | None, preset: str | None = None) -> str:
++    """One-line human summary of a policy, for the UI hint."""
++    name = str(preset or "").strip().lower()
++    if name == "engine":
++        return PRESETS["engine"]["hint"]
++    pol = normalize_policy(policy, None if name in ("", "custom") else name)
++    if pol["keep_segments"]:
++        return PRESETS["engine"]["hint"]
++    bits = []
++    if pol["max_words"]:
++        bits.append(f"{pol['max_words']} word" + ("s" if pol["max_words"] > 1 else ""))
++    if pol["max_chars"]:
++        bits.append(f"{pol['max_chars']:g} chars")
++    if pol["max_duration"]:
++        bits.append(f"{pol['max_duration']:g} s")
++    head = " / ".join(bits) if bits else "no length limit"
++    tail = []
++    if pol["pause"]:
++        tail.append(f"pauses >= {pol['pause']:g} s")
++    if pol["break_punct"]:
++        tail.append("sentence ends")
++    if pol["min_duration"]:
++        tail.append(f"merged under {pol['min_duration']:g} s")
++    if pol["uppercase"]:
++        tail.append("UPPERCASE")
++    return head + (" · breaks on " + ", ".join(tail) if tail else "")
++
++
++def catalog() -> dict:
++    """Presets + field metadata, so the UI builds itself from the API."""
++    return {
++        "default": DEFAULT_PRESET,
++        "presets": [
++            {"id": pid, "label": PRESETS[pid]["label"],
++             "hint": PRESETS[pid]["hint"],
++             "policy": {**DEFAULTS, **PRESETS[pid]["policy"]}}
++            for pid in PRESET_ORDER
++        ],
++        "fields": {
++            "max_words": {"label": "Max words", "min": 0, "max": 40, "step": 1,
++                          "note": "0 = no limit"},
++            "max_chars": {"label": "Max characters", "min": 0, "max": 200, "step": 1,
++                          "note": "0 = no limit"},
++            "max_duration": {"label": "Max seconds", "min": 0, "max": 30, "step": 0.1,
++                             "note": "0 = no limit"},
++            "min_duration": {"label": "Merge under (s)", "min": 0, "max": 5, "step": 0.05,
++                             "note": "0 = keep short cues"},
++            "pause": {"label": "Break on pause (s)", "min": 0, "max": 5, "step": 0.05,
++                      "note": "0 = ignore pauses"},
++        },
++        "flags": [
++            {"id": "break_punct", "label": "Break after . ! ?"},
++            {"id": "uppercase", "label": "UPPERCASE"},
++            {"id": "strip_trailing", "label": "Drop trailing punctuation"},
++        ],
++    }
+diff --git a/vts/timeline.py b/vts/timeline.py
+index 5ebdd75..ff6c424 100644
+--- a/vts/timeline.py
++++ b/vts/timeline.py
+@@ -30,6 +30,7 @@ import math
+ import uuid
+ 
+ from . import fx as fx_mod
++from . import segmenter
+ from .medialib import MAIN_ID
+ 
+ MIN_LEN = 0.05          # shortest clip or caption that may exist (seconds)
+@@ -180,14 +181,23 @@ def normalize(raw: dict, duration: float, media=None) -> dict:
+         if start < -_EPS or end - start < MIN_LEN - _EPS:
+             raise TimelineError(f"Caption {cid} is shorter than {MIN_LEN}s.")
+         style = item.get("style") if isinstance(item.get("style"), dict) else None
+-        caps.append({
++        cap = {
+             "id": cid,
+             "lane": lane,
+             "start": max(0.0, start),
+             "end": end,
+             "text": str(item.get("text") or "")[:2000],
+             "style": style,
+-        })
++        }
++        # Word-level timings ride with the caption: absolute timeline seconds,
++        # so every move/trim/ripple is a plain shift or slice on both.
++        words = segmenter.clean_words(item.get("words"), cap["start"], cap["end"])
++        if words:
++            cap["words"] = words
++            src = segmenter.clean_word_source(item.get("word_source"))
++            if src:
++                cap["word_source"] = src
++        caps.append(cap)
+         lanes = max(lanes, lane + 1)
+     caps.sort(key=lambda c: (c["lane"], c["start"]))
+     for a, b in zip(caps, caps[1:]):
+@@ -226,19 +236,26 @@ def timeline_length(tl: dict) -> float:
+ 
+ 
+ def export_cues(tl: dict, length: float) -> list[dict]:
+-    """Caption cues on the exported timeline (same times as the editor)."""
++    """Caption cues on the exported timeline (same times as the editor).
++
++    Word timings travel with the cue; a cue that had to be clipped at the end
++    of the picture has its words clipped the same way.
++    """
+     cues: list[dict] = []
+     for item in tl.get("caps", []):
+         text = (item.get("text") or "").strip()
+         if not text or item["start"] >= length - 1e-6:
+             continue
+-        cue = {
+-            "start": round(item["start"], 3),
+-            "end": round(min(item["end"], length), 3),
+-            "text": text,
+-        }
++        start = round(item["start"], 3)
++        end = round(min(item["end"], length), 3)
++        cue = {"start": start, "end": end, "text": text}
+         if item.get("style"):
+             cue["style"] = item["style"]
++        words = segmenter.clean_words(item.get("words"), start, end)
++        if words:
++            cue["words"] = words
++            if item.get("word_source"):
++                cue["word_source"] = item["word_source"]
+         cues.append(cue)
+     cues.sort(key=lambda c: (c["start"], c["end"]))
+     return cues
+diff --git a/vts/transcribe.py b/vts/transcribe.py
+index 411c430..06eb3fb 100644
+--- a/vts/transcribe.py
++++ b/vts/transcribe.py
+@@ -12,6 +12,12 @@ tells the UI what to show when it is missing.
+ Word timestamps are always requested through faster-whisper's own
+ `word_timestamps=True`, which works for every language (WhisperX-style forced
+ alignment only covers ~14), so the JSON is karaoke-ready everywhere.
++
++The engine's *words* are the atom: a caption cue is a group of them chosen by
++the segmentation policy in `vts/segmenter.py` (Auto-caption card ->
++"Caption segmentation"), not by the recogniser's own sentence splitting.
++`build_cues()` is the one place that turns engine segments into cues, and
++`resegment_job()` re-runs it on a finished transcription.
+ """
+ 
+ from __future__ import annotations
+@@ -31,6 +37,8 @@ import wave
+ from collections import deque
+ from pathlib import Path
+ 
++from vts import segmenter
++
+ # Keep HuggingFace's cosmetic Windows symlink warning out of the log.
+ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+ 
+@@ -62,6 +70,7 @@ def get_job(job_id: str) -> dict | None:
+         snapshot = {k: v for k, v in job.items() if k not in ("_cancel", "segments")}
+         snapshot["tail"] = list(job["tail"])
+         snapshot["segment_count"] = len(job.get("cues") or job.get("segments") or [])
++        snapshot["cue_count"] = len(job.get("cues") or [])
+         return snapshot
+ 
+ 
+@@ -93,7 +102,9 @@ def _new_job(kind: str, source: str) -> dict:
+         "started": time.time(),
+         "outputs": {},
+         "meta": {},
+-        "cues": [],                  # editable [{start, end, text}]
++        "cues": [],                  # editable [{start,end,text,words}]
++        "word_count": 0,             # words carried by those cues
++        "segmentation": None,        # the policy the cues were cut with
+         "edited": False,
+         "edited_at": None,
+         "tail": deque(maxlen=8),     # last transcript lines, for the live view
+@@ -304,10 +315,20 @@ def write_vtt(segments: list[dict], path: str | Path) -> None:
+             f.write(f"{seg['text'].strip()}\n\n")
+ 
+ 
+-def write_json(segments: list[dict], info: dict, path: str | Path) -> None:
++def write_json(segments: list[dict], info: dict, path: str | Path,
++               cues: list[dict] | None = None) -> None:
++    """Write the sidecar.
++
++    `segments` stays the recogniser's own output (with its word probabilities,
++    one entry per engine segment). `cues` is the caption list the editor and
++    the timeline use - the grouped, word-carrying form - and is the only place
++    word timings survive, because .srt/.vtt cannot carry them.
++    """
++    payload: dict = {"info": info, "segments": segments}
++    if cues is not None:
++        payload["cues"] = cues
+     with open(path, "w", encoding="utf-8") as f:
+-        json.dump({"info": info, "segments": segments}, f,
+-                  ensure_ascii=False, indent=2)
++        json.dump(payload, f, ensure_ascii=False, indent=2)
+ 
+ 
+ def srt_to_cues_text(segments: list[dict]) -> str:
+@@ -360,12 +381,106 @@ def validate_cues(raw) -> list[dict]:
+                                f"({start:.3f}).")
+         if end > MAX_CUE_SECONDS:
+             raise CaptionError(f"Cue {i}: end goes beyond the 24-hour limit.")
+-        clean.append({"start": round(start, 3), "end": round(end, 3),
+-                      "text": text.strip()})
++        item = {"start": round(start, 3), "end": round(end, 3),
++                "text": text.strip()}
++        words = segmenter.clean_words(cue.get("words"), item["start"], item["end"])
++        if words:
++            item["words"] = words
++            src = segmenter.clean_word_source(cue.get("word_source"))
++            if src:
++                item["word_source"] = src
++        clean.append(item)
+     clean.sort(key=lambda c: (c["start"], c["end"]))
+     return clean
+ 
+ 
++def build_cues(segments: list[dict], opts: dict, engine: str) -> list[dict]:
++    """Engine segments -> caption cues, following the segmentation policy.
++
++    This is the single place where the two halves of auto-captioning meet:
++    the recogniser supplies the words (and their times), the policy decides
++    how many of them share a caption. Cues keep the words they were built
++    from, so word-level editing and word-pop rendering have something to
++    work with later.
++
++    Two fall-backs keep the feature honest rather than silent:
++      * "engine" preset -> the recogniser's own segmentation is kept;
++      * no word data at all (SRT-only import, a whisper.cpp build without
++        token timestamps) -> the segments are kept and each cue gets a
++        char-weighted estimate, marked `estimated`.
++    """
++    preset = str(opts.get("segment_preset") or "engine")
++    policy = segmenter.normalize_policy(opts.get("segmentation"), preset)
++    source = "whispercpp" if engine == "whispercpp" else "whisper"
++    raw: list[dict] = []
++    for seg in segments or []:
++        try:
++            start, end = float(seg["start"]), float(seg["end"])
++        except (KeyError, TypeError, ValueError):
++            continue
++        if end <= start:
++            continue
++        raw.append({
++            "start": round(start, 3),
++            "end": round(end, 3),
++            "text": " ".join(str(seg.get("text") or "").split()),
++            "words": segmenter.clean_words(seg.get("words"), start, end),
++            "word_source": source if seg.get("words") else None,
++        })
++    if policy["keep_segments"]:
++        return segmenter.with_estimated_words(raw)
++    words = [w for cue in raw for w in cue["words"]]
++    if not words:
++        return segmenter.with_estimated_words(raw)
++    cues = segmenter.group_words(words, policy)
++    for cue in cues:
++        cue.setdefault("word_source", source)
++    return cues
++
++
++def inherit_words(clean: list[dict], previous: list[dict]) -> list[dict]:
++    """Keep the word timings of an edited cue whose text did not change.
++
++    The caption editor posts start/end/text rows and knows nothing about
++    words. Rewriting those timings out of the payload would quietly destroy
++    word data on every save, so a cue that still matches the previous cue at
++    the same index (same text) inherits its words; an edited one starts over
++    as `edited` (its existing timings no longer describe the new words).
++    """
++    out = []
++    for i, cue in enumerate(clean):
++        item = dict(cue)
++        prev = previous[i] if i < len(previous) else None
++        if item.get("words"):
++            # Words came with the row: keep them honest about the text. A
++            # spelling fix keeps its timing and is labelled "edited"; a row
++            # whose words and text disagree loses them rather than lying.
++            words, src = segmenter.reword_for_text(item["words"], item.get("text"),
++                                                   item.get("word_source"))
++            if words:
++                item["words"] = words
++                item["word_source"] = src
++            else:
++                item["words"] = []
++                item.pop("word_source", None)
++        elif prev is not None:
++            if prev.get("text") == item.get("text") and prev.get("words"):
++                item["words"] = [dict(w) for w in prev["words"]]
++                if prev.get("word_source"):
++                    item["word_source"] = prev["word_source"]
++            elif prev.get("words"):
++                words, _ = segmenter.reword_for_text(prev["words"], item.get("text"))
++                if words:
++                    item["words"] = words
++                    item["word_source"] = "edited"
++                else:
++                    item["word_source"] = "edited"
++            else:
++                item["word_source"] = "edited"
++        out.append(item)
++    return out
++
++
+ def write_outputs(job: dict, cues: list[dict]) -> None:
+     """(Re)write the .srt/.vtt/.json trio from the current cue list."""
+     out = job.get("outputs") or {}
+@@ -377,8 +492,9 @@ def write_outputs(job: dict, cues: list[dict]) -> None:
+     meta = dict(job.get("meta") or {})
+     meta["edited"] = True
+     meta["cue_count"] = len(cues)
++    meta["word_count"] = segmenter.word_count(cues)
+     if out.get("json"):
+-        write_json(cues, meta, out["json"])
++        write_json(job.get("segments") or cues, meta, out["json"], cues=cues)
+ 
+ 
+ def update_cues(job_id: str, cues) -> dict | None:
+@@ -393,15 +509,62 @@ def update_cues(job_id: str, cues) -> dict | None:
+         if job["state"] == "running":
+             raise CaptionError("Transcription is still running — wait for it "
+                                "to finish before editing its captions.")
+-    clean = validate_cues(cues)
++    with _JOBS_LOCK:
++        previous = [dict(c) for c in (job.get("cues") or [])]
++    clean = inherit_words(validate_cues(cues), previous)
+     write_outputs(job, clean)
+     with _JOBS_LOCK:
+         job["cues"] = clean
+         job["cues_text"] = srt_to_cues_text(clean)
++        job["word_count"] = segmenter.word_count(clean)
+         job["edited"] = True
+         job["edited_at"] = time.time()
+         job["progress"] = 100.0
+-        job["note"] = f"{len(clean)} cue(s) saved to {job['outputs'].get('srt')}"
++        job["note"] = (f"{len(clean)} cue(s), "
++                       f"{job['word_count']} word(s) - saved to "
++                       f"{job['outputs'].get('srt')}")
++    return get_job(job_id)
++
++
++def resegment_job(job_id: str, preset: str | None = None,
++                  segmentation: dict | None = None) -> dict | None:
++    """Re-cut a finished caption set into new cues, without re-transcribing.
++
++    Works from the *current* cues (which carry words, real or estimated), not
++    from the raw engine output: hand edits - a moved cue, a fixed word, a
++    deleted line - must survive the re-split, and text the user typed is
++    re-estimated rather than dropped.
++    """
++    with _JOBS_LOCK:
++        job = JOBS.get(job_id)
++        if not job:
++            return None
++        if job["state"] == "running":
++            raise CaptionError("Transcription is still running - wait for it "
++                               "to finish before re-splitting.")
++        current = [dict(c) for c in (job.get("cues") or [])]
++    if not current:
++        raise CaptionError("There are no cues to re-split yet.")
++    if preset is not None and str(preset) not in segmenter.PRESETS:
++        raise CaptionError("segment_preset must be one of: "
++                           + ", ".join(segmenter.PRESET_ORDER))
++    policy = segmenter.normalize_policy(segmentation, preset or "engine")
++    cues = segmenter.segment_cues(current, policy)
++    if not cues:
++        raise CaptionError("Re-splitting produced no cues - the current cues "
++                           "carry no words or text.")
++    write_outputs(job, cues)
++    with _JOBS_LOCK:
++        job["cues"] = cues
++        job["cues_text"] = srt_to_cues_text(cues)
++        job["word_count"] = segmenter.word_count(cues)
++        job["segmentation"] = policy
++        job["segment_preset"] = preset or segmenter.preset_of(policy)
++        job["edited"] = True
++        job["edited_at"] = time.time()
++        job["progress"] = 100.0
++        job["note"] = (f"re-split into {len(cues)} cue(s) "
++                       f"({job['word_count']} word(s))")
+     return get_job(job_id)
+ 
+ 
+@@ -438,7 +601,8 @@ def start_manual_captions(source: str, output_dir: str | None = None,
+                 JOBS.pop(job["id"], None)
+             raise CaptionError(f"Cannot read '{sidecar}': {exc}")
+         from vts import detect as detect_mod     # lazy: parser lives there
+-        cues = validate_cues(detect_mod.parse_subtitles(text))
++        cues = segmenter.with_estimated_words(
++            validate_cues(detect_mod.parse_subtitles(text)))
+         job["note"] = (f"Loaded {len(cues)} cue(s) from {os.path.basename(sidecar)}"
+                        " — edit and press Save.")
+     else:
+@@ -735,32 +899,47 @@ def _run(job: dict, source: str, opts: dict) -> None:
+ 
+         job["stage"] = "writing"
+         job["progress"] = 100.0
++
++        # Words -> cues: the recogniser's words, grouped by the user's policy.
++        # From here on the cue list is what everything sees (files, editor,
++        # detection, burn); the engine's own segments stay server-side so a
++        # re-split never has to transcribe twice.
++        cues = build_cues(segments, opts, engine)
++
+         srt_path = os.path.join(output_dir, f"{stem}.srt")
+         vtt_path = os.path.join(output_dir, f"{stem}.vtt")
+         json_path = os.path.join(output_dir, f"{stem}.json")
+-        write_srt(segments, srt_path)
+-        write_vtt(segments, vtt_path)
+-        write_json(segments, meta, json_path)
++        write_srt(cues, srt_path)
++        write_vtt(cues, vtt_path)
++        write_json(segments, meta, json_path, cues=cues)
+         job["outputs"].update({"srt": srt_path, "vtt": vtt_path, "json": json_path})
+ 
+         if opts.get("burn"):
+             job["stage"] = "burn"
+             burned = os.path.join(output_dir, f"{stem}.captioned.mp4")
+             job["note"] = "burning subtitles into a new video file"
+-            burn_subtitles(source, segments, burned, opts.get("caption_style"))
++            burn_subtitles(source, cues, burned, opts.get("caption_style"))
+             job["outputs"]["video"] = burned
+ 
+         job["meta"] = meta
+-        job["segments"] = segments
+-        job["cues"] = [{"start": s["start"], "end": s["end"], "text": s["text"]}
+-                       for s in segments]
+-        job["cues_text"] = srt_to_cues_text(segments)
++        job["segments"] = segments          # raw engine output (server-side)
++        job["cues"] = cues
++        job["cues_text"] = srt_to_cues_text(cues)
++        job["word_count"] = segmenter.word_count(cues)
++        job["segmentation"] = segmenter.normalize_policy(
++            opts.get("segmentation"), opts.get("segment_preset"))
++        job["segment_preset"] = str(opts.get("segment_preset") or "engine")
+         job["eta"] = 0
+         job["state"] = "done"
+-        if segments:
+-            job["note"] = (f"{meta['segments']} segments · {meta['language']} "
++        if cues:
++            words = job["word_count"]
++            job["note"] = (f"{len(cues)} captions · {words} words · "
++                           f"{meta['language']} "
+                            f"({meta['language_probability']:.0%} confident) · "
+                            f"{fmt_clock(meta['transcribe_seconds'])} on {meta['device']}")
++            if not segmenter.has_words([c for c in cues if c.get("word_source") != "estimated"]):
++                job["note"] += (" · word timing estimated (no token timestamps "
++                                "from this engine)")
+         else:
+             # VAD filtered everything out, or the track really is silent.
+             job["note"] = ("No speech detected — the caption files are empty. "
+@@ -828,12 +1007,21 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
+         if not 1 <= beam <= 10:
+             raise CaptionError("beam_size must be between 1 and 10.")
+ 
++    preset = str(opts.get("segment_preset") or "engine")
++    if preset not in segmenter.PRESETS:
++        raise CaptionError("segment_preset must be one of: "
++                           + ", ".join(segmenter.PRESET_ORDER))
++    opts["segment_preset"] = preset
++    opts["segmentation"] = segmenter.normalize_policy(opts.get("segmentation"), preset)
++
+     job = _new_job("caption", source)
++    job["segmentation"] = opts["segmentation"]
++    job["segment_preset"] = preset
+     job["options"] = {k: opts.get(k) for k in (
+         "engine", "model", "language", "translate_to_english", "device",
+-        "compute_type", "vad", "word_timestamps", "beam_size",
++        "compute_type", "vad", "word_timestamps", "dtw", "beam_size",
+         "temperature_fallback", "normalize_audio", "initial_prompt",
+-        "keep_audio", "burn", "output_dir")}
++        "keep_audio", "burn", "output_dir", "segment_preset", "segmentation")}
+     threading.Thread(target=_run, args=(job, source, opts), daemon=True).start()
+     return get_job(job["id"])                       # type: ignore[return-value]
+ 
+@@ -848,6 +1036,10 @@ def format_for_ui() -> dict:
+         "compute_types": list(COMPUTE_TYPES),
+         "status": dependency_status(),
+         "python": sys.version.split()[0],
++        # Segmentation presets + field metadata: the caption card builds its
++        # "Caption segmentation" controls from this, not from a hard-coded
++        # <select>, so a preset added in vts/segmenter.py shows up by itself.
++        "segmentation": segmenter.catalog(),
+     }
+     try:
+         from vts import whispercpp as wcpp
+diff --git a/vts/whispercpp.py b/vts/whispercpp.py
+index f543c10..c1acbdf 100644
+--- a/vts/whispercpp.py
++++ b/vts/whispercpp.py
+@@ -22,6 +22,7 @@ process runs, and returns ``(segments, meta)`` in the identical shape.
+ 
+ from __future__ import annotations
+ 
++import json
+ import os
+ import queue
+ import re
+@@ -31,6 +32,7 @@ import threading
+ import time
+ from pathlib import Path
+ 
++from vts import segmenter as tsc_segmenter
+ from vts import transcribe as tsc
+ from vts.transcribe import CaptionError, Cancelled
+ 
+@@ -143,15 +145,145 @@ def parse_srt(text: str) -> list[dict]:
+     return cues
+ 
+ 
++# DTW alignment presets (whisper.cpp --dtw): token timestamps computed by
++# cross-attention alignment instead of the default heuristic. Slower, sharper;
++# the name must match the model family.
++DTW_PRESETS = {
++    "tiny": "tiny", "tiny.en": "tiny.en",
++    "base": "base", "base.en": "base.en",
++    "small": "small", "small.en": "small.en",
++    "medium": "medium", "medium.en": "medium.en",
++    "large-v1": "large.v1", "large-v2": "large.v2", "large-v3": "large.v3",
++    "large-v3-turbo": "large.v3.turbo",
++}
++
++
++def dtw_preset_for(model_name: str) -> str | None:
++    return DTW_PRESETS.get(str(model_name or "").lower())
++
++
++def _ms_pair(obj) -> tuple[float, float] | None:
++    """{from,to} offsets (milliseconds) or {from,to} ASS stamps -> seconds."""
++    if not isinstance(obj, dict):
++        return None
++    off = obj.get("offsets")
++    if isinstance(off, dict):
++        try:
++            return float(off["from"]) / 1000.0, float(off["to"]) / 1000.0
++        except (KeyError, TypeError, ValueError):
++            pass
++    ts = obj.get("timestamps")
++    if isinstance(ts, dict):
++        try:
++            return _stamp(ts["from"]), _stamp(ts["to"])
++        except (KeyError, TypeError, ValueError):
++            pass
++    return None
++
++
++def _stamp(value) -> float:
++    """whisper.cpp's "HH:MM:SS,mmm" (also accepts '.') -> seconds."""
++    txt = str(value or "").strip().replace(",", ".")
++    parts = txt.split(":")
++    if len(parts) == 3:
++        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
++    if len(parts) == 2:
++        return int(parts[0]) * 60 + float(parts[1])
++    return float(txt)
++
++
++def words_from_tokens(tokens) -> list[dict]:
++    """Merge whisper.cpp tokens into words with start/end times.
++
++    A new word starts at a token whose text begins with whitespace (Whisper's
++    convention); continuation tokens are joined onto it, so CJK text (which
++    whisper.cpp splits across tokens, one per codepoint) stays intact. Special
++    tokens such as <|startoftranscript|> or [_BEG_] are dropped.
++    """
++    raw: list[dict] = []
++    cur: dict | None = None
++    for tok in tokens or []:
++        if not isinstance(tok, dict):
++            continue
++        text = str(tok.get("text", ""))
++        span = _ms_pair(tok)
++        clean = text.replace("\u0120", " ")          # \u0120 is a space in some builds
++        if "<|" in clean or "[_" in clean:
++            continue
++        if not clean.strip():
++            continue
++        starts_word = clean[:1].isspace() or cur is None
++        body = clean.strip()
++        if cur is not None and not starts_word:
++            cur["w"] += body
++            if span:
++                cur["e"] = max(cur["e"], span[1])
++            continue
++        if cur is not None:
++            raw.append(cur)
++        if span is None:
++            cur = None          # no timing: keep the text with the next word
++            continue
++        cur = {"w": body, "s": span[0], "e": span[1]}
++    if cur is not None:
++        raw.append(cur)
++    return tsc_segmenter.clean_words(raw)
++
++
++def parse_json_full(text: str) -> list[dict]:
++    """`--output-json-full` -> [{start, end, text, words}].
++
++    Returns [] when the file is not that shape (an older build, a truncated
++    write), so the caller can fall back to the SRT.
++    """
++    data = json.loads(text)
++    entries = data.get("transcription") or data.get("segments") or []
++    out: list[dict] = []
++    for entry in entries:
++        if not isinstance(entry, dict):
++            continue
++        span = _ms_pair(entry)
++        if span is None:
++            continue
++        start, end = span
++        words = words_from_tokens(entry.get("tokens") or [])
++        body = tsc_segmenter.tidy(entry.get("text", "")) or tsc_segmenter.join_words(words)
++        if end <= start:
++            if words:
++                end = max(w["e"] for w in words)
++            else:
++                continue
++        seg = {"start": round(start, 3), "end": round(end, 3), "text": body,
++               "avg_logprob": None, "no_speech_prob": None}
++        seg["words"] = words or None
++        out.append(seg)
++    return out
++
++
++def looks_like_unknown_flag(log: str) -> bool:
++    """True when whisper-cli rejected an argument (build predates the flag)."""
++    low = str(log or "").lower()
++    return any(marker in low for marker in (
++        "unknown argument", "invalid argument", "unrecognized option",
++        "unknown option", "error: unknown", "unrecognised option"))
++
++
+ def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
+                   language: str, translate: bool, initial_prompt: str | None,
+-                  threads: int) -> list[str]:
++                  threads: int, words: bool = True,
++                  dtw: str | None = None) -> list[str]:
+     # Long option names only: the short aliases have changed across
+     # whisper.cpp releases (e.g. -ojson -> -oj in v1.9), long flags are stable.
+     cmd = [cli, "--model", model_path, "--file", wav_path,
+            "--language", language or "auto",
+            "--threads", str(max(1, threads)),
+            "--output-file", out_base, "--output-srt", "--output-json"]
++    if words:
++        # --output-json-full writes one entry per token with its own
++        # timestamps; that is where word-level caption timings come from.
++        cmd.append("--output-json-full")
++    if dtw and words:
++        cmd += ["--dtw", dtw]
+     if translate:
+         cmd.append("--translate")
+     if initial_prompt:
+@@ -159,41 +291,14 @@ def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
+     return cmd
+ 
+ 
+-def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], dict]:
+-    """Run whisper-cli on the wav; same contract as transcribe.transcribe_step."""
+-    cli = find_cli()
+-    if not cli:
+-        raise CaptionError(
+-            "whisper-cli not found. Build whisper.cpp with Vulkan support and "
+-            "either put the binary in <app>/tools/, add it to PATH, or set "
+-            "VTS_WHISPER_CLI to its full path.\nSource: " + CLI_URL_HINT)
+-
+-    model_name = opts.get("model") or "medium"
+-    mfile = model_file(model_name)
+-    if not mfile.is_file():
+-        names = ", ".join(m["name"] for m in list_models()) or "none yet"
+-        raise CaptionError(
+-            f"GGML model '{model_name}' not found in {models_dir()}.\n"
+-            f"Download it with the button in the Auto-caption card, or from "
+-            f"{HF_BASE}/{GGML_MODELS.get(model_name, ('', 'ggml-' + model_name + '.bin'))[1]}\n"
+-            f"Models on disk: {names}")
+-
+-    language = opts.get("language") or "auto"
+-    task_translate = bool(opts.get("translate_to_english"))
+-    initial_prompt = opts.get("initial_prompt")
+-    if not initial_prompt and not task_translate:
+-        initial_prompt = tsc.DEFAULT_PROMPTS.get(language)
+-    threads = int(opts.get("threads") or min(os.cpu_count() or 4, 16))
+-
+-    job["stage"] = "transcribe"
+-    job["device"] = "whisper.cpp"
+-    job["compute_type"] = "ggml"
+-    total = tsc.wav_duration(wav_path)
+-    out_base = os.path.join(os.path.dirname(wav_path), "wcpp_out")
+-    cmd = build_command(cli, str(mfile), wav_path, out_base, language,
+-                        task_translate, initial_prompt, threads)
+-    job["note"] = f"running whisper-cli ({os.path.basename(cli)})"
++def _spawn(cmd: list[str], job: dict, total: float):
++    """Run whisper-cli, stream its log into `job`.
+ 
++    Returns (rc, first_log, tail_log, backend, detected_language, segments):
++    `segments` are the ones seen on stdout, used for the live tail and the
++    progress bar. The result itself is read from the files on disk.
++    """
++    q: "queue.Queue[str | None]" = queue.Queue()
+     backend = "cpu"
+     detected_lang: str | None = None
+     segments: list[dict] = []
+@@ -209,7 +314,6 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+             q.put(line.rstrip("\n"))
+         q.put(None)
+ 
+-    q: "queue.Queue[str | None]" = queue.Queue()
+     threading.Thread(target=_reader, daemon=True).start()
+ 
+     # Keep the beginning as well as the tail: CLI argument/model errors are
+@@ -271,6 +375,65 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+         if proc.poll() is None:
+             proc.kill()
+     rc = proc.wait()
++    if job["_cancel"].is_set():
++        raise Cancelled("cancelled")
++    return rc, first_log, tail_log, backend, detected_lang, segments
++
++
++def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], dict]:
++    """Run whisper-cli on the wav; same contract as transcribe.transcribe_step."""
++    cli = find_cli()
++    if not cli:
++        raise CaptionError(
++            "whisper-cli not found. Build whisper.cpp with Vulkan support and "
++            "either put the binary in <app>/tools/, add it to PATH, or set "
++            "VTS_WHISPER_CLI to its full path.\nSource: " + CLI_URL_HINT)
++
++    model_name = opts.get("model") or "medium"
++    mfile = model_file(model_name)
++    if not mfile.is_file():
++        names = ", ".join(m["name"] for m in list_models()) or "none yet"
++        raise CaptionError(
++            f"GGML model '{model_name}' not found in {models_dir()}.\n"
++            f"Download it with the button in the Auto-caption card, or from "
++            f"{HF_BASE}/{GGML_MODELS.get(model_name, ('', 'ggml-' + model_name + '.bin'))[1]}\n"
++            f"Models on disk: {names}")
++
++    language = opts.get("language") or "auto"
++    task_translate = bool(opts.get("translate_to_english"))
++    initial_prompt = opts.get("initial_prompt")
++    if not initial_prompt and not task_translate:
++        initial_prompt = tsc.DEFAULT_PROMPTS.get(language)
++    threads = int(opts.get("threads") or min(os.cpu_count() or 4, 16))
++
++    job["stage"] = "transcribe"
++    job["device"] = "whisper.cpp"
++    job["compute_type"] = "ggml"
++    total = tsc.wav_duration(wav_path)
++    out_base = os.path.join(os.path.dirname(wav_path), "wcpp_out")
++
++    # Word timings need --output-json-full (token timestamps). Builds older
++    # than whisper.cpp 1.7 reject that flag, so a failure that smells like an
++    # unknown argument is retried once without it: captions still arrive, they
++    # just carry estimated word timing instead of real token timing.
++    want_words = bool(opts.get("word_timestamps", True))
++    dtw = dtw_preset_for(model_name) if (want_words and opts.get("dtw")) else None
++    cmd = build_command(cli, str(mfile), wav_path, out_base, language,
++                        task_translate, initial_prompt, threads,
++                        words=want_words, dtw=dtw)
++    job["note"] = f"running whisper-cli ({os.path.basename(cli)})"
++    rc, first_log, tail_log, backend, detected_lang, _streamed = _spawn(cmd, job, total)
++    word_tokens = want_words
++
++    if rc != 0 and want_words and looks_like_unknown_flag("\n".join(first_log + tail_log)):
++        word_tokens = False
++        job["note"] = ("this whisper-cli build has no token timestamps - "
++                       "retrying without word timings")
++        cmd = build_command(cli, str(mfile), wav_path, out_base, language,
++                            task_translate, initial_prompt, threads, words=False)
++        rc, first_log, tail_log, backend, detected_lang, _streamed = _spawn(
++            cmd, job, total)
++
+     if job["_cancel"].is_set():
+         raise Cancelled("cancelled")
+ 
+@@ -284,7 +447,23 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+             f"whisper-cli exited with code {rc}. Diagnostic output "
+             f"(beginning first, then final lines):\n{details or '(no output)'}")
+ 
+-    segments = parse_srt(Path(srt_path).read_text(encoding="utf-8", errors="replace"))
++    # Prefer the token-level JSON: it carries the word timings the SRT cannot.
++    segments: list[dict] = []
++    words_mode = "none"
++    if word_tokens:
++        try:
++            parsed = parse_json_full(
++                Path(out_base + ".json").read_text(encoding="utf-8", errors="replace"))
++        except (OSError, ValueError):
++            parsed = []
++        if parsed and any(s.get("words") for s in parsed):
++            segments = parsed
++            words_mode = "tokens"
++    if not segments:
++        segments = parse_srt(Path(srt_path).read_text(encoding="utf-8", errors="replace"))
++        if word_tokens:
++            job["note"] = ("no token timestamps in this run - word timing will be "
++                           "estimated from the cue text")
+     elapsed = time.time() - job["started"]
+     meta = {
+         "model": model_name,
+@@ -298,6 +477,8 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+         "task": "translate" if task_translate else "transcribe",
+         "transcribe_seconds": round(elapsed, 1),
+         "segments": len(segments),
++        "words": words_mode,           # "tokens" | "none"
++        "dtw": bool(dtw),
+     }
+     return segments, meta
+ 

@@ -2285,7 +2285,7 @@ function bindCaptionOverlay() {
 /* ------------------------------------------------------------ auto-caption */
 
 const CAP = { job: null, timer: null, poll: 700, editorSig: null,
-              fwStatus: null, wcpp: null };
+              fwStatus: null, wcpp: null, segmentation: null, segPreset: null };
 const TRANSLATION_MODEL_PRIORITY = [
   "medium", "large-v3", "small", "base", "tiny", "large-v2", "large-v1",
 ];
@@ -2369,7 +2369,62 @@ function fillCaptionCard(caption) {
     $("capUnavailable").hidden = true;
     $("capRecheck").hidden = true;
   }
+  fillSegmentation(caption.segmentation);
   updateEngineUI();
+}
+
+/* ------------------------------------------------- caption layout (words) */
+
+// How words are grouped into captions. The presets come from the server
+// (vts/segmenter.py, via /api/env), so they never drift out of sync. The
+// choice applies to the next transcription and to "Re-split".
+const SEG_DEFAULT = "burst";
+
+function fillSegmentation(cat) {
+  CAP.segmentation = cat || null;
+  const sel = $("cSeg");
+  if (!sel || !cat) return;
+  sel.textContent = "";
+  // "Custom" needs the numeric limit fields, which this one-row control has
+  // no space for: keep it to the four named layouts here, custom limits stay
+  // available over the API / auto_caption.py --layout custom.
+  (cat.presets || []).filter((p) => p.id !== "custom").forEach((p) => {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label;
+    o.title = p.hint || "";
+    sel.appendChild(o);
+  });
+  CAP.segPreset = CAP.segPreset || cat.default || SEG_DEFAULT;
+  if ([...sel.options].some((o) => o.value === CAP.segPreset)) sel.value = CAP.segPreset;
+  sel.onchange = () => { CAP.segPreset = sel.value; };
+  const btn = $("capResplit");
+  if (btn) btn.onclick = resplitCaptions;
+}
+
+// Re-cut the captions that are in the editor right now - transcribed or
+// imported - from the words they already carry. No new pass over the audio.
+async function resplitCaptions() {
+  if (!CAP.job) return;
+  const btn = $("capResplit");
+  const preset = ($("cSeg") && $("cSeg").value) || CAP.segPreset || SEG_DEFAULT;
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = "Re-splitting…";
+  try {
+    const job = await api(`/api/caption/${CAP.job.id}/resegment`, {
+      method: "POST", body: JSON.stringify({ preset }),
+    });
+    CAP.editorSig = null;                  // force the table to be rebuilt
+    renderCaptionJob(job);
+    $("capNote").textContent = "";
+    $("capSaved").textContent = job.note || `${job.cues.length} caption(s)`;
+  } catch (e) {
+    alert("Could not re-split the captions: " + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 /* --------------------------------------------------- whisper.cpp engine UI */
@@ -2562,6 +2617,7 @@ function captionOptions() {
     initial_prompt: $("cPrompt").value.trim() || null,
     output_dir: $("cOutDir").value.trim() || null,
     caption_style: { ...CAPPOS },
+    segment_preset: ($("cSeg") && $("cSeg").value) || CAP.segPreset || SEG_DEFAULT,
   };
   if (opts.engine === "whispercpp") opts.model = $("wModel").value;
   return opts;
