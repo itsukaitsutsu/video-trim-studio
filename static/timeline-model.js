@@ -611,6 +611,40 @@
     return out;
   }
 
+  // Same CapCut-style split, but for a section/clip (the V1 row in the list)
+  // whose text is a caption. Cuts the clip at the caret fraction, divides its
+  // text the same way, and adjusts the right half's source in-point. Non-caption
+  // clips (silence/other) are returned unchanged so Enter still just saves them.
+  function splitClip(tl, id, frac) {
+    const out = normalise(tl);
+    const idx = out.clips.findIndex((c) => c.id === id);
+    if (idx < 0) return tl;
+    const clip = out.clips[idx];
+    if ((clip.kind || "") !== "caption") return tl;
+    frac = clamp(frac, 0, 1);
+    const edge = clamp(clip.start + frac * (clip.end - clip.start), clip.start + MIN_LEN, clip.end - MIN_LEN);
+    if (!(edge > clip.start + MIN_LEN - EPS && edge < clip.end - MIN_LEN + EPS)) return tl;
+    const words = capWords(clip);
+    let lw = [], rw = [], leftText, rightText;
+    if (words.length) {
+      const gi = clamp(Math.round(frac * words.length), 0, words.length);
+      lw = words.slice(0, gi); rw = words.slice(gi);
+      if (!lw.length) { lw = [words[0]]; rw = words.slice(1); }
+      else if (!rw.length) { rw = [words[words.length - 1]]; lw = words.slice(0, -1); }
+      leftText = lw.map((w) => w.w).join(" ").trim();
+      rightText = rw.map((w) => w.w).join(" ").trim();
+    } else {
+      const sp = splitPlainText(clip.text, frac);
+      leftText = sp.left; rightText = sp.right;
+    }
+    const rel = edge - clip.start;
+    const left = { ...clip, end: r3(edge), text: leftText, words: lw };
+    const right = { ...clip, id: newId("c"), start: r3(edge), in: r3(clip.in + rel), text: rightText, words: rw };
+    out.clips.splice(idx, 1, left, right);
+    out.vtracks = vtracksOf(out);
+    return out;
+  }
+
   // ripple=false ("lift") leaves a gap. ripple=true closes it on every track.
   function deleteItems(tl, ids, ripple) {
     const out = normalise(tl);
@@ -1068,7 +1102,7 @@
     vtracksOf, atracksOf, normalise,
     defaultFx, cleanFx, fxIsDefault, cleanKf, evalFxAt, fadeEnv,
     emptyTimeline, clipsFromSource, clipsFromSections,
-    capsFromCues, assignLanes, splitSelection, splitCaption, deleteItems, moveItems, trimItem,
+    capsFromCues, assignLanes, splitSelection, splitCaption, splitClip, deleteItems, moveItems, trimItem,
     copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText,
     timelineEnd, contentEnd, clipAt, clipStackAt, audioStackAt, flattenClips,
     placeClip, placeAudio, placeCap, makeClip, makeAudioItem, addMedia,

@@ -1833,10 +1833,23 @@ function bindList() {
       // Capture the caret position BEFORE blur (blur moves the selection away).
       const frac = caretFraction(cell);
       ev.target.blur();                   // commit any pending text edit (mirrors blur)
-      // Enter ALWAYS splits a caption at the caret — it never just saves. Clips
-      // keep the old save-on-Enter behaviour.
-      if (type === "caption" && id) {
-        const next = TLM.splitCaption(S.tl, id, frac);
+      // Enter ALWAYS splits a caption at the caret — it never just saves. Works
+      // on both the T1 caption row and the V1 section row (whose text is the
+      // caption), so it triggers whichever row you happen to be editing.
+      if (id) {
+        let next = S.tl;
+        if (type === "caption") {
+          next = TLM.splitCaption(S.tl, id, frac);
+        } else {
+          // Section row: split the clip, and also split the caption cue that
+          // overlaps it so the list stays consistent.
+          next = TLM.splitClip(S.tl, id, frac);
+          const clip = S.tl.clips.find((c) => c.id === id);
+          if (clip) {
+            const cap = S.tl.caps.find((c) => c.start < clip.end - 1e-6 && c.end > clip.start + 1e-6);
+            if (cap) next = TLM.splitCaption(next, cap.id, frac);
+          }
+        }
         if (next !== S.tl) { setTL(next); status("Caption split at the cursor (CapCut-style)."); return; }
         status("Caption is too short to split."); return;
       }
