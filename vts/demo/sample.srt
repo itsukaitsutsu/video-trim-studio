@@ -1,0 +1,15 @@
+1
+00:00:00,500 --> 00:00:02,800
+Demo caption one. Select me to remove this caption section.
+
+2
+00:00:05,400 --> 00:00:07,700
+Second caption. The waveform has a silent gap before it.
+
+3
+00:00:10,800 --> 00:00:13,700
+Third caption, after another quiet pause.
+
+4
+00:00:15,300 --> 00:00:17,700
+Final caption.

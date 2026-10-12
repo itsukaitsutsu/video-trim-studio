@@ -39,6 +39,7 @@ from vts import export as export_mod         # noqa: E402
 from vts import timeline as timeline_mod     # noqa: E402
 from vts import edl as edl_mod                 # noqa: E402
 from vts import media as media_mod           # noqa: E402
+from vts import morph as morph_mod           # noqa: E402
 from vts import medialib as medialib_mod     # noqa: E402
 from vts.medialib import MAIN_ID, MediaError  # noqa: E402
 from vts import preview as preview_mod       # noqa: E402
@@ -237,9 +238,10 @@ class CaptionRequest(BaseModel):
     vad: bool = True
     word_timestamps: bool = True
     dtw: bool = False                # whisper.cpp only: DTW word alignment
-    # Caption segmentation: how many words share one caption. "burst" is the
-    # short-form default; see vts/segmenter.py for the presets.
-    segment_preset: str = "burst"
+    # Caption segmentation: how many words share one caption. "engine" keeps
+    # the recogniser's own segments - transcribing must not silently re-split;
+    # see vts/segmenter.py for the presets.
+    segment_preset: str = "engine"
     segmentation: dict = {}
     beam_size: int = 1
     temperature_fallback: bool = False
@@ -262,6 +264,8 @@ def index():
 
 @app.get("/api/env")
 def env():
+    """Capabilities of this install: ffmpeg, encoders - and, for captions in
+    Japanese/Chinese, which optional dictionary is available (if any)."""
     try:
         require_ffmpeg()
         ok = True
@@ -281,6 +285,10 @@ def env():
                          if e.endswith(("_amf", "_nvenc", "_qsv", "_videotoolbox"))],
         "work_dir": str(WORK_DIR),
         "caption": caption_mod.format_for_ui(),
+        # Which optional dictionary this Python can use for Japanese/Chinese
+        # captions (None = per-character fallback). Data only: the UI already
+        # has a place to say so, it does not need a new control.
+        "words": morph_mod.describe(),
     }
 
 

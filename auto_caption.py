@@ -65,6 +65,23 @@ BURN_SUBTITLES = False
 KEEP_AUDIO = False
 
 
+def dictionary_hint(language: str, cues) -> str | None:
+    """The pip command that turns per-character cuts into real words.
+
+    Japanese and Chinese are written without spaces, so a word-level layout
+    there can only be as good as the dictionary behind it. Nothing is
+    installed by default and nothing is required.
+    """
+    from vts import morph
+    lang = language if language not in ("auto", "", None) else None
+    lang = lang or morph.detect_lang_many([c.get("text") for c in cues or []])
+    hint = morph.install_hint(lang)
+    if not hint:
+        return None
+    return (f"  {lang} captions are cut per character: no dictionary is "
+            f"installed.\n  For real words:  {hint}")
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Auto-caption a video with faster-whisper (99 languages). "
@@ -121,6 +138,9 @@ def parse_args() -> argparse.Namespace:
                    help="Custom layout: merge captions shorter than this forward")
     p.add_argument("--break-pause", type=float, default=0.0,
                    help="Custom layout: a gap this long always starts a new caption")
+    p.add_argument("--dtw", action="store_true",
+                   help="whisper.cpp engine only: DTW word alignment (slower, "
+                        "tighter word timing - worth it for Japanese/Chinese)")
     p.add_argument("--uppercase", action="store_true",
                    help="Custom layout: display the caption text in capitals")
     p.add_argument("--strip-trailing-punct", action="store_true",
@@ -180,6 +200,7 @@ def main() -> None:
         "keep_audio": args.keep_audio,
         "burn": args.burn,
         "output_dir": str(args.output_dir) if args.output_dir else None,
+        "dtw": args.dtw,
         **segmentation_options(args),
     }
     device, compute = cap.pick_device_and_compute(opts["device"], opts["compute_type"])
@@ -252,6 +273,9 @@ def main() -> None:
               f'srclang="{meta["language"]}">')
     if not args.burn:
         print("  (rerun with --burn to render a .captioned.mp4)")
+    hint = dictionary_hint(meta.get("language"), state.get("cues"))
+    if hint:
+        print(f"\n{hint}")
 
 
 if __name__ == "__main__":

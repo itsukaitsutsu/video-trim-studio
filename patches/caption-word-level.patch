@@ -1,5 +1,5 @@
 diff --git a/auto_caption.py b/auto_caption.py
-index ae71856..3a4398d 100644
+index ae71856..61d8f75 100644
 --- a/auto_caption.py
 +++ b/auto_caption.py
 @@ -27,6 +27,15 @@ Examples:
@@ -18,7 +18,31 @@ index ae71856..3a4398d 100644
  """
  
  from __future__ import annotations
-@@ -94,9 +103,43 @@ def parse_args() -> argparse.Namespace:
+@@ -56,6 +65,23 @@ BURN_SUBTITLES = False
+ KEEP_AUDIO = False
+ 
+ 
++def dictionary_hint(language: str, cues) -> str | None:
++    """The pip command that turns per-character cuts into real words.
++
++    Japanese and Chinese are written without spaces, so a word-level layout
++    there can only be as good as the dictionary behind it. Nothing is
++    installed by default and nothing is required.
++    """
++    from vts import morph
++    lang = language if language not in ("auto", "", None) else None
++    lang = lang or morph.detect_lang_many([c.get("text") for c in cues or []])
++    hint = morph.install_hint(lang)
++    if not hint:
++        return None
++    return (f"  {lang} captions are cut per character: no dictionary is "
++            f"installed.\n  For real words:  {hint}")
++
++
+ def parse_args() -> argparse.Namespace:
+     p = argparse.ArgumentParser(
+         description="Auto-caption a video with faster-whisper (99 languages). "
+@@ -94,9 +120,46 @@ def parse_args() -> argparse.Namespace:
                          "per-language hint.")
      p.add_argument("--keep-audio", action="store_true", default=KEEP_AUDIO,
                     help="Keep the extracted 16 kHz WAV next to the outputs")
@@ -40,6 +64,9 @@ index ae71856..3a4398d 100644
 +                   help="Custom layout: merge captions shorter than this forward")
 +    p.add_argument("--break-pause", type=float, default=0.0,
 +                   help="Custom layout: a gap this long always starts a new caption")
++    p.add_argument("--dtw", action="store_true",
++                   help="whisper.cpp engine only: DTW word alignment (slower, "
++                        "tighter word timing - worth it for Japanese/Chinese)")
 +    p.add_argument("--uppercase", action="store_true",
 +                   help="Custom layout: display the caption text in capitals")
 +    p.add_argument("--strip-trailing-punct", action="store_true",
@@ -62,15 +89,16 @@ index ae71856..3a4398d 100644
  def main() -> None:
      args = parse_args()
      if not args.video.is_file():
-@@ -137,6 +180,7 @@ def main() -> None:
+@@ -137,6 +200,8 @@ def main() -> None:
          "keep_audio": args.keep_audio,
          "burn": args.burn,
          "output_dir": str(args.output_dir) if args.output_dir else None,
++        "dtw": args.dtw,
 +        **segmentation_options(args),
      }
      device, compute = cap.pick_device_and_compute(opts["device"], opts["compute_type"])
      opts["device"], opts["compute_type"] = device, compute
-@@ -145,6 +189,12 @@ def main() -> None:
+@@ -145,6 +210,12 @@ def main() -> None:
      print(f"Output: {Path(opts['output_dir'] or cap.default_output_dir(str(args.video))).resolve()}/")
      print(f"        model={args.model} device={device} compute={compute} "
            f"language={args.language} task={'translate' if args.translate_to_english else 'transcribe'}")
@@ -83,11 +111,52 @@ index ae71856..3a4398d 100644
  
      job = cap.start_caption(str(args.video), opts)
      job_id = job["id"]
+@@ -202,6 +273,9 @@ def main() -> None:
+               f'srclang="{meta["language"]}">')
+     if not args.burn:
+         print("  (rerun with --burn to render a .captioned.mp4)")
++    hint = dictionary_hint(meta.get("language"), state.get("cues"))
++    if hint:
++        print(f"\n{hint}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/requirements-caption.txt b/requirements-caption.txt
+index 1af46ac..9de12df 100644
+--- a/requirements-caption.txt
++++ b/requirements-caption.txt
+@@ -9,3 +9,18 @@
+ # First use also downloads a Whisper model (75 MB for `tiny`, ~1.5 GB for
+ # `medium`) into the HuggingFace cache and reuses it afterwards.
+ faster-whisper>=1.0
++
++# Optional dictionaries for captions in languages written without spaces.
++#
++# Japanese and Chinese have no spaces, so word-level caption layouts ("Burst",
++# "One word at a time") can only cut on real words if a vocabulary is
++# available. Both work offline and are not required - without them those
++# languages fall back to one character per word.
++#
++# Japanese (recommended: fast, mmap'd dictionary, ~50 MB):
++#   python -m pip install sudachipy sudachidict_core
++#   ... or the smaller vocabulary:  sudachidict_small
++# Japanese (pure Python, no compiler needed):
++#   python -m pip install janome
++# Chinese:
++#   python -m pip install jieba
 diff --git a/server.py b/server.py
-index a0a31d2..f942ba8 100644
+index a0a31d2..d122ca0 100644
 --- a/server.py
 +++ b/server.py
-@@ -181,6 +181,10 @@ class DetectRequest(BaseModel):
+@@ -39,6 +39,7 @@ from vts import export as export_mod         # noqa: E402
+ from vts import timeline as timeline_mod     # noqa: E402
+ from vts import edl as edl_mod                 # noqa: E402
+ from vts import media as media_mod           # noqa: E402
++from vts import morph as morph_mod           # noqa: E402
+ from vts import medialib as medialib_mod     # noqa: E402
+ from vts.medialib import MAIN_ID, MediaError  # noqa: E402
+ from vts import preview as preview_mod       # noqa: E402
+@@ -181,6 +182,10 @@ class DetectRequest(BaseModel):
      use_cues: bool = True
      subtitles_path: str | None = None
      subtitles_text: str | None = None
@@ -98,7 +167,7 @@ index a0a31d2..f942ba8 100644
  
  
  class ExportRequest(BaseModel):
-@@ -206,10 +210,16 @@ class SubtitleEditRequest(BaseModel):
+@@ -206,10 +211,16 @@ class SubtitleEditRequest(BaseModel):
  
  
  class CaptionCuesRequest(BaseModel):
@@ -116,20 +185,40 @@ index a0a31d2..f942ba8 100644
  class ManualCaptionRequest(BaseModel):
      """An editable caption set without transcription."""
      load: str | None = None            # existing .srt / .vtt to open
-@@ -226,6 +236,12 @@ class CaptionRequest(BaseModel):
+@@ -226,6 +237,12 @@ class CaptionRequest(BaseModel):
      compute_type: str = "auto"
      vad: bool = True
      word_timestamps: bool = True
 +    dtw: bool = False                # whisper.cpp only: DTW word alignment
-+    # Caption segmentation: how many words share one caption. Default "engine"
-+    # = the recogniser's own segments, i.e. exactly the old behaviour; pass
-+    # line/burst/word/custom (see vts/segmenter.py) to re-cut them.
++    # Caption segmentation: how many words share one caption. "engine" keeps
++    # the recogniser's own segments - transcribing must not silently re-split;
++    # see vts/segmenter.py for the presets.
 +    segment_preset: str = "engine"
 +    segmentation: dict = {}
      beam_size: int = 1
      temperature_fallback: bool = False
      normalize_audio: bool = False
-@@ -622,6 +638,14 @@ def detect(req: DetectRequest):
+@@ -247,6 +264,8 @@ def index():
+ 
+ @app.get("/api/env")
+ def env():
++    """Capabilities of this install: ffmpeg, encoders - and, for captions in
++    Japanese/Chinese, which optional dictionary is available (if any)."""
+     try:
+         require_ffmpeg()
+         ok = True
+@@ -266,6 +285,10 @@ def env():
+                          if e.endswith(("_amf", "_nvenc", "_qsv", "_videotoolbox"))],
+         "work_dir": str(WORK_DIR),
+         "caption": caption_mod.format_for_ui(),
++        # Which optional dictionary this Python can use for Japanese/Chinese
++        # captions (None = per-character fallback). Data only: the UI already
++        # has a place to say so, it does not need a new control.
++        "words": morph_mod.describe(),
+     }
+ 
+ 
+@@ -622,6 +645,14 @@ def detect(req: DetectRequest):
              text = Path(sp).read_text(encoding="utf-8-sig", errors="replace")
          if text:
              cues = detect_mod.parse_subtitles(text)
@@ -144,7 +233,7 @@ index a0a31d2..f942ba8 100644
  
      silences: list[tuple[float, float]] = []
      if req.detect_silence:
-@@ -1144,6 +1168,18 @@ def caption_manual(req: ManualCaptionRequest):
+@@ -1144,6 +1175,18 @@ def caption_manual(req: ManualCaptionRequest):
          raise HTTPException(400, str(exc))
  
  
@@ -164,7 +253,7 @@ index a0a31d2..f942ba8 100644
  def caption_save_cues(job_id: str, req: CaptionCuesRequest):
      """Overwrite the job's cues and rewrite its .srt/.vtt/.json files."""
 diff --git a/static/app.js b/static/app.js
-index ae5b6e4..b73b91a 100644
+index ae5b6e4..7777396 100644
 --- a/static/app.js
 +++ b/static/app.js
 @@ -2285,7 +2285,7 @@ function bindCaptionOverlay() {
@@ -176,7 +265,7 @@ index ae5b6e4..b73b91a 100644
  const TRANSLATION_MODEL_PRIORITY = [
    "medium", "large-v3", "small", "base", "tiny", "large-v2", "large-v1",
  ];
-@@ -2369,9 +2369,64 @@ function fillCaptionCard(caption) {
+@@ -2369,9 +2369,67 @@ function fillCaptionCard(caption) {
      $("capUnavailable").hidden = true;
      $("capRecheck").hidden = true;
    }
@@ -189,7 +278,10 @@ index ae5b6e4..b73b91a 100644
 +// How words are grouped into captions. The presets come from the server
 +// (vts/segmenter.py, via /api/env), so they never drift out of sync. The
 +// choice applies to the next transcription and to "Re-split".
-+const SEG_DEFAULT = "burst";
++// A freshly transcribed set keeps the recogniser's own segments; picking a
++// layout (Burst, One word, ...) is what re-splits, by Transcribe or by
++// Re-split. This must match vts/segmenter.py DEFAULT_PRESET.
++const SEG_DEFAULT = "engine";
 +
 +function fillSegmentation(cat) {
 +  CAP.segmentation = cat || null;
@@ -241,7 +333,7 @@ index ae5b6e4..b73b91a 100644
  /* --------------------------------------------------- whisper.cpp engine UI */
  
  function engineIsWcpp() {
-@@ -2562,6 +2617,7 @@ function captionOptions() {
+@@ -2562,6 +2620,7 @@ function captionOptions() {
      initial_prompt: $("cPrompt").value.trim() || null,
      output_dir: $("cOutDir").value.trim() || null,
      caption_style: { ...CAPPOS },
@@ -250,7 +342,7 @@ index ae5b6e4..b73b91a 100644
    if (opts.engine === "whispercpp") opts.model = $("wModel").value;
    return opts;
 diff --git a/static/index.html b/static/index.html
-index 8ccb6c8..8c7ddcb 100644
+index 8ccb6c8..cb9593c 100644
 --- a/static/index.html
 +++ b/static/index.html
 @@ -4,7 +4,7 @@
@@ -273,8 +365,12 @@ index 8ccb6c8..8c7ddcb 100644
              <div id="capSaved" class="dim small"></div>
              <div class="cap-editor-scroll">
                <table id="capCueTable">
-@@ -633,7 +637,7 @@
- <script src="/static/stage.js?v=1"></script>
+@@ -630,10 +634,10 @@
+ 
+ <script src="/static/timeline-model.js?v=6"></script>
+ <script src="/static/media.js?v=1"></script>
+-<script src="/static/stage.js?v=1"></script>
++<script src="/static/stage.js?v=2"></script>
  <script src="/static/timeline.js?v=16"></script>
  <script src="/static/clip.js?v=1"></script>
 -<script src="/static/app.js?v=42"></script>
@@ -282,6 +378,34 @@ index 8ccb6c8..8c7ddcb 100644
  <script src="/static/font-picker.js?v=1"></script>
  <script src="/static/fonts.js?v=1"></script>
  </body>
+diff --git a/static/stage.js b/static/stage.js
+index 66737e6..3263b20 100644
+--- a/static/stage.js
++++ b/static/stage.js
+@@ -75,7 +75,11 @@ function stageAcquire(clip, kind) {
+   let rec = STAGE.layers.get(clip.id);
+   if (rec && rec.kind === kind) return rec;
+   if (rec) stageRelease(clip.id);
+-  const idle = STAGE.free.findIndex((f) => f.kind === kind);
++  // Prefer an idle layer that already holds the asset this clip needs: it is
++  // decoded and buffered, so swapping clips costs a seek, not a reload.
++  const want = mediaUrl(clip.src || TLM.MAIN_SRC);
++  let idle = STAGE.free.findIndex((f) => f.kind === kind && f.src === want);
++  if (idle < 0) idle = STAGE.free.findIndex((f) => f.kind === kind);
+   if (idle >= 0) rec = STAGE.free.splice(idle, 1)[0];
+   else rec = stageMakeLayer(kind);
+   rec.error = false;
+@@ -90,7 +94,9 @@ function stageRelease(id) {
+   STAGE.layers.delete(id);
+   try { rec.media.pause(); } catch (_) { /* not a media element */ }
+   rec.layer.remove();
+-  rec.src = "";
++  // Keep rec.src: an idle layer that already holds this asset is reused as-is
++  // (see stageAcquire) and re-assigning .src would reload the file from
++  // scratch, which is what made the monitor flash blank at every clip change.
+   rec.asset = "";
+   if (STAGE.free.length < 8) STAGE.free.push(rec);
+ }
 diff --git a/static/style.css b/static/style.css
 index 555a43d..1eb0e6a 100644
 --- a/static/style.css
@@ -612,6 +736,137 @@ index 146b28d..7c6db5d 100644
 +  assert.deepEqual(longer.caps[0].words, []);        // no timings to guess from
 +  assert.equal(longer.caps[0].word_source, null);
 +});
+diff --git a/tests/test_autocaption_pipeline.py b/tests/test_autocaption_pipeline.py
+new file mode 100644
+index 0000000..fc9fe81
+--- /dev/null
++++ b/tests/test_autocaption_pipeline.py
+@@ -0,0 +1,125 @@
++"""Regression tests for the auto-caption -> captions pipeline.
++
++The rule these lock in: **transcribing must not silently re-split, and must
++never silently drop a segment.** Both were real bugs - the layout dropdown
++defaulted to Burst (so every transcription came out re-split, and there was no
++way to get the recogniser's own segments without noticing the dropdown), and a
++segment the engine could not time lost its text the moment a layout other than
++"engine" was in play.
++"""
++
++import os
++
++from vts import segmenter, transcribe
++from vts import whispercpp as wcpp
++
++
++def _seg(text, start, end, words=None):
++    seg = {"start": start, "end": end, "text": text}
++    if words is not None:
++        seg["words"] = words
++    return seg
++
++
++def _w(word, start, end):
++    return {"w": word, "s": start, "e": end}
++
++
++TWO_SEGMENTS = [
++    _seg("Hello there everyone.", 0.0, 2.0,
++         [_w("Hello", 0.0, 0.6), _w("there", 0.6, 1.2), _w("everyone", 1.2, 2.0)]),
++    _seg("This one has no word timings.", 2.5, 5.0),      # engine gave none
++    _seg("Goodbye.", 5.5, 7.0, [_w("Goodbye", 5.5, 7.0)]),
++]
++
++
++# ---------------------------------------------------------------------------
++# nothing is dropped
++# ---------------------------------------------------------------------------
++
++def test_a_segment_without_word_timings_keeps_its_caption():
++    """The bug: a segment with no words disappeared from every re-split layout.
++
++    The text must survive - as an estimate when nothing better exists - because
++    a caption that is not there is worse than a caption with guessed timing.
++    """
++    for preset in ("burst", "word", "line", "engine"):
++        cues = transcribe.build_cues(TWO_SEGMENTS, {"segment_preset": preset},
++                                     "whisper")
++        text = " ".join(c["text"] for c in cues)
++        # (The words I hand in carry no punctuation; the point here is that the
++        # segment's *words* survive, not that the text matches verbatim.)
++        assert "This one has no word timings" in text, preset
++        assert "Goodbye" in text, preset
++        assert "Hello" in text, preset
++
++
++def test_the_estimated_segment_says_so_and_the_others_do_not():
++    cues = transcribe.build_cues(TWO_SEGMENTS, {"segment_preset": "burst"},
++                                 "whisper")
++    src = {c["text"]: c.get("word_source") for c in cues}
++    assert src["Hello there"] == "whisper"
++    assert src["This one has"] == "estimated"
++    assert src["no word timings."] == "estimated"
++
++
++def test_a_transcript_with_no_word_data_at_all_still_gets_the_chosen_layout():
++    cues = transcribe.build_cues([_seg("one two three four five six", 0, 3)],
++                                 {"segment_preset": "burst"}, "whisper")
++    assert [c["text"] for c in cues] == ["one two three", "four five six"]
++    assert [c.get("word_source") for c in cues] == ["estimated", "estimated"]
++
++
++def test_engine_mode_keeps_boundaries_and_still_estimates_words():
++    cues = transcribe.build_cues(TWO_SEGMENTS, {"segment_preset": "engine"},
++                                 "whisper")
++    assert [c["text"] for c in cues] == ["Hello there everyone.",
++                                         "This one has no word timings.",
++                                         "Goodbye."]
++    assert [c["start"] for c in cues] == [0.0, 2.5, 5.5]
++    assert cues[1]["word_source"] == "estimated"
++    assert len(cues[1]["words"]) == 6      # This / one / has / no / word / timings.
++
++
++def test_whispercpp_untimed_trailing_token_keeps_its_text():
++    """whisper.cpp omits a timestamp when the model cannot align a token; its
++    text used to be discarded, taking the rest of the segment with it."""
++    toks = [{"text": " Hello", "offsets": {"from": 0, "to": 500}},
++            {"text": " there", "offsets": {"from": 500, "to": 900}},
++            {"text": " untimed"}]                      # no offsets at all
++    words = wcpp.words_from_tokens(toks)
++    assert [w["w"] for w in words] == ["Hello", "there untimed"]
++    assert words[-1]["e"] == 0.9                       # the timed part's end
++    # If the whole segment is untimed there is nothing to attach to; the text
++    # still reaches the captions through the segment text.
++    assert wcpp.words_from_tokens([{"text": "only"}]) == []
++
++
++# ---------------------------------------------------------------------------
++# the defaults
++# ---------------------------------------------------------------------------
++
++def test_transcribing_defaults_to_the_engines_own_segments():
++    """Transcribe must not re-split unless the user picks a layout.
++
++    The default lives in three places; they have to agree.
++    """
++    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++    assert segmenter.DEFAULT_PRESET == "engine"
++    assert segmenter.catalog()["default"] == "engine"
++    js = open(os.path.join(root, "static", "app.js"), encoding="utf-8").read()
++    assert 'const SEG_DEFAULT = "engine"' in js
++    py = open(os.path.join(root, "server.py"), encoding="utf-8").read()
++    assert 'segment_preset: str = "engine"' in py
++
++
++def test_the_layout_choices_are_still_there_and_work():
++    """Default = engine must not cost the user the other layouts."""
++    ids = [p["id"] for p in segmenter.catalog()["presets"]]
++    # "custom" is in the API (CLI/JSON) but hidden from the UI dropdown.
++    assert ids == ["engine", "line", "burst", "word", "custom"]
++    pr = segmenter.PRESETS
++    assert pr["engine"]["policy"]["keep_segments"] is True
++    cues = transcribe.build_cues(TWO_SEGMENTS, {"segment_preset": "burst"},
++                                 "whisper")
++    assert len(cues) > 3, "burst still re-splits when asked for"
 diff --git a/tests/test_caption.py b/tests/test_caption.py
 index 70c8f26..7cf21b0 100644
 --- a/tests/test_caption.py
@@ -739,12 +994,284 @@ index 70c8f26..7cf21b0 100644
  def test_manual_caption_open_srt_over_http(client, tmp_path):
      video = tmp_path / "side.mp4"
      subprocess.run([
+diff --git a/tests/test_morph.py b/tests/test_morph.py
+new file mode 100644
+index 0000000..2fb2da4
+--- /dev/null
++++ b/tests/test_morph.py
+@@ -0,0 +1,266 @@
++"""Dictionary word segmentation for languages written without spaces.
++
++Two layers are tested here:
++
++  * the pure parts (`detect_lang`, `glue_units`, `recut`) - no dictionary and
++    no engine needed, so they run everywhere;
++  * the wiring - that a segmenter/engine word list really does get re-cut onto
++    dictionary units. Those use a stub first (always run) and the installed
++    SudachiPy after that (skipped when it is not there).
++"""
++
++import json
++
++import pytest
++
++from vts import morph, segmenter, transcribe
++from vts import whispercpp as wcpp
++
++JA = "こんにちは、今日はいい天気ですね。"
++
++
++@pytest.fixture()
++def stub_units(monkeypatch):
++    """A dictionary that always answers with fixed units."""
++    units = ["今日は", "いい", "天気ですね。"]
++    monkeypatch.setattr(morph, "split_words", lambda text, lang=None: list(units))
++    return units
++
++
++# ---------------------------------------------------------------------------
++# script detection
++# ---------------------------------------------------------------------------
++
++def test_detect_lang_by_script():
++    assert morph.detect_lang("こんにちは") == "ja"          # kana
++    assert morph.detect_lang("東京駅") == "zh"              # Han, no kana
++    assert morph.detect_lang("你好世界") == "zh"
++    assert morph.detect_lang("안녕하세요") == "ko"          # Korean uses spaces
++    assert morph.detect_lang("สวัสดี") == "th"
++    assert morph.detect_lang("hello world") is None
++    assert morph.detect_lang("") is None
++
++
++def test_kana_anywhere_makes_the_whole_set_japanese():
++    # A Japanese subtitle file is full of kanji-only lines; asking a Chinese
++    # dictionary about them would cut them wrongly.
++    texts = ["東京駅", "まで歩く"]           # second line has kana
++    assert morph.detect_lang_many(texts) == "ja"
++    assert morph.detect_lang_many(["東京駅"]) == "zh"
++    assert morph.detect_lang_many(["hello", "world"]) is None
++
++
++def test_install_hint_only_when_nothing_is_installed(monkeypatch):
++    monkeypatch.setattr(morph, "provider", lambda lang=None: None)
++    assert "sudachipy" in morph.install_hint("ja")
++    assert "jieba" in morph.install_hint("zh")
++    assert morph.install_hint("en") is None
++    monkeypatch.setattr(morph, "provider", lambda lang=None: "sudachi")
++    assert morph.install_hint("ja") is None
++
++
++# ---------------------------------------------------------------------------
++# caption units (pure)
++# ---------------------------------------------------------------------------
++
++def test_glue_units_attaches_particles_but_not_content_words():
++    got = morph.glue_units([
++        ("昨日", "名詞,普通名詞,副詞可能,*,*,*"),
++        ("の", "助詞,格助詞,*,*,*,*"),
++        ("試合", "名詞,普通名詞,サ変可能,*,*,*"),
++        ("は", "助詞,係助詞,*,*,*,*"),
++        ("面白かっ", "形容詞,一般,*,*,形容詞,連用形-促音便"),
++        ("た", "助動詞,*,*,*,助動詞-タ,終止形-一般"),
++        ("です", "助動詞,*,*,*,助動詞-デス,終止形-一般"),
++        ("。", "補助記号,句点,*,*,*,*"),
++    ])
++    assert got == ["昨日の", "試合は", "面白かったです。"]
++
++
++def test_glue_units_keeps_dependent_verbs_and_standalone_adjectives():
++    # 登っ / て / き / た is one caption unit ("climbed and came")...
++    assert morph.glue_units([
++        ("登っ", "動詞,一般,*,*,五段-ラ行,連用形-促音便"),
++        ("て", "助詞,接続助詞,*,*,*,*"),
++        ("き", "動詞,非自立可能,*,*,カ行変格,連用形-一般"),
++        ("た", "助動詞,*,*,*,助動詞-タ,終止形-一般"),
++        ("よ", "助詞,終助詞,*,*,*,*"),
++        ("！", "補助記号,句点,*,*,*,*"),
++    ]) == ["登ってきたよ！"]
++    # ... but "いい" is tagged 形容詞,非自立可能 and must stay its own word.
++    assert morph.glue_units([("今日", "名詞,普通名詞,副詞可能,*,*,*"),
++                             ("は", "助詞,係助詞,*,*,*,*"),
++                             ("いい", "形容詞,非自立可能,*,*,形容詞,連体形-一般")]) \
++        == ["今日は", "いい"]
++    # A conjunction starts a new unit instead of gluing to the previous one.
++    assert morph.glue_units([("雨", "名詞,普通名詞,一般,*,*,*"),
++                             ("でも", "接続詞,*,*,*,*,*")]) == ["雨", "でも"]
++
++
++def test_glue_units_survives_an_empty_or_odd_answer():
++    assert morph.glue_units([]) == []
++    assert morph.glue_units([(" ", "空白,*,*,*,*,*")]) == []
++    assert morph.glue_units([("。", "")]) == ["。"]     # nothing to glue onto
++
++
++# ---------------------------------------------------------------------------
++# timing (pure)
++# ---------------------------------------------------------------------------
++
++def test_recut_merges_spans_and_splits_one_proportionally():
++    # "こんにちは世界" arrives as three engine tokens; the dictionary says
++    # こんにちは + 世界, so the first two spans merge and the third is cut.
++    spans = [("こんに", 0.0, 0.6), ("ちは", 0.6, 1.2), ("世界", 1.2, 2.0)]
++    got = morph.recut(spans, ["こんにちは", "世界"])
++    assert [w["w"] for w in got] == ["こんにちは", "世界"]
++    assert got[0]["s"] == 0.0 and got[0]["e"] == 1.2
++    assert got[1]["s"] == 1.2 and got[1]["e"] == 2.0
++    # One engine word covering two dictionary words: split proportionally.
++    got = morph.recut([("あいうえ", 0.0, 2.0)], ["あい", "うえ"])
++    assert [w["w"] for w in got] == ["あい", "うえ"]
++    assert got[0] == {"w": "あい", "s": 0.0, "e": 1.0}
++    assert got[1] == {"w": "うえ", "s": 1.0, "e": 2.0}
++
++
++def test_recut_never_loses_the_tail_or_the_edges():
++    # The units ran out before the text did: the rest rides the last word.
++    got = morph.recut([("こんにちは世界", 0.0, 2.0)], ["こんにちは"])
++    assert got == [{"w": "こんにちは世界", "s": 0.0, "e": 2.0}]
++    # Nothing to cut: no words, no spans, garbage in.
++    assert morph.recut([], ["こんにちは"]) == []
++    assert morph.recut([("こんにちは", 0.0, 1.0)], []) == []
++    assert morph.recut([("x", 1.0, 1.0), (None, 0, 1)], ["x"]) == []
++
++
++def test_word_spans_ignores_broken_entries():
++    assert morph.word_spans([{"w": "a", "s": 0, "e": 1}, {"w": "b"}, None]) == [("a", 0.0, 1.0)]
++
++
++# ---------------------------------------------------------------------------
++# wiring: engine words -> dictionary units
++# ---------------------------------------------------------------------------
++
++def test_segmenter_recuts_engine_words_onto_dictionary_units(stub_units):
++    text = "今日はいい天気ですね。"
++    chars = [{"w": c, "s": i * 0.25, "e": (i + 1) * 0.25} for i, c in enumerate(text)]
++    out = segmenter.segment_cues(
++        [{"start": 0.0, "end": len(text) * 0.25, "text": text,
++          "words": chars, "word_source": "whispercpp"}],
++        segmenter.normalize_policy(None, "word"))
++    assert [c["text"] for c in out] == stub_units
++    # The engine's timings are kept, not invented: 今日は ends where its last
++    # character ended.
++    assert out[0]["start"] == 0.0 and out[0]["end"] == 0.75
++    assert out[1]["start"] == 0.75 and out[1]["end"] == 1.25
++    assert [c["word_source"] for c in out] == ["whispercpp"] * 3
++
++
++def test_engine_preset_keeps_cue_boundaries_but_recuts_the_words(stub_units):
++    text = "今日はいい天気ですね。"
++    chars = [{"w": c, "s": i * 0.25, "e": (i + 1) * 0.25} for i, c in enumerate(text)]
++    out = segmenter.segment_cues(
++        [{"start": 0.0, "end": 2.5, "text": text, "words": chars,
++          "word_source": "whispercpp"}],
++        segmenter.normalize_policy(None, "engine"))
++    assert [c["text"] for c in out] == [text]          # one cue, as the engine drew it
++    assert out[0]["start"] == 0.0 and out[0]["end"] == 2.5
++    assert [w["w"] for w in out[0]["words"]] == stub_units
++    assert out[0]["word_source"] == "whispercpp"
++
++
++def test_a_japanese_cue_without_words_is_estimated_from_units(stub_units):
++    out = segmenter.segment_cues(
++        [{"start": 0.0, "end": 3.0, "text": "今日はいい天気ですね。"}],
++        segmenter.normalize_policy(None, "burst"))
++    assert [c["text"] for c in out] == ["今日はいい", "天気ですね。"]
++    assert all(c["word_source"] == "estimated" for c in out)
++    assert all(w["w"] in stub_units for c in out for w in c["words"])
++
++
++def test_editing_japanese_text_keeps_its_timings(stub_units):
++    words = [{"w": "今日は", "s": 0.0, "e": 1.0},
++             {"w": "いい", "s": 1.0, "e": 1.5},
++             {"w": "天気ですね。", "s": 1.5, "e": 3.0}]
++    got, src = segmenter.reword_for_text(words, "今日はいい天気ですね")
++    assert src == "edited"
++    assert [w["w"] for w in got] == stub_units
++    assert got[0]["s"] == 0.0 and got[-1]["e"] == 3.0
++
++
++def test_build_cues_recuts_engine_tokens(stub_units):
++    """The whisper.cpp path: per-character tokens in, real words out."""
++    toks = [{"text": c, "offsets": {"from": i * 250, "to": (i + 1) * 250}}
++            for i, c in enumerate("今日はいい天気ですね。")]
++    segments = [{"start": 0.0, "end": 2.5, "text": "今日はいい天気ですね。",
++                 "words": wcpp.words_from_tokens(toks)}]
++    cues = transcribe.build_cues(segments, {"segment_preset": "word",
++                                            "language": "ja"}, "whispercpp")
++    assert [c["text"] for c in cues] == stub_units
++    assert cues[0]["word_source"] == "whispercpp"
++
++
++def test_build_cues_leaves_latin_alone():
++    """No dictionary claims English, so its words pass through untouched."""
++    assert morph.split_words("hello world") is None
++    segments = [{"start": 0.0, "end": 1.0, "text": "hello world",
++                 "words": [{"w": "hello", "s": 0.0, "e": 0.5},
++                           {"w": "world", "s": 0.5, "e": 1.0}]}]
++    cues = transcribe.build_cues(segments, {"segment_preset": "word",
++                                            "language": "en"}, "whisper")
++    assert [c["text"] for c in cues] == ["hello", "world"]
++    assert cues[0]["word_source"] == "whisper"
++
++
++# ---------------------------------------------------------------------------
++# with the real dictionary (skipped when it is not installed)
++# ---------------------------------------------------------------------------
++
++@pytest.mark.skipif(morph.provider("ja") is None,
++                    reason="no Japanese dictionary installed")
++def test_sudachi_gives_real_caption_words():
++    assert morph.split_words(JA) == ["こんにちは、", "今日は", "いい", "天気ですね。"]
++    assert morph.split_words("昨日の試合は本当に面白かったです。") \
++        == ["昨日の", "試合は", "本当に", "面白かったです。"]
++    # Caption units, not dictionary words: no unit is a bare particle, and the
++    # count is nothing like the per-character fallback.
++    for units in (morph.split_words(JA),):
++        assert not any(u in ("は", "の", "に", "を", "て", "た") for u in units)
++        assert len(units) < len(JA) / 3
++
++
++@pytest.mark.skipif(morph.provider("ja") is None,
++                    reason="no Japanese dictionary installed")
++def test_sudachi_path_end_to_end_through_a_whispercpp_token_stream():
++    toks = [{"text": c, "offsets": {"from": i * 250, "to": (i + 1) * 250}}
++            for i, c in enumerate(JA)]
++    segments = [{"start": 0.0, "end": len(JA) * 0.25, "text": JA,
++                 "words": wcpp.words_from_tokens(toks)}]
++    cues = transcribe.build_cues(segments, {"segment_preset": "word",
++                                            "language": "ja"}, "whispercpp")
++    assert [c["text"] for c in cues] == ["こんにちは、", "今日は", "いい", "天気ですね。"]
++    assert cues[0]["start"] == 0.0
++    assert cues[-1]["end"] == pytest.approx(len(JA) * 0.25, abs=0.05)
++    # Timings tile the segment: each cue starts where the last one ended.
++    for a, b in zip(cues, cues[1:]):
++        assert a["end"] == b["start"]
++
++
++@pytest.mark.skipif(morph.provider("ja") is None,
++                    reason="no Japanese dictionary installed")
++def test_sudachi_burst_layout_reads_like_captions():
++    out = segmenter.segment_cues(
++        [{"start": 0.0, "end": 4.0, "text": "こんにちは、今日はいい天気ですね。"}],
++        segmenter.normalize_policy(None, "burst"))
++    # Burst is <= 3 words / 18 chars / 2.5 s, and the 2.5 s limit is what
++    # splits this line (the words are estimates spread over the cue).
++    assert [c["text"] for c in out] == ["こんにちは、今日は", "いい天気ですね。"]
++    assert all(len(c["text"]) <= 18 for c in out)
++    assert all(len(c["words"]) <= 3 for c in out)
++
++
++@pytest.mark.skipif(morph.provider("zh") is None, reason="jieba is not installed")
++def test_jieba_handles_chinese_without_a_provider_for_japanese():
++    units = morph.split_words("你好世界，今天天气很好。")
++    assert units and "".join(units) == "你好世界，今天天气很好。"
++    # 你好 / 世界， / 今天天气 / 很 / 好。 - full stops ride with the word before
++    assert units == ["你好", "世界，", "今天天气", "很", "好。"]
 diff --git a/tests/test_segmenter.py b/tests/test_segmenter.py
 new file mode 100644
-index 0000000..96956d2
+index 0000000..40be996
 --- /dev/null
 +++ b/tests/test_segmenter.py
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,495 @@
 +"""Unit tests for vts/segmenter.py - words in, caption cues out.
 +
 +Pure functions, so these run everywhere (no ffmpeg, no model, no browser).
@@ -925,6 +1452,78 @@ index 0000000..96956d2
 +    assert ws[2]["e"] - ws[2]["s"] == pytest.approx(ws[0]["e"] - ws[0]["s"])
 +    assert seg.words_from_text("", 0, 1) == []
 +    assert seg.words_from_text("   ", 0, 1) == []
++
++
++# ---------------------------------------------------------------------------
++# Japanese / Chinese: no spaces, so words have to come from the script
++# ---------------------------------------------------------------------------
++
++
++@pytest.fixture()
++def no_dictionary(monkeypatch):
++    """Pretend no dictionary is installed.
++
++    The tests below describe the *fallback* (one character per unit), which is
++    what runs on a machine with nothing installed - so they patch the provider
++    lookup instead of depending on what this machine happens to have.
++    """
++    monkeypatch.setattr(seg.morph, "provider", lambda lang=None: None)
++    return None
++
++def test_japanese_text_is_split_per_character_not_per_space(no_dictionary):
++    # A Japanese cue has no spaces at all: splitting on whitespace would make
++    # the whole line one "word" and a word-level layout could cut nothing.
++    assert seg.text_tokens("こんにちは世界。") == ["こ", "ん", "に", "ち", "は", "世", "界。"]
++    assert seg.text_tokens("你好世界") == ["你", "好", "世", "界"]
++    ws = seg.words_from_text("こんにちは", 0.0, 5.0)
++    assert [w["w"] for w in ws] == ["こ", "ん", "に", "ち", "は"]
++    assert ws[0]["s"] == 0.0 and ws[-1]["e"] == 5.0
++
++
++def test_cjk_punctuation_stays_with_the_word_before_it():
++    assert seg.text_tokens("世界。") == ["世", "界。"]
++    assert seg.text_tokens("です、ね") == ["で", "す、", "ね"]
++    # A CJK character that carries meaning starts a token; 。and 、do not.
++    assert seg.is_cjk_word("世") is True
++    assert seg.is_cjk_word("。") is False
++    assert seg.is_cjk_word("A") is False
++    assert seg.has_cjk("abc こ") is True and seg.has_cjk("abc") is False
++
++
++def test_a_japanese_cue_without_words_can_still_be_resplit(no_dictionary):
++    """The imported-subtitle case: no word timing, but the layout must work."""
++    cues = [{"start": 0.0, "end": 4.0, "text": "こんにちは世界。"},
++            {"start": 4.0, "end": 7.5, "text": "東京は晴れです。"},
++            {"start": 7.5, "end": 10.0, "text": "また明日。"}]
++    out = seg.segment_cues(cues, seg.normalize_policy(None, "burst"))
++    assert len(out) > len(cues)                       # it actually re-cut
++    assert len(out) == 8
++    # Nothing is lost or reordered: the captions still read the same text.
++    assert "".join(c["text"] for c in out) == "".join(c["text"] for c in cues)
++    assert all(c["word_source"] == "estimated" for c in out)
++    assert all(len(c["words"]) <= 3 for c in out)
++    # One word per character; the full stop rides with the character before it.
++    assert [c["text"] for c in out] == ["こんに", "ちは世", "界。",
++                                        "東京は", "晴れで", "す。",
++                                        "また明", "日。"]
++
++
++def test_japanese_word_layout_gives_one_character_per_caption(no_dictionary):
++    cues = [{"start": 0.0, "end": 2.0, "text": "日本語"}]
++    out = seg.segment_cues(cues, seg.normalize_policy(None, "word"))
++    assert [c["text"] for c in out] == ["日", "本", "語"]
++    assert all(len(c["words"]) == 1 for c in out)
++    assert out[0]["start"] == 0.0 and out[-1]["end"] == 2.0
++
++
++def test_mixed_japanese_and_latin_keeps_one_space_at_the_script_change():
++    got = seg.join_words(words("こ", 0, 1, "ん", 1, 2, "は", 2, 3,
++                               "OK", 3, 4, "!", 4, 5))
++    assert got == "こんは OK!"
++    # Latin only, unchanged.
++    assert seg.join_words(words("Halo", 0, 1, "dunia", 1, 2)) == "Halo dunia"
++    # CJK only: no spaces at all.
++    assert seg.join_words(words("你", 0, 1, "好", 1, 2, "世", 2, 3)) == "你好世"
 +
 +
 +def test_with_estimated_words_only_touches_cues_without_words():
@@ -1113,7 +1712,11 @@ index 0000000..96956d2
 +    assert [c["text"] for c in out] == ["Hello there", "again"]
 +    assert out[0]["words"] == cues[0]["words"]
 +    assert out[0]["word_source"] == "whisper"
-+    assert out[1]["words"] == []          # typed text, nothing to guess from
++    # A cue with no word timings keeps its engine boundary *and* gets an
++    # estimate (clearly marked), so a word-level layout can use it. Leaving it
++    # wordless is what let a whole segment vanish from build_cues().
++    assert out[1]["words"] == [{"w": "again", "s": 2.0, "e": 3.0}]
++    assert out[1]["word_source"] == "estimated"
 +
 +
 +def test_resplitting_ignores_junk_and_keeps_real_words_with_estimated_neighbours():
@@ -1165,7 +1768,7 @@ index 0000000..96956d2
 +    assert seg.describe(seg.normalize_policy(None, "engine"), "engine") == \
 +        seg.PRESETS["engine"]["hint"]
 diff --git a/tests/test_whispercpp.py b/tests/test_whispercpp.py
-index ecf20f5..910d3d6 100644
+index ecf20f5..9d87639 100644
 --- a/tests/test_whispercpp.py
 +++ b/tests/test_whispercpp.py
 @@ -7,6 +7,8 @@ import time
@@ -1237,7 +1840,7 @@ index ecf20f5..910d3d6 100644
  
  def _mk_cli(tmp_path: Path, body: str, name: str = "whisper-cli") -> Path:
      cli = tmp_path / name
-@@ -200,6 +255,95 @@ def test_run_cancels(tmp_path, monkeypatch):
+@@ -200,6 +255,134 @@ def test_run_cancels(tmp_path, monkeypatch):
      assert time.time() - t0 < 10                     # did not wait for sleep 20
  
  
@@ -1328,6 +1931,45 @@ index ecf20f5..910d3d6 100644
 +    # No token timings: the cue gets an honest estimate instead of silence.
 +    assert cues[0]["word_source"] == "estimated"
 +    assert [w["w"] for w in cues[0]["words"]] == ["halo", "dunia"]
++
++
++def test_cjk_tokens_become_one_word_each():
++    """Japanese has no spaces: whisper.cpp emits a stream of per-character
++    tokens, and each of those characters is a word a layout can cut at."""
++    text = json.dumps({"transcription": [{
++        "timestamps": {"from": "00:00:00,000", "to": "00:00:01,200"},
++        "offsets": {"from": 0, "to": 1200},
++        "text": "こんにちは世界。",
++        "tokens": [{"text": t, "offsets": {"from": i * 150, "to": (i + 1) * 150}}
++                   for i, t in enumerate("こんにちは世界。")],
++    }]})
++    segs = wcpp.parse_json_full(text)
++    assert [w["w"] for w in segs[0]["words"]] == ["こ", "ん", "に", "ち", "は", "世", "界。"]
++    assert segs[0]["words"][0]["s"] == 0.0 and segs[0]["words"][0]["e"] == 0.15
++    assert segs[0]["words"][-1]["e"] == 1.2
++
++
++def test_japanese_tokens_reach_burst_captions(monkeypatch):
++    """The per-character fallback (no dictionary installed)."""
++    from vts import morph
++    monkeypatch.setattr(morph, "provider", lambda lang=None: None)
++    toks = [{"text": t, "offsets": {"from": i * 150, "to": (i + 1) * 150}}
++            for i, t in enumerate("こんにちは世界。")]
++    segment = {"start": 0.0, "end": 1.2, "text": "こんにちは世界。",
++               "words": wcpp.words_from_tokens(toks)}
++    cues = tsc.build_cues([segment], {"segment_preset": "burst"}, "whispercpp")
++    assert [c["text"] for c in cues] == ["こんに", "ちは世", "界。"]
++    assert [c["word_source"] for c in cues] == ["whispercpp"] * 3
++    assert cues[0]["words"][0]["w"] == "こ" and cues[-1]["words"][-1]["w"] == "界。"
++
++
++def test_latin_tokens_still_merge_into_words():
++    # The CJK rule must not break English: " world" continues nothing, "ing"
++    # continues the word before it.
++    toks = [{"text": " test", "offsets": {"from": 0, "to": 300}},
++            {"text": "ing", "offsets": {"from": 300, "to": 500}},
++            {"text": " one", "offsets": {"from": 500, "to": 800}}]
++    assert [w["w"] for w in wcpp.words_from_tokens(toks)] == ["testing", "one"]
 +
 +
  # ------------------------------------------------------------- downloads
@@ -1470,7 +2112,7 @@ index 7a06a99..d9d7d88 100644
      events_at = header.index("[Events]")
      header[events_at:events_at] = style_lines + ([""] if style_lines else [])
 diff --git a/vts/captions.py b/vts/captions.py
-index 75218c9..ae655b6 100644
+index 75218c9..02d85e0 100644
 --- a/vts/captions.py
 +++ b/vts/captions.py
 @@ -5,14 +5,24 @@ Each cue carries its own position/size/alignment (`style`) and a `track`
@@ -1562,7 +2204,7 @@ index 75218c9..ae655b6 100644
      return out
  
  
-@@ -91,16 +126,36 @@ def lane_pack(cues: list[dict]) -> list[dict]:
+@@ -91,16 +126,39 @@ def lane_pack(cues: list[dict]) -> list[dict]:
  
  
  def from_parsed(cues: list[dict]) -> list[dict]:
@@ -1575,7 +2217,10 @@ index 75218c9..ae655b6 100644
 +    burst/word layouts and for word-level editing to have something to work
 +    with, clearly labelled as an estimate.
 +    """
++    from .morph import detect_lang_many
 +    from .segmenter import words_from_text
++    lang = detect_lang_many([c.get("text") for c in cues or []
++                             if isinstance(c, dict)])
      store = []
      for c in cues or []:
 +        try:
@@ -1586,7 +2231,7 @@ index 75218c9..ae655b6 100644
 +        words = clean_words(c.get("words"))
 +        src = clean_word_source(c.get("word_source"))
 +        if not words:
-+            words = words_from_text(c.get("text", ""), start, end)
++            words = words_from_text(c.get("text", ""), start, end, lang)
 +            src = "estimated" if words else None
          store.append({
              "id": new_id(),
@@ -1603,12 +2248,334 @@ index 75218c9..ae655b6 100644
          })
      return lane_pack(store)
  
+diff --git a/vts/morph.py b/vts/morph.py
+new file mode 100644
+index 0000000..c0ad9ff
+--- /dev/null
++++ b/vts/morph.py
+@@ -0,0 +1,316 @@
++"""Dictionary word segmentation for captions in languages written without spaces.
++
++Latin-script languages carry their word boundaries in the text itself: the
++spaces. Japanese and Chinese do not, and Whisper (like every other recogniser)
++returns them as a stream of per-character tokens - which is why a Japanese
++caption used to be one indivisible unit whose only possible splits were
++between characters. `こんにちは` is five tokens and one word, and only a
++vocabulary can tell the difference.
++
++Three optional, fully local dictionaries are wrapped here:
++
++    sudachipy + sudachidict_core / _small   Japanese - recommended
++    janome                                  Japanese - pure Python, no compiler
++    jieba                                   Chinese
++
++None of them is required. With nothing installed every function returns
++`None` and the caller falls back to `segmenter.text_tokens()`, which cuts
++text without spaces per character: usable for short-form captions, but not
++linguistically correct. Nothing here touches the network.
++
++What comes back are *caption units*, not dictionary words: a particle or an
++auxiliary verb is glued to the unit in front of it -
++
++    昨日の / 試合は / 本当に / 面白かった / です / ね。
++
++- because that is how Japanese subtitling breaks lines. `面白かっ` and `た`
++are two correct dictionary words and one terrible caption.
++"""
++
++from __future__ import annotations
++
++import re
++import threading
++
++SUDACHI = "sudachi"
++JANOME = "janome"
++JIEBA = "jieba"
++
++#: Which script each provider actually knows.
++PROVIDER_LANG = {SUDACHI: "ja", JANOME: "ja", JIEBA: "zh"}
++#: Providers to try for a language, best first.
++LANG_PROVIDERS = {"ja": (SUDACHI, JANOME), "zh": (JIEBA,)}
++#: One-line install command per language, shown as a hint (never a hard need).
++INSTALL = {"ja": "python -m pip install sudachipy sudachidict_core",
++           "zh": "python -m pip install jieba"}
++
++# Script detection. It never has to be perfect - it only decides which
++# dictionary (if any) to ask, and an unknown script simply falls through to
++# the per-character fallback.
++_KANA = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
++_HANGUL = re.compile(r"[\u1100-\u11ff\u3130-\u318f\uac00-\ud7af]")
++_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
++_NO_SPACE_OTHER = re.compile(r"[\u0e00-\u0e7f\u0e80-\u0eff\u1000-\u109f"
++                             r"\u1780-\u17ff\u0e81-\u0edf]")   # th / lo / my / km
++
++#: Kinds of token that belong to the unit before them, by part of speech.
++GLUE_POS = ("助詞", "助動詞", "接尾辞")          # particle, auxiliary, suffix
++GLUE_PUNCT = ("記号", "補助記号", "空白")        # 。、！? and friends
++GLUE_MARK = "非自立可能"                        # dependent verbs/nouns: てきた, こと
++GLUE_MARK_POS = ("動詞", "名詞")                # ... but いい is 形容詞,非自立可能
++                                                # and must start its own unit
++
++_lock = threading.Lock()
++_tokenizers: dict[str, object] = {}
++_broken: set[str] = set()
++
++
++def detect_lang(text) -> str | None:
++    """The language a piece of text is written in, as far as script goes.
++
++    Only the scripts that need a dictionary are named; Latin text (and
++    anything unrecognised) returns None, which means "spaces are enough".
++    """
++    s = str(text or "")
++    if _KANA.search(s):
++        return "ja"
++    if _HANGUL.search(s):
++        return "ko"          # written with spaces: no dictionary needed
++    if _HAN.search(s):
++        return "zh"
++    if _NO_SPACE_OTHER.search(s):
++        return "th"          # no provider yet: falls back to per character
++    return None
++
++
++def detect_lang_many(texts) -> str | None:
++    """One language for a whole cue list.
++
++    A single kana anywhere settles the whole set as Japanese: a Japanese
++    subtitle file can contain kanji-only lines (`東京駅`), and asking a
++    Chinese dictionary about them would cut them wrongly.
++    """
++    seen: list[str | None] = [detect_lang(t) for t in texts or []]
++    for lang in ("ja", "ko", "zh", "th"):
++        if lang in seen:
++            return lang
++    return None
++
++
++def provider(lang: str | None) -> str | None:
++    """Which installed dictionary can handle `lang`, if any."""
++    try:
++        import importlib.util
++    except Exception:                                  # pragma: no cover
++        return None
++    for name in LANG_PROVIDERS.get(str(lang or ""), ()):
++        if name in _broken:
++            continue
++        if name == SUDACHI:
++            if (importlib.util.find_spec("sudachipy")
++                    and (importlib.util.find_spec("sudachidict_core")
++                         or importlib.util.find_spec("sudachidict_small"))):
++                return name
++        elif importlib.util.find_spec(name):
++            return name
++    return None
++
++
++def available(lang: str | None) -> str | None:
++    """Installed provider for a language (None = per-character fallback)."""
++    return provider(lang)
++
++
++def install_hint(lang: str | None) -> str | None:
++    """The command that would turn the fallback into real words, or None."""
++    lang = str(lang or "")
++    if lang in INSTALL and not provider(lang):
++        return INSTALL[lang]
++    return None
++
++
++# --------------------------------------------------------------------------- #
++# providers
++# --------------------------------------------------------------------------- #
++
++def _sudachi(text: str):
++    from sudachipy import dictionary as sd, tokenizer as st
++    tok = _tokenizers.get(SUDACHI)
++    if tok is None:
++        d = sd.Dictionary()
++        tok = d.tokenizer() if hasattr(d, "tokenizer") else d.create()
++        _tokenizers[SUDACHI] = tok
++    mode = st.Tokenizer.SplitMode.A        # short units: caption-sized words
++    return [(m.surface(), ",".join(m.part_of_speech())) for m in tok.tokenize(text, mode)]
++
++
++def _janome(text: str):
++    from janome.tokenizer import Tokenizer
++    tok = _tokenizers.get(JANOME)
++    if tok is None:
++        tok = Tokenizer()
++        _tokenizers[JANOME] = tok
++    return [(t.surface, str(t.part_of_speech)) for t in tok.tokenize(text)]
++
++
++def _jieba(text: str):
++    """Chinese, with jieba's part-of-speech flags.
++
++    jieba's flags are mapped onto the two kinds of token the glue rule knows:
++    `x` (punctuation/symbols) and `u*` (particles such as 了 / 的, which behave
++    like Japanese suffixes and belong to the word in front of them).
++    """
++    import jieba.posseg as pseg
++    out = []
++    for word, flag in pseg.cut(text):
++        pos = "補助記号" if flag == "x" else ("助詞" if flag.startswith("u") else flag)
++        out.append((word, pos))
++    return out
++
++
++_PROVIDERS = {SUDACHI: _sudachi, JANOME: _janome, JIEBA: _jieba}
++
++
++def _pairs(text: str, lang: str | None):
++    name = provider(lang)
++    if not name:
++        return None
++    fn = _PROVIDERS[name]
++    with _lock:                       # the analyzers are not thread-safe
++        try:
++            return fn(text)
++        except Exception:             # a half-installed dictionary must not
++            _broken.add(name)         # take the caption feature down with it
++            return None
++
++
++# --------------------------------------------------------------------------- #
++# caption units
++# --------------------------------------------------------------------------- #
++
++def glue_units(pairs) -> list[str]:
++    """Dictionary tokens -> caption units (particles glued to the word before).
++
++    Pure: `pairs` is [(surface, part-of-speech)] and the result is a list of
++    strings, so the rule can be tested without any dictionary installed.
++    """
++    out: list[str] = []
++    for surface, pos in pairs or []:
++        w = str(surface or "")
++        if not w.strip():
++            continue
++        fields = str(pos or "").split(",")
++        head = fields[0] if fields and fields[0] else ""
++        glues = (head in GLUE_POS or head in GLUE_PUNCT
++                 or (head in GLUE_MARK_POS
++                     and any(GLUE_MARK in f for f in fields)))
++        if out and glues:
++            out[-1] += w
++        else:
++            out.append(w)
++    return out
++
++
++def split_words(text: str, lang: str | None = None) -> list[str] | None:
++    """Cut text into caption units using a dictionary.
++
++    Returns None when no dictionary is installed (or the language does not
++    need one), which is the caller's signal to use the per-character fallback.
++    """
++    s = str(text or "")
++    if not s.strip():
++        return None
++    lang = lang or detect_lang(s)
++    pairs = _pairs(s, lang)
++    if not pairs:
++        return None
++    units = glue_units(pairs)
++    return units or None
++
++
++# --------------------------------------------------------------------------- #
++# timing
++# --------------------------------------------------------------------------- #
++
++def _r3(x: float) -> float:
++    return round(float(x), 3)
++
++
++def recut(spans, units) -> list[dict]:
++    """Give each caption unit a real time span, taken from the engine's timing.
++
++    `spans` are what the recogniser actually timed - whisper.cpp tokens,
++    faster-whisper words - as `(text, start, end)`. Characters are consumed in
++    order, so a unit that covers several spans gets the whole stretch, and one
++    that ends in the middle of a span splits that span proportionally. The
++    words tile the engine's timeline exactly: no timing is invented and none
++    is lost.
++
++    Pure, so it can be tested with no dictionary and no engine at all.
++    """
++    chars: list[tuple[str, float, float]] = []
++    for item in spans or []:
++        try:
++            if not isinstance(item[0], str):
++                continue
++            text, a, b = item[0], float(item[1]), float(item[2])
++        except (TypeError, IndexError, ValueError):
++            continue
++        cs = [ch for ch in text if not ch.isspace()]
++        if not cs or b <= a:
++            continue
++        step = (b - a) / len(cs)
++        for i, ch in enumerate(cs):
++            chars.append((ch, a + i * step, a + (i + 1) * step))
++    if not chars or not units:
++        return []
++    out: list[dict] = []
++    i = 0
++    for unit in units:
++        want = len([c for c in str(unit) if not c.isspace()])
++        if want <= 0:
++            continue
++        chunk = chars[i:i + want]
++        if not chunk:
++            break
++        out.append({"w": str(unit), "s": _r3(chunk[0][1]), "e": _r3(chunk[-1][2])})
++        i += len(chunk)
++    if not out:
++        return []
++    if i < len(chars):                # the units ran out before the text did
++        out[-1]["w"] += "".join(c[0] for c in chars[i:])
++        out[-1]["e"] = _r3(chars[-1][2])
++    return out
++
++
++def word_spans(words) -> list[tuple]:
++    """`[{w,s,e}]` -> `[(text, start, end)]`, the input `recut` expects."""
++    out = []
++    for w in words or []:
++        try:
++            out.append((str(w["w"]), float(w["s"]), float(w["e"])))
++        except (KeyError, TypeError, ValueError):
++            continue
++    return out
++
++
++def recut_spans(words, lang: str | None = None) -> list[dict] | None:
++    """Re-cut engine words onto dictionary units, keeping their timings.
++
++    Returns None when there is nothing to do (no dictionary, or Latin text).
++    """
++    spans = word_spans(words)
++    if not spans:
++        return None
++    text = "".join(t for t, _, _ in spans)
++    units = split_words(text, lang)
++    if not units:
++        return None
++    out = recut(spans, units)
++    return out or None
++
++
++def describe() -> dict:
++    """What is installed - exposed through /api/env so the app can say so."""
++    return {lang: {"provider": provider(lang), "install": install_hint(lang)}
++            for lang in sorted(LANG_PROVIDERS)}
 diff --git a/vts/segmenter.py b/vts/segmenter.py
 new file mode 100644
-index 0000000..996b806
+index 0000000..b777d6e
 --- /dev/null
 +++ b/vts/segmenter.py
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,709 @@
 +"""Word-level caption segmentation: how words become caption cues.
 +
 +A transcription engine returns *words* with their own start/end times
@@ -1640,6 +2607,8 @@ index 0000000..996b806
 +from __future__ import annotations
 +
 +import re
++
++from . import morph
 +
 +# A cue never holds more words than this (a guard against a pathological run
 +# of one-word cues being merged by the UI).
@@ -1710,7 +2679,10 @@ index 0000000..996b806
 +PRESETS: dict[str, dict] = {
 +    "engine": {
 +        "label": "Engine segments (as transcribed)",
-+        "hint": "Whatever the recogniser produced - usually whole sentences.",
++        "hint": "Whatever the recogniser produced - usually whole sentences. The "
++            "recogniser is the only thing that knows where Japanese words end, "
++            "so this is the layout to use when the cuts must be linguistically "
++            "correct rather than small.",
 +        "policy": {"keep_segments": True},
 +    },
 +    "line": {
@@ -1723,7 +2695,8 @@ index 0000000..996b806
 +    },
 +    "burst": {
 +        "label": "Burst - 3 words (vertical video)",
-+        "hint": "Up to 3 words, 18 characters or 2.5 s - the short-form look.",
++        "hint": "Up to 3 words, 18 characters or 2.5 s - the short-form look. "
++                "Japanese/Chinese/Korean count per character.",
 +        "policy": {
 +            "max_words": 3, "max_chars": 18, "max_duration": 2.5,
 +            "min_duration": 0.4, "pause": 0.35, "break_punct": True,
@@ -1731,7 +2704,8 @@ index 0000000..996b806
 +    },
 +    "word": {
 +        "label": "One word at a time",
-+        "hint": "Every word gets its own cue - the karaoke / word-pop layout.",
++        "hint": "Every word gets its own cue - the karaoke / word-pop layout. "
++                "One character per cue for Japanese/Chinese/Korean.",
 +        "policy": {
 +            "max_words": 1, "max_chars": 0, "max_duration": 0,
 +            "min_duration": 0, "pause": 0, "break_punct": False,
@@ -1745,7 +2719,12 @@ index 0000000..996b806
 +}
 +
 +PRESET_ORDER = ("engine", "line", "burst", "word", "custom")
-+DEFAULT_PRESET = "burst"
++#: The layout a *new* caption set gets: the recogniser's own segments. Nothing
++#: is re-split unless the user asks for it by picking another layout - the
++#: transcription button must never silently re-cut the transcript (it used to
++#: default to Burst, which also hid any segment the engine gave no word times
++#: for). "burst" stays one click away.
++DEFAULT_PRESET = "engine"
 +
 +
 +def normalize_policy(raw: dict | None = None, preset: str | None = None) -> dict:
@@ -1851,13 +2830,81 @@ index 0000000..996b806
 +    return out[:MAX_WORDS]
 +
 +
-+def words_from_text(text: str, start: float, end: float) -> list[dict]:
++def is_cjk_word(ch: str) -> bool:
++    """True for a CJK character that carries meaning (a letter), as opposed to
++    CJK punctuation (。、「」), which belongs to the token before it."""
++    return bool(ch) and _is_cjk(ch) and ch.isalnum()
++
++
++def has_cjk(text: str) -> bool:
++    """True when the text contains a character from a script written without
++    spaces (Japanese, Chinese, Korean, Thai, Khmer, Lao, Myanmar). Those
++    languages cannot be split on whitespace - a caption layout has to cut them
++    per character instead, which is what `text_tokens` does."""
++    return any(_is_cjk(ch) for ch in str(text or ""))
++
++
++def text_tokens(text: str) -> list[str]:
++    """Split caption text into the units a layout can cut at.
++
++    Latin words split on whitespace. CJK splits **per character**, because
++    those languages are written without spaces and Whisper returns them as
++    per-character tokens; a Japanese cue of 20 characters is 20 cut points,
++    not one. Punctuation stays glued to the token it follows, so the displayed
++    text reads "世界。" rather than "世界 ." - the same rule `clean_words`
++    applies to real word data.
++    """
++    out: list[str] = []
++    gap = True                                 # start of text = start of a unit
++    for ch in str(text or ""):
++        if ch.isspace():
++            gap = True                         # a space always ends a unit
++            continue
++        if _is_cjk(ch):
++            if is_cjk_word(ch):
++                out.append(ch)
++            elif out:
++                out[-1] += ch              # 。 and 、 belong to the word before
++            else:
++                out.append(ch)
++            gap = False
++            continue
++        if ch.isalnum():
++            tail = out[-1][-1] if (out and out[-1]) else ""
++            if not gap and tail and not _is_cjk(tail) and tail.isalnum():
++                out[-1] += ch                  # keep a Latin/digit run together
++            else:
++                out.append(ch)
++            gap = False
++            continue
++        if out:
++            out[-1] += ch                      # punctuation rides with its word
++        else:
++            out.append(ch)
++        gap = False
++    return out
++
++
++def text_units(text: str, lang: str | None = None) -> list[str]:
++    """The points a caption layout may cut this text at.
++
++    With a dictionary installed (see `vts.morph`) those are real words, which
++    is the only way to cut Japanese or Chinese correctly. Without one the
++    script heuristic is used: spaces for Latin, one character per unit for
++    languages that are written without them.
++    """
++    units = morph.split_words(text, lang)
++    return units if units else text_tokens(text)
++
++
++def words_from_text(text: str, start: float, end: float,
++                    lang: str | None = None) -> list[dict]:
 +    """Char-weighted word timings for a cue that has no word data.
 +
 +    Used for .srt/.vtt imports and hand-typed cues so the burst/word layouts
 +    still work; the result is always labelled `estimated`.
 +    """
-+    parts = str(text or "").split()
++    parts = text_units(text, lang)
 +    if not parts:
 +        return []
 +    a = _num(start, 0.0) or 0.0
@@ -1887,7 +2934,17 @@ index 0000000..996b806
 +    """
 +    ws = clean_words(words)
 +    parts = str(text or "").split()
-+    if not ws or len(parts) != len(ws):
++    if not ws:
++        return [], None
++    if len(parts) != len(ws):
++        # Text without spaces (Japanese, Chinese) has one "part" per sentence,
++        # so counting words cannot work. A dictionary can: re-cut the *new*
++        # text and map it onto the old timings, which still describe the same
++        # speech. Without a dictionary the words are dropped, as before.
++        units = morph.split_words(text)
++        recut = morph.recut(morph.word_spans(ws), units) if units else None
++        if recut:
++            return recut, "edited"
 +        return [], None
 +    if [w["w"] for w in ws] == parts:
 +        return ws, clean_word_source(source)
@@ -1912,7 +2969,7 @@ index 0000000..996b806
 +    return sum(len(c.get("words") or []) for c in (cues or []))
 +
 +
-+def with_estimated_words(cues) -> list[dict]:
++def with_estimated_words(cues, lang: str | None = None) -> list[dict]:
 +    """Fill in `words` for cues that have none (marked `estimated`).
 +
 +    Keeping an estimate on hand means Burst/Word layouts and word-level edits
@@ -1924,7 +2981,7 @@ index 0000000..996b806
 +        c2 = dict(c)
 +        if not c2.get("words"):
 +            est = words_from_text(c2.get("text", ""), c2.get("start", 0.0),
-+                                  c2.get("end", 0.0))
++                                  c2.get("end", 0.0), lang)
 +            if est:
 +                c2["words"] = est
 +                c2["word_source"] = "estimated"
@@ -1967,7 +3024,25 @@ index 0000000..996b806
 +
 +
 +def join_words(words) -> str:
-+    return tidy(joiner(words).join(str(w.get("w", "")) for w in words or []))
++    """The displayed text of a group of words.
++
++    A space goes between units - except between two CJK characters, which are
++    written together: "日本" + "語" is "日本語", while "日本語" + "OK" is
++    "日本語 OK". (Deciding per boundary instead of per group is what keeps a
++    mixed Japanese/English caption readable.)
++    """
++    out = ""
++    for w in words or []:
++        part = str(w.get("w", ""))
++        if not part:
++            continue
++        if not out:
++            out = part
++        elif _is_cjk(out[-1]) and _is_cjk(part[0]):
++            out += part
++        else:
++            out += " " + part
++    return tidy(out)
 +
 +
 +# ---------------------------------------------------------------------------
@@ -2080,22 +3155,37 @@ index 0000000..996b806
 +    return [_cue(g, pol) for g in _group_lists(clean_words(words), pol)]
 +
 +
-+def segment_cues(cues, policy: dict | None = None) -> list[dict]:
++def segment_cues(cues, policy: dict | None = None,
++                 lang: str | None = None) -> list[dict]:
 +    """Re-split an existing cue list into new cues without re-transcribing.
 +
 +    Words are taken from `words` when a cue has them, otherwise char-weighted
 +    per word. The returned cues carry `word_source`: "estimated" when a cue is
 +    built only from estimated words, otherwise the source the input declared.
++
++    When a dictionary is installed, the cue's words are first re-cut onto real
++    word units (`vts.morph`) - a Japanese cue whose engine words are
++    per-character tokens becomes a list of actual words, with the engine's
++    timings kept by splitting the token spans proportionally. This is what
++    makes Re-split work in languages that have no spaces.
 +    """
 +    pol = normalize_policy(policy)
++    if lang is None:
++        lang = morph.detect_lang_many([c.get("text") for c in cues or []
++                                       if isinstance(c, dict)])
 +    src = []
 +    for c in cues or []:
 +        if not isinstance(c, dict):
 +            continue
-+        est = not c.get("words")
-+        words = clean_words(c.get("words")) or words_from_text(
-+            c.get("text", ""), _num(c.get("start"), 0.0) or 0.0,
-+            _num(c.get("end"), 0.0) or 0.0)
++        have = clean_words(c.get("words"))
++        est = not have
++        if have:
++            units = morph.split_words(c.get("text", ""), lang)
++            words = (morph.recut(morph.word_spans(have), units) if units else None) or have
++        else:
++            words = words_from_text(
++                c.get("text", ""), _num(c.get("start"), 0.0) or 0.0,
++                _num(c.get("end"), 0.0) or 0.0, lang)
 +        for w in words:
 +            w["_est"] = est
 +            w["_src"] = c.get("word_source") or ("estimated" if est else None)
@@ -2105,14 +3195,25 @@ index 0000000..996b806
 +        for c in cues or []:
 +            if not isinstance(c, dict):
 +                continue
++            # The cue *boundaries* stay exactly as the engine drew them - that
++            # is what this preset promises. The words inside a cue are still
++            # re-cut onto dictionary units when one is installed, so word
++            # editing and (later) word-pop rendering have real words to work
++            # with instead of per-character tokens.
++            have = clean_words(c.get("words"))
++            units = morph.split_words(c.get("text", ""), lang)
++            words = (morph.recut(morph.word_spans(have), units)
++                     if (have and units) else None) or have
 +            out.append({
 +                "start": _r3(_num(c.get("start"), 0.0) or 0.0),
 +                "end": _r3(_num(c.get("end"), 0.0) or 0.0),
 +                "text": tidy(c.get("text", "")),
-+                "words": clean_words(c.get("words")),
++                "words": words,
 +                **({"word_source": c["word_source"]} if c.get("word_source") else {}),
 +            })
-+        return out
++        # Keep the engine's cue boundaries, but a cue the engine gave no word
++        # timings for still gets editable words (clearly marked `estimated`).
++        return with_estimated_words(out, lang)
 +    if not src:
 +        return []
 +    src.sort(key=lambda x: (x["s"], x["e"]))
@@ -2256,7 +3357,7 @@ index 5ebdd75..ff6c424 100644
      cues.sort(key=lambda c: (c["start"], c["end"]))
      return cues
 diff --git a/vts/transcribe.py b/vts/transcribe.py
-index 411c430..06eb3fb 100644
+index 411c430..afd002b 100644
 --- a/vts/transcribe.py
 +++ b/vts/transcribe.py
 @@ -12,6 +12,12 @@ tells the UI what to show when it is missing.
@@ -2276,7 +3377,7 @@ index 411c430..06eb3fb 100644
  from collections import deque
  from pathlib import Path
  
-+from vts import segmenter
++from vts import morph, segmenter
 +
  # Keep HuggingFace's cosmetic Windows symlink warning out of the log.
  os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -2324,7 +3425,7 @@ index 411c430..06eb3fb 100644
  
  
  def srt_to_cues_text(segments: list[dict]) -> str:
-@@ -360,12 +381,106 @@ def validate_cues(raw) -> list[dict]:
+@@ -360,12 +381,112 @@ def validate_cues(raw) -> list[dict]:
                                 f"({start:.3f}).")
          if end > MAX_CUE_SECONDS:
              raise CaptionError(f"Cue {i}: end goes beyond the 24-hour limit.")
@@ -2358,9 +3459,12 @@ index 411c430..06eb3fb 100644
 +        token timestamps) -> the segments are kept and each cue gets a
 +        char-weighted estimate, marked `estimated`.
 +    """
-+    preset = str(opts.get("segment_preset") or "engine")
++    preset = str(opts.get("segment_preset") or segmenter.DEFAULT_PRESET)
 +    policy = segmenter.normalize_policy(opts.get("segmentation"), preset)
 +    source = "whispercpp" if engine == "whispercpp" else "whisper"
++    lang = str(opts.get("language") or "").strip().lower()
++    if lang in ("auto", "", "none"):
++        lang = None
 +    raw: list[dict] = []
 +    for seg in segments or []:
 +        try:
@@ -2369,22 +3473,25 @@ index 411c430..06eb3fb 100644
 +            continue
 +        if end <= start:
 +            continue
++        words = segmenter.clean_words(seg.get("words"), start, end)
++        if words:
++            # Japanese and Chinese come back as a stream of per-character
++            # tokens; with a dictionary installed they are re-cut onto real
++            # word boundaries here, keeping the engine's own timings, so every
++            # layout downstream (burst, word, burn) sees actual words.
++            words = morph.recut_spans(words, lang) or words
 +        raw.append({
 +            "start": round(start, 3),
 +            "end": round(end, 3),
 +            "text": " ".join(str(seg.get("text") or "").split()),
-+            "words": segmenter.clean_words(seg.get("words"), start, end),
-+            "word_source": source if seg.get("words") else None,
++            "words": words,
++            "word_source": source if words else None,
 +        })
-+    if policy["keep_segments"]:
-+        return segmenter.with_estimated_words(raw)
-+    words = [w for cue in raw for w in cue["words"]]
-+    if not words:
-+        return segmenter.with_estimated_words(raw)
-+    cues = segmenter.group_words(words, policy)
-+    for cue in cues:
-+        cue.setdefault("word_source", source)
-+    return cues
++    # One implementation, one behaviour: `segment_cues` estimates words for a
++    # cue that has none (so the text of a segment the engine could not time is
++    # *kept*, marked `estimated`, instead of vanishing from the captions),
++    # re-cuts CJK words onto dictionary units, and groups by the policy.
++    return segmenter.segment_cues(raw, policy, lang)
 +
 +
 +def inherit_words(clean: list[dict], previous: list[dict]) -> list[dict]:
@@ -2433,7 +3540,7 @@ index 411c430..06eb3fb 100644
  def write_outputs(job: dict, cues: list[dict]) -> None:
      """(Re)write the .srt/.vtt/.json trio from the current cue list."""
      out = job.get("outputs") or {}
-@@ -377,8 +492,9 @@ def write_outputs(job: dict, cues: list[dict]) -> None:
+@@ -377,8 +498,9 @@ def write_outputs(job: dict, cues: list[dict]) -> None:
      meta = dict(job.get("meta") or {})
      meta["edited"] = True
      meta["cue_count"] = len(cues)
@@ -2444,7 +3551,7 @@ index 411c430..06eb3fb 100644
  
  
  def update_cues(job_id: str, cues) -> dict | None:
-@@ -393,15 +509,62 @@ def update_cues(job_id: str, cues) -> dict | None:
+@@ -393,15 +515,70 @@ def update_cues(job_id: str, cues) -> dict | None:
          if job["state"] == "running":
              raise CaptionError("Transcription is still running — wait for it "
                                 "to finish before editing its captions.")
@@ -2457,10 +3564,9 @@ index 411c430..06eb3fb 100644
          job["cues"] = clean
          job["cues_text"] = srt_to_cues_text(clean)
 +        job["word_count"] = segmenter.word_count(clean)
-         job["edited"] = True
-         job["edited_at"] = time.time()
-         job["progress"] = 100.0
--        job["note"] = f"{len(clean)} cue(s) saved to {job['outputs'].get('srt')}"
++        job["edited"] = True
++        job["edited_at"] = time.time()
++        job["progress"] = 100.0
 +        job["note"] = (f"{len(clean)} cue(s), "
 +                       f"{job['word_count']} word(s) - saved to "
 +                       f"{job['outputs'].get('srt')}")
@@ -2489,8 +3595,12 @@ index 411c430..06eb3fb 100644
 +    if preset is not None and str(preset) not in segmenter.PRESETS:
 +        raise CaptionError("segment_preset must be one of: "
 +                           + ", ".join(segmenter.PRESET_ORDER))
-+    policy = segmenter.normalize_policy(segmentation, preset or "engine")
-+    cues = segmenter.segment_cues(current, policy)
++    policy = segmenter.normalize_policy(segmentation, preset)
++    lang = ((job.get("meta") or {}).get("language")
++            or (job.get("options") or {}).get("language") or None)
++    if str(lang or "").strip().lower() in ("", "auto", "none", "unknown"):
++        lang = None
++    cues = segmenter.segment_cues(current, policy, lang)
 +    if not cues:
 +        raise CaptionError("Re-splitting produced no cues - the current cues "
 +                           "carry no words or text.")
@@ -2501,15 +3611,20 @@ index 411c430..06eb3fb 100644
 +        job["word_count"] = segmenter.word_count(cues)
 +        job["segmentation"] = policy
 +        job["segment_preset"] = preset or segmenter.preset_of(policy)
-+        job["edited"] = True
-+        job["edited_at"] = time.time()
-+        job["progress"] = 100.0
+         job["edited"] = True
+         job["edited_at"] = time.time()
+         job["progress"] = 100.0
+-        job["note"] = f"{len(clean)} cue(s) saved to {job['outputs'].get('srt')}"
++        hint = morph.install_hint(
++            lang or morph.detect_lang_many([c.get("text") for c in cues]))
 +        job["note"] = (f"re-split into {len(cues)} cue(s) "
-+                       f"({job['word_count']} word(s))")
++                       f"({job['word_count']} word(s))"
++                       + (f" - install a dictionary for real words: {hint}"
++                          if hint else ""))
      return get_job(job_id)
  
  
-@@ -438,7 +601,8 @@ def start_manual_captions(source: str, output_dir: str | None = None,
+@@ -438,7 +615,8 @@ def start_manual_captions(source: str, output_dir: str | None = None,
                  JOBS.pop(job["id"], None)
              raise CaptionError(f"Cannot read '{sidecar}': {exc}")
          from vts import detect as detect_mod     # lazy: parser lives there
@@ -2519,7 +3634,7 @@ index 411c430..06eb3fb 100644
          job["note"] = (f"Loaded {len(cues)} cue(s) from {os.path.basename(sidecar)}"
                         " — edit and press Save.")
      else:
-@@ -735,32 +899,47 @@ def _run(job: dict, source: str, opts: dict) -> None:
+@@ -735,32 +913,48 @@ def _run(job: dict, source: str, opts: dict) -> None:
  
          job["stage"] = "writing"
          job["progress"] = 100.0
@@ -2560,7 +3675,8 @@ index 411c430..06eb3fb 100644
 +        job["word_count"] = segmenter.word_count(cues)
 +        job["segmentation"] = segmenter.normalize_policy(
 +            opts.get("segmentation"), opts.get("segment_preset"))
-+        job["segment_preset"] = str(opts.get("segment_preset") or "engine")
++        job["segment_preset"] = str(opts.get("segment_preset")
++                                    or segmenter.DEFAULT_PRESET)
          job["eta"] = 0
          job["state"] = "done"
 -        if segments:
@@ -2577,11 +3693,11 @@ index 411c430..06eb3fb 100644
          else:
              # VAD filtered everything out, or the track really is silent.
              job["note"] = ("No speech detected — the caption files are empty. "
-@@ -828,12 +1007,21 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
+@@ -828,12 +1022,21 @@ def start_caption(source: str, opts: dict | None = None) -> dict:
          if not 1 <= beam <= 10:
              raise CaptionError("beam_size must be between 1 and 10.")
  
-+    preset = str(opts.get("segment_preset") or "engine")
++    preset = str(opts.get("segment_preset") or segmenter.DEFAULT_PRESET)
 +    if preset not in segmenter.PRESETS:
 +        raise CaptionError("segment_preset must be one of: "
 +                           + ", ".join(segmenter.PRESET_ORDER))
@@ -2601,7 +3717,7 @@ index 411c430..06eb3fb 100644
      threading.Thread(target=_run, args=(job, source, opts), daemon=True).start()
      return get_job(job["id"])                       # type: ignore[return-value]
  
-@@ -848,6 +1036,10 @@ def format_for_ui() -> dict:
+@@ -848,6 +1051,10 @@ def format_for_ui() -> dict:
          "compute_types": list(COMPUTE_TYPES),
          "status": dependency_status(),
          "python": sys.version.split()[0],
@@ -2613,7 +3729,7 @@ index 411c430..06eb3fb 100644
      try:
          from vts import whispercpp as wcpp
 diff --git a/vts/whispercpp.py b/vts/whispercpp.py
-index f543c10..c1acbdf 100644
+index f543c10..76286ef 100644
 --- a/vts/whispercpp.py
 +++ b/vts/whispercpp.py
 @@ -22,6 +22,7 @@ process runs, and returns ``(segments, meta)`` in the identical shape.
@@ -2632,7 +3748,7 @@ index f543c10..c1acbdf 100644
  from vts import transcribe as tsc
  from vts.transcribe import CaptionError, Cancelled
  
-@@ -143,15 +145,145 @@ def parse_srt(text: str) -> list[dict]:
+@@ -143,15 +145,163 @@ def parse_srt(text: str) -> list[dict]:
      return cues
  
  
@@ -2687,12 +3803,16 @@ index f543c10..c1acbdf 100644
 +    """Merge whisper.cpp tokens into words with start/end times.
 +
 +    A new word starts at a token whose text begins with whitespace (Whisper's
-+    convention); continuation tokens are joined onto it, so CJK text (which
-+    whisper.cpp splits across tokens, one per codepoint) stays intact. Special
-+    tokens such as <|startoftranscript|> or [_BEG_] are dropped.
++    convention) - or at a CJK character, because Japanese/Chinese are written
++    without spaces - and continuation tokens are joined onto it. Special tokens
++    such as <|startoftranscript|> or [_BEG_] are dropped. A token without a
++    timestamp keeps its text by riding on the next word (or the previous one,
++    if the segment ends there), so no words are lost to a partial token
++    alignment.
 +    """
 +    raw: list[dict] = []
 +    cur: dict | None = None
++    pending = ""          # text of a token the build did not time
 +    for tok in tokens or []:
 +        if not isinstance(tok, dict):
 +            continue
@@ -2703,8 +3823,15 @@ index f543c10..c1acbdf 100644
 +            continue
 +        if not clean.strip():
 +            continue
-+        starts_word = clean[:1].isspace() or cur is None
 +        body = clean.strip()
++        # A new word starts at a token with a leading space (Whisper's
++        # convention for languages that use spaces) - or at a CJK character,
++        # because Japanese/Chinese/Korean are written without spaces and
++        # whisper.cpp emits them as a stream of per-character tokens. Without
++        # this, every token of a Japanese segment would merge into a single
++        # "word" and a word-level caption layout would have nothing to cut.
++        starts_word = (clean[:1].isspace() or cur is None
++                       or tsc_segmenter.is_cjk_word(body[:1]))
 +        if cur is not None and not starts_word:
 +            cur["w"] += body
 +            if span:
@@ -2713,11 +3840,18 @@ index f543c10..c1acbdf 100644
 +        if cur is not None:
 +            raw.append(cur)
 +        if span is None:
-+            cur = None          # no timing: keep the text with the next word
++            # No timing for this token (whisper.cpp omits it when the model
++            # could not align it). Its text is *not* dropped: it rides on the
++            # next word, or - if the segment ends here - on the word before.
++            pending += (" " if clean[:1].isspace() else "") + body
++            cur = None
 +            continue
-+        cur = {"w": body, "s": span[0], "e": span[1]}
++        cur = {"w": pending + body, "s": span[0], "e": span[1]}
++        pending = ""
 +    if cur is not None:
 +        raw.append(cur)
++    if pending and raw:
++        raw[-1]["w"] += pending
 +    return tsc_segmenter.clean_words(raw)
 +
 +
@@ -2779,7 +3913,7 @@ index f543c10..c1acbdf 100644
      if translate:
          cmd.append("--translate")
      if initial_prompt:
-@@ -159,41 +291,14 @@ def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
+@@ -159,41 +309,14 @@ def build_command(cli: str, model_path: str, wav_path: str, out_base: str,
      return cmd
  
  
@@ -2828,7 +3962,7 @@ index f543c10..c1acbdf 100644
      backend = "cpu"
      detected_lang: str | None = None
      segments: list[dict] = []
-@@ -209,7 +314,6 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+@@ -209,7 +332,6 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
              q.put(line.rstrip("\n"))
          q.put(None)
  
@@ -2836,7 +3970,7 @@ index f543c10..c1acbdf 100644
      threading.Thread(target=_reader, daemon=True).start()
  
      # Keep the beginning as well as the tail: CLI argument/model errors are
-@@ -271,6 +375,65 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+@@ -271,6 +393,65 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
          if proc.poll() is None:
              proc.kill()
      rc = proc.wait()
@@ -2902,7 +4036,7 @@ index f543c10..c1acbdf 100644
      if job["_cancel"].is_set():
          raise Cancelled("cancelled")
  
-@@ -284,7 +447,23 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+@@ -284,7 +465,23 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
              f"whisper-cli exited with code {rc}. Diagnostic output "
              f"(beginning first, then final lines):\n{details or '(no output)'}")
  
@@ -2927,7 +4061,7 @@ index f543c10..c1acbdf 100644
      elapsed = time.time() - job["started"]
      meta = {
          "model": model_name,
-@@ -298,6 +477,8 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
+@@ -298,6 +495,8 @@ def transcribe_step(wav_path: str, job: dict, opts: dict) -> tuple[list[dict], d
          "task": "translate" if task_translate else "transcribe",
          "transcribe_seconds": round(elapsed, 1),
          "segments": len(segments),

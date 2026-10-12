@@ -532,6 +532,85 @@
     return out;
   }
 
+  // Divide a plain (wordless) caption's text at the fractional point `frac`
+  // (0..1), snapping to the nearest whitespace so we never cut a word in half.
+  function splitPlainText(text, frac) {
+    const src = String(text || "");
+    const trimmed = src.trim();
+    if (!trimmed) return { left: src, right: "" };
+    const target = trimmed.length * clamp(frac, 0, 1);
+    let j = Math.round(target);
+    const isSpace = (c) => /\s/.test(c);
+    if (!isSpace(trimmed[j])) {
+      let a = j, b = j;
+      while (a > 0 && !isSpace(trimmed[a - 1])) a -= 1;
+      while (b < trimmed.length && !isSpace(trimmed[b])) b += 1;
+      j = (j - a) <= (b - j) ? a : b;
+    }
+    const left = trimmed.slice(0, j).trim();
+    const right = trimmed.slice(j).trim();
+    return { left: left || trimmed, right };
+  }
+
+  // CapCut-style caption split: cut one caption into two at time `t` (the
+  // playhead). When the caption carries word timings the text is divided at the
+  // word whose start is at/after `t`, so the left half keeps the early words and
+  // the right half the later ones. A plain caption (no word times) is divided at
+  // the whitespace nearest the proportional point. Returns the same `tl` (by
+  // reference) when the split is not possible, so callers can test `next !== tl`.
+  // CapCut-style caption split: cut one caption into two at the position
+  // `frac` (0..1) of the caption's TEXT — i.e. where the editing caret is
+  // sitting. The text is divided at the nearest word (or whitespace) to that
+  // point, and the timing cut snaps to the matching word boundary so the left
+  // caption keeps the early words and the right keeps the later ones. A plain
+  // caption with no word timings is divided at the whitespace nearest the
+  // proportional point. Enter ALWAYS splits: even a caret at the very start or
+  // end still produces two captions (the cut is clamped to a valid point), so
+  // this never silently falls back to "just save". Returns the same `tl` (by
+  // reference) only when the caption is genuinely too short to split
+  // (< 2*MIN_LEN), so callers can test `next !== tl`.
+  function splitCaption(tl, id, frac) {
+    const out = normalise(tl);
+    const idx = out.caps.findIndex((c) => c.id === id);
+    if (idx < 0) return tl;
+    const cap = out.caps[idx];
+    frac = clamp(frac, 0, 1);
+    const words = capWords(cap);
+    let leftWords = [], rightWords = [], edge;
+    if (words.length) {
+      // Snap to the word gap closest to frac (gi in 0..words.length), keep both
+      // halves non-empty, then cut the timing at that gap's boundary time.
+      const gi = clamp(Math.round(frac * words.length), 0, words.length);
+      leftWords = words.slice(0, gi);
+      rightWords = words.slice(gi);
+      if (!leftWords.length) { leftWords = words.slice(0, 1); rightWords = words.slice(1); }
+      if (!rightWords.length) { rightWords = words.slice(-1); leftWords = words.slice(0, -1); }
+      edge = rightWords.length ? rightWords[0].s : (cap.start + cap.end) / 2;
+    } else {
+      edge = cap.start + frac * (cap.end - cap.start);
+    }
+    // Enter ALWAYS splits: clamp the cut so both halves are at least MIN_LEN
+    // instead of bailing out to a plain save. Only a caption shorter than
+    // 2*MIN_LEN genuinely cannot be split.
+    edge = clamp(edge, cap.start + MIN_LEN, cap.end - MIN_LEN);
+    if (!(edge > cap.start + MIN_LEN - EPS && edge < cap.end - MIN_LEN + EPS)) return tl;
+    let leftText, rightText;
+    if (words.length) {
+      leftText = leftWords.map((w) => w.w).join(" ").trim();
+      rightText = rightWords.map((w) => w.w).join(" ").trim();
+    } else {
+      const sp = splitPlainText(cap.text, frac);
+      leftText = sp.left; rightText = sp.right;
+    }
+    // No `|| cap.text` fallback: a split can legitimately leave a half empty
+    // (caret at the very start/end), and re-filling it would duplicate the text.
+    const left = { ...cap, end: r3(edge), text: leftText, words: leftWords, word_source: cap.word_source || null };
+    const right = { ...cap, id: newId("t"), start: r3(edge), end: cap.end, text: rightText, words: rightWords, word_source: cap.word_source || null };
+    out.caps.splice(idx, 1, left, right);
+    out.lanes = lanesOf(out);
+    return out;
+  }
+
   // ripple=false ("lift") leaves a gap. ripple=true closes it on every track.
   function deleteItems(tl, ids, ripple) {
     const out = normalise(tl);
@@ -989,7 +1068,7 @@
     vtracksOf, atracksOf, normalise,
     defaultFx, cleanFx, fxIsDefault, cleanKf, evalFxAt, fadeEnv,
     emptyTimeline, clipsFromSource, clipsFromSections,
-    capsFromCues, assignLanes, splitSelection, deleteItems, moveItems, trimItem,
+    capsFromCues, assignLanes, splitSelection, splitCaption, deleteItems, moveItems, trimItem,
     copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText,
     timelineEnd, contentEnd, clipAt, clipStackAt, audioStackAt, flattenClips,
     placeClip, placeAudio, placeCap, makeClip, makeAudioItem, addMedia,

@@ -1,0 +1,26 @@
+# Video Trim Studio - optional auto-caption engine
+#
+# Only needed for the "Auto-caption" card in the UI (and for auto_caption.py).
+# Without it the rest of the app works normally; the caption card shows this
+# install command instead.
+#
+#   python -m pip install -r requirements-caption.txt
+#
+# First use also downloads a Whisper model (75 MB for `tiny`, ~1.5 GB for
+# `medium`) into the HuggingFace cache and reuses it afterwards.
+faster-whisper>=1.0
+
+# Optional dictionaries for captions in languages written without spaces.
+#
+# Japanese and Chinese have no spaces, so word-level caption layouts ("Burst",
+# "One word at a time") can only cut on real words if a vocabulary is
+# available. Both work offline and are not required - without them those
+# languages fall back to one character per word.
+#
+# Japanese (recommended: fast, mmap'd dictionary, ~50 MB):
+#   python -m pip install sudachipy sudachidict_core
+#   ... or the smaller vocabulary:  sudachidict_small
+# Japanese (pure Python, no compiler needed):
+#   python -m pip install janome
+# Chinese:
+#   python -m pip install jieba

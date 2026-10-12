@@ -134,7 +134,10 @@ def from_parsed(cues: list[dict]) -> list[dict]:
     burst/word layouts and for word-level editing to have something to work
     with, clearly labelled as an estimate.
     """
+    from .morph import detect_lang_many
     from .segmenter import words_from_text
+    lang = detect_lang_many([c.get("text") for c in cues or []
+                             if isinstance(c, dict)])
     store = []
     for c in cues or []:
         try:
@@ -145,7 +148,7 @@ def from_parsed(cues: list[dict]) -> list[dict]:
         words = clean_words(c.get("words"))
         src = clean_word_source(c.get("word_source"))
         if not words:
-            words = words_from_text(c.get("text", ""), start, end)
+            words = words_from_text(c.get("text", ""), start, end, lang)
             src = "estimated" if words else None
         store.append({
             "id": new_id(),

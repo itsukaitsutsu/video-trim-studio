@@ -75,7 +75,11 @@ function stageAcquire(clip, kind) {
   let rec = STAGE.layers.get(clip.id);
   if (rec && rec.kind === kind) return rec;
   if (rec) stageRelease(clip.id);
-  const idle = STAGE.free.findIndex((f) => f.kind === kind);
+  // Prefer an idle layer that already holds the asset this clip needs: it is
+  // decoded and buffered, so swapping clips costs a seek, not a reload.
+  const want = mediaUrl(clip.src || TLM.MAIN_SRC);
+  let idle = STAGE.free.findIndex((f) => f.kind === kind && f.src === want);
+  if (idle < 0) idle = STAGE.free.findIndex((f) => f.kind === kind);
   if (idle >= 0) rec = STAGE.free.splice(idle, 1)[0];
   else rec = stageMakeLayer(kind);
   rec.error = false;
@@ -90,7 +94,9 @@ function stageRelease(id) {
   STAGE.layers.delete(id);
   try { rec.media.pause(); } catch (_) { /* not a media element */ }
   rec.layer.remove();
-  rec.src = "";
+  // Keep rec.src: an idle layer that already holds this asset is reused as-is
+  // (see stageAcquire) and re-assigning .src would reload the file from
+  // scratch, which is what made the monitor flash blank at every clip change.
   rec.asset = "";
   if (STAGE.free.length < 8) STAGE.free.push(rec);
 }

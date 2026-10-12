@@ -196,12 +196,16 @@ def words_from_tokens(tokens) -> list[dict]:
     """Merge whisper.cpp tokens into words with start/end times.
 
     A new word starts at a token whose text begins with whitespace (Whisper's
-    convention); continuation tokens are joined onto it, so CJK text (which
-    whisper.cpp splits across tokens, one per codepoint) stays intact. Special
-    tokens such as <|startoftranscript|> or [_BEG_] are dropped.
+    convention) - or at a CJK character, because Japanese/Chinese are written
+    without spaces - and continuation tokens are joined onto it. Special tokens
+    such as <|startoftranscript|> or [_BEG_] are dropped. A token without a
+    timestamp keeps its text by riding on the next word (or the previous one,
+    if the segment ends there), so no words are lost to a partial token
+    alignment.
     """
     raw: list[dict] = []
     cur: dict | None = None
+    pending = ""          # text of a token the build did not time
     for tok in tokens or []:
         if not isinstance(tok, dict):
             continue
@@ -212,8 +216,15 @@ def words_from_tokens(tokens) -> list[dict]:
             continue
         if not clean.strip():
             continue
-        starts_word = clean[:1].isspace() or cur is None
         body = clean.strip()
+        # A new word starts at a token with a leading space (Whisper's
+        # convention for languages that use spaces) - or at a CJK character,
+        # because Japanese/Chinese/Korean are written without spaces and
+        # whisper.cpp emits them as a stream of per-character tokens. Without
+        # this, every token of a Japanese segment would merge into a single
+        # "word" and a word-level caption layout would have nothing to cut.
+        starts_word = (clean[:1].isspace() or cur is None
+                       or tsc_segmenter.is_cjk_word(body[:1]))
         if cur is not None and not starts_word:
             cur["w"] += body
             if span:
@@ -222,11 +233,18 @@ def words_from_tokens(tokens) -> list[dict]:
         if cur is not None:
             raw.append(cur)
         if span is None:
-            cur = None          # no timing: keep the text with the next word
+            # No timing for this token (whisper.cpp omits it when the model
+            # could not align it). Its text is *not* dropped: it rides on the
+            # next word, or - if the segment ends here - on the word before.
+            pending += (" " if clean[:1].isspace() else "") + body
+            cur = None
             continue
-        cur = {"w": body, "s": span[0], "e": span[1]}
+        cur = {"w": pending + body, "s": span[0], "e": span[1]}
+        pending = ""
     if cur is not None:
         raw.append(cur)
+    if pending and raw:
+        raw[-1]["w"] += pending
     return tsc_segmenter.clean_words(raw)
 
 

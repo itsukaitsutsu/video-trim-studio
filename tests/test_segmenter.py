@@ -180,6 +180,78 @@ def test_words_from_text_spans_the_cue_exactly():
     assert seg.words_from_text("   ", 0, 1) == []
 
 
+# ---------------------------------------------------------------------------
+# Japanese / Chinese: no spaces, so words have to come from the script
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def no_dictionary(monkeypatch):
+    """Pretend no dictionary is installed.
+
+    The tests below describe the *fallback* (one character per unit), which is
+    what runs on a machine with nothing installed - so they patch the provider
+    lookup instead of depending on what this machine happens to have.
+    """
+    monkeypatch.setattr(seg.morph, "provider", lambda lang=None: None)
+    return None
+
+def test_japanese_text_is_split_per_character_not_per_space(no_dictionary):
+    # A Japanese cue has no spaces at all: splitting on whitespace would make
+    # the whole line one "word" and a word-level layout could cut nothing.
+    assert seg.text_tokens("こんにちは世界。") == ["こ", "ん", "に", "ち", "は", "世", "界。"]
+    assert seg.text_tokens("你好世界") == ["你", "好", "世", "界"]
+    ws = seg.words_from_text("こんにちは", 0.0, 5.0)
+    assert [w["w"] for w in ws] == ["こ", "ん", "に", "ち", "は"]
+    assert ws[0]["s"] == 0.0 and ws[-1]["e"] == 5.0
+
+
+def test_cjk_punctuation_stays_with_the_word_before_it():
+    assert seg.text_tokens("世界。") == ["世", "界。"]
+    assert seg.text_tokens("です、ね") == ["で", "す、", "ね"]
+    # A CJK character that carries meaning starts a token; 。and 、do not.
+    assert seg.is_cjk_word("世") is True
+    assert seg.is_cjk_word("。") is False
+    assert seg.is_cjk_word("A") is False
+    assert seg.has_cjk("abc こ") is True and seg.has_cjk("abc") is False
+
+
+def test_a_japanese_cue_without_words_can_still_be_resplit(no_dictionary):
+    """The imported-subtitle case: no word timing, but the layout must work."""
+    cues = [{"start": 0.0, "end": 4.0, "text": "こんにちは世界。"},
+            {"start": 4.0, "end": 7.5, "text": "東京は晴れです。"},
+            {"start": 7.5, "end": 10.0, "text": "また明日。"}]
+    out = seg.segment_cues(cues, seg.normalize_policy(None, "burst"))
+    assert len(out) > len(cues)                       # it actually re-cut
+    assert len(out) == 8
+    # Nothing is lost or reordered: the captions still read the same text.
+    assert "".join(c["text"] for c in out) == "".join(c["text"] for c in cues)
+    assert all(c["word_source"] == "estimated" for c in out)
+    assert all(len(c["words"]) <= 3 for c in out)
+    # One word per character; the full stop rides with the character before it.
+    assert [c["text"] for c in out] == ["こんに", "ちは世", "界。",
+                                        "東京は", "晴れで", "す。",
+                                        "また明", "日。"]
+
+
+def test_japanese_word_layout_gives_one_character_per_caption(no_dictionary):
+    cues = [{"start": 0.0, "end": 2.0, "text": "日本語"}]
+    out = seg.segment_cues(cues, seg.normalize_policy(None, "word"))
+    assert [c["text"] for c in out] == ["日", "本", "語"]
+    assert all(len(c["words"]) == 1 for c in out)
+    assert out[0]["start"] == 0.0 and out[-1]["end"] == 2.0
+
+
+def test_mixed_japanese_and_latin_keeps_one_space_at_the_script_change():
+    got = seg.join_words(words("こ", 0, 1, "ん", 1, 2, "は", 2, 3,
+                               "OK", 3, 4, "!", 4, 5))
+    assert got == "こんは OK!"
+    # Latin only, unchanged.
+    assert seg.join_words(words("Halo", 0, 1, "dunia", 1, 2)) == "Halo dunia"
+    # CJK only: no spaces at all.
+    assert seg.join_words(words("你", 0, 1, "好", 1, 2, "世", 2, 3)) == "你好世"
+
+
 def test_with_estimated_words_only_touches_cues_without_words():
     cues = [
         {"start": 0, "end": 1, "text": "one two"},
@@ -366,7 +438,11 @@ def test_resplitting_keeps_the_engine_segmentation_when_asked_to():
     assert [c["text"] for c in out] == ["Hello there", "again"]
     assert out[0]["words"] == cues[0]["words"]
     assert out[0]["word_source"] == "whisper"
-    assert out[1]["words"] == []          # typed text, nothing to guess from
+    # A cue with no word timings keeps its engine boundary *and* gets an
+    # estimate (clearly marked), so a word-level layout can use it. Leaving it
+    # wordless is what let a whole segment vanish from build_cues().
+    assert out[1]["words"] == [{"w": "again", "s": 2.0, "e": 3.0}]
+    assert out[1]["word_source"] == "estimated"
 
 
 def test_resplitting_ignores_junk_and_keeps_real_words_with_estimated_neighbours():

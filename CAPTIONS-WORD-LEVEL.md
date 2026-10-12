@@ -147,6 +147,8 @@ the timings only when the word count matches (a spelling fix), and is marked
 
 | Suite | Covers |
 |---|---|
+| **Dictionary words (ja/zh)** | `vts/morph.py`: optional offline dictionaries (sudachipy, janome, jieba) cut Japanese/Chinese at real word boundaries, gluing particles to the word before them; the engine's token timings are kept by splitting spans proportionally. Without a dictionary the per-character fallback runs and the caption card says which pip command would fix it. Tests: `tests/test_morph.py`. |
+| **CJK (no spaces)** | text is split per character, whisper.cpp per-character tokens become one word each, punctuation stays with the character before it, and joining omits the space only between two CJK characters ("日本語 OK"). Covered in `tests/test_segmenter.py` and `tests/test_whispercpp.py`. |
 | `tests/test_segmenter.py` (new) | presets and their defaults, policy clamping, flag parsing, `clean_words` (clipping, punctuation glue, de-overlapping, junk), estimates, grouping rules, re-split invariants, JSON round-trip, `describe()` |
 | `auto_caption.py --layout …` | manual check: `--layout burst` on a clip vs `--layout engine` gives the same words in shorter captions (with `--no-word-timestamps` the captions still come out, marked estimated) |
 | `tests/test_whispercpp.py` | token JSON parsing, sub-word merging, `--output-json-full` / `--dtw` flags, DTW preset per model, the retry on a build that rejects the flag, words → burst cues |

@@ -37,7 +37,7 @@ import wave
 from collections import deque
 from pathlib import Path
 
-from vts import segmenter
+from vts import morph, segmenter
 
 # Keep HuggingFace's cosmetic Windows symlink warning out of the log.
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -412,6 +412,9 @@ def build_cues(segments: list[dict], opts: dict, engine: str) -> list[dict]:
     preset = str(opts.get("segment_preset") or segmenter.DEFAULT_PRESET)
     policy = segmenter.normalize_policy(opts.get("segmentation"), preset)
     source = "whispercpp" if engine == "whispercpp" else "whisper"
+    lang = str(opts.get("language") or "").strip().lower()
+    if lang in ("auto", "", "none"):
+        lang = None
     raw: list[dict] = []
     for seg in segments or []:
         try:
@@ -420,22 +423,25 @@ def build_cues(segments: list[dict], opts: dict, engine: str) -> list[dict]:
             continue
         if end <= start:
             continue
+        words = segmenter.clean_words(seg.get("words"), start, end)
+        if words:
+            # Japanese and Chinese come back as a stream of per-character
+            # tokens; with a dictionary installed they are re-cut onto real
+            # word boundaries here, keeping the engine's own timings, so every
+            # layout downstream (burst, word, burn) sees actual words.
+            words = morph.recut_spans(words, lang) or words
         raw.append({
             "start": round(start, 3),
             "end": round(end, 3),
             "text": " ".join(str(seg.get("text") or "").split()),
-            "words": segmenter.clean_words(seg.get("words"), start, end),
-            "word_source": source if seg.get("words") else None,
+            "words": words,
+            "word_source": source if words else None,
         })
-    if policy["keep_segments"]:
-        return segmenter.with_estimated_words(raw)
-    words = [w for cue in raw for w in cue["words"]]
-    if not words:
-        return segmenter.with_estimated_words(raw)
-    cues = segmenter.group_words(words, policy)
-    for cue in cues:
-        cue.setdefault("word_source", source)
-    return cues
+    # One implementation, one behaviour: `segment_cues` estimates words for a
+    # cue that has none (so the text of a segment the engine could not time is
+    # *kept*, marked `estimated`, instead of vanishing from the captions),
+    # re-cuts CJK words onto dictionary units, and groups by the policy.
+    return segmenter.segment_cues(raw, policy, lang)
 
 
 def inherit_words(clean: list[dict], previous: list[dict]) -> list[dict]:
@@ -549,7 +555,11 @@ def resegment_job(job_id: str, preset: str | None = None,
         raise CaptionError("segment_preset must be one of: "
                            + ", ".join(segmenter.PRESET_ORDER))
     policy = segmenter.normalize_policy(segmentation, preset)
-    cues = segmenter.segment_cues(current, policy)
+    lang = ((job.get("meta") or {}).get("language")
+            or (job.get("options") or {}).get("language") or None)
+    if str(lang or "").strip().lower() in ("", "auto", "none", "unknown"):
+        lang = None
+    cues = segmenter.segment_cues(current, policy, lang)
     if not cues:
         raise CaptionError("Re-splitting produced no cues - the current cues "
                            "carry no words or text.")
@@ -563,8 +573,12 @@ def resegment_job(job_id: str, preset: str | None = None,
         job["edited"] = True
         job["edited_at"] = time.time()
         job["progress"] = 100.0
+        hint = morph.install_hint(
+            lang or morph.detect_lang_many([c.get("text") for c in cues]))
         job["note"] = (f"re-split into {len(cues)} cue(s) "
-                       f"({job['word_count']} word(s))")
+                       f"({job['word_count']} word(s))"
+                       + (f" - install a dictionary for real words: {hint}"
+                          if hint else ""))
     return get_job(job_id)
 
 

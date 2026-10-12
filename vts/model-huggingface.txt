@@ -1,0 +1,9 @@
+Official (HuggingFace) — open the link, it downloads directly:
+
+Model	Size	Direct link
+tiny	75 MB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
+base	142 MB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin
+small	466 MB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+medium ← start here	1.5 GB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin
+large-v3 (max accuracy)	2.9 GB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin
+large-v3-turbo	1.6 GB	https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin

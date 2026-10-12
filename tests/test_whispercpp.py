@@ -344,6 +344,45 @@ def test_a_build_without_token_output_still_produces_captions(tmp_path, monkeypa
     assert [w["w"] for w in cues[0]["words"]] == ["halo", "dunia"]
 
 
+def test_cjk_tokens_become_one_word_each():
+    """Japanese has no spaces: whisper.cpp emits a stream of per-character
+    tokens, and each of those characters is a word a layout can cut at."""
+    text = json.dumps({"transcription": [{
+        "timestamps": {"from": "00:00:00,000", "to": "00:00:01,200"},
+        "offsets": {"from": 0, "to": 1200},
+        "text": "こんにちは世界。",
+        "tokens": [{"text": t, "offsets": {"from": i * 150, "to": (i + 1) * 150}}
+                   for i, t in enumerate("こんにちは世界。")],
+    }]})
+    segs = wcpp.parse_json_full(text)
+    assert [w["w"] for w in segs[0]["words"]] == ["こ", "ん", "に", "ち", "は", "世", "界。"]
+    assert segs[0]["words"][0]["s"] == 0.0 and segs[0]["words"][0]["e"] == 0.15
+    assert segs[0]["words"][-1]["e"] == 1.2
+
+
+def test_japanese_tokens_reach_burst_captions(monkeypatch):
+    """The per-character fallback (no dictionary installed)."""
+    from vts import morph
+    monkeypatch.setattr(morph, "provider", lambda lang=None: None)
+    toks = [{"text": t, "offsets": {"from": i * 150, "to": (i + 1) * 150}}
+            for i, t in enumerate("こんにちは世界。")]
+    segment = {"start": 0.0, "end": 1.2, "text": "こんにちは世界。",
+               "words": wcpp.words_from_tokens(toks)}
+    cues = tsc.build_cues([segment], {"segment_preset": "burst"}, "whispercpp")
+    assert [c["text"] for c in cues] == ["こんに", "ちは世", "界。"]
+    assert [c["word_source"] for c in cues] == ["whispercpp"] * 3
+    assert cues[0]["words"][0]["w"] == "こ" and cues[-1]["words"][-1]["w"] == "界。"
+
+
+def test_latin_tokens_still_merge_into_words():
+    # The CJK rule must not break English: " world" continues nothing, "ing"
+    # continues the word before it.
+    toks = [{"text": " test", "offsets": {"from": 0, "to": 300}},
+            {"text": "ing", "offsets": {"from": 300, "to": 500}},
+            {"text": " one", "offsets": {"from": 500, "to": 800}}]
+    assert [w["w"] for w in wcpp.words_from_tokens(toks)] == ["testing", "one"]
+
+
 # ------------------------------------------------------------- downloads
 
 def test_start_download_unknown_model():

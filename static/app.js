@@ -2378,7 +2378,10 @@ function fillCaptionCard(caption) {
 // How words are grouped into captions. The presets come from the server
 // (vts/segmenter.py, via /api/env), so they never drift out of sync. The
 // choice applies to the next transcription and to "Re-split".
-const SEG_DEFAULT = "burst";
+// A freshly transcribed set keeps the recogniser's own segments; picking a
+// layout (Burst, One word, ...) is what re-splits, by Transcribe or by
+// Re-split. This must match vts/segmenter.py DEFAULT_PRESET.
+const SEG_DEFAULT = "engine";
 
 function fillSegmentation(cat) {
   CAP.segmentation = cat || null;

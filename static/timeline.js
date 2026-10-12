@@ -66,6 +66,26 @@ function clampStart(start, span) {
   return Math.max(0, Math.min(Math.max(0, contentEnd() - span), start));
 }
 
+// Fraction (0..1) clamp used by the caret-based caption split.
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+// Fraction (0..1) of a contenteditable cell's text that the caret sits at.
+// Returns -1 when there is no usable selection (caller then just saves).
+function caretFraction(cell) {
+  try {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return -1;
+    const range = sel.getRangeAt(0);
+    const pre = range.cloneRange();
+    pre.selectNodeContents(cell);
+    pre.setEnd(range.endContainer, range.endOffset);
+    const off = pre.toString().length;
+    const len = (cell.textContent || "").length;
+    if (!len) return -1;
+    return clamp01(off / len);
+  } catch { return -1; }
+}
+
 function zoomBy(factor) {
   const center = S.view.start + S.view.span / 2;
   const span = Math.min(Math.max(contentEnd(), 1), Math.max(0.2, S.view.span * factor));
@@ -1806,7 +1826,21 @@ function bindList() {
     ev.stopPropagation();                 // typing here must not trigger timeline shortcuts
     if (ev.key === "Enter") {
       ev.preventDefault();
-      ev.target.blur();
+      const cell = ev.target.closest("td.txt");
+      const row = cell.closest("tr[data-id]");
+      const id = row && row.dataset.id;
+      const type = row && row.dataset.type;
+      // Capture the caret position BEFORE blur (blur moves the selection away).
+      const frac = caretFraction(cell);
+      ev.target.blur();                   // commit any pending text edit (mirrors blur)
+      // Enter ALWAYS splits a caption at the caret — it never just saves. Clips
+      // keep the old save-on-Enter behaviour.
+      if (type === "caption" && id) {
+        const next = TLM.splitCaption(S.tl, id, frac);
+        if (next !== S.tl) { setTL(next); status("Caption split at the cursor (CapCut-style)."); return; }
+        status("Caption is too short to split."); return;
+      }
+      return;
     } else if (ev.key === "Escape") {
       ev.target.dataset.cancel = "1";
       ev.target.blur();
@@ -1915,9 +1949,6 @@ async function runDetect() {
       use_cues: $("dCues").checked,
       subtitles_text: S.subsText,
       subtitles_path: $("dSubPath").value.trim() || null,
-      // Cues straight from the caption card: they carry the word timings an
-      // .srt cannot, so the seeded captions keep them.
-      cues: S.subsCues || [],
     };
     const data = await api("/api/detect", { method: "POST", body: JSON.stringify(body) });
     const clips = TLM.clipsFromSections(data.sections, S.duration);
@@ -2023,8 +2054,38 @@ function startOverlayCaptionEdit() {
   ta.addEventListener("click", () => { if (!done && document.activeElement !== ta) ta.focus(); });
   ta.addEventListener("keydown", (ev) => {
     ev.stopPropagation();
-    if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); finish(true); }
-    else if (ev.key === "Escape") finish(false);
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      // CapCut-style: Enter splits the caption at the caret (where you are
+      // typing), it does not just save. (Shift+Enter still inserts a line break
+      // inside the caption text.)
+      const raw = ta.value;
+      const norm = raw.replace(/\s+/g, " ");
+      const caret = ta.selectionStart;
+      const frac = norm.length ? clamp01(caret / norm.length) : 0.5;
+      const live = S.tl.caps.find((c) => c.id === cue.id);
+      if (live && norm.trim() !== (cue.text || "")) live.text = norm.trim();
+      // Enter ALWAYS splits at the caret — it never just saves. (Shift+Enter
+      // still inserts a line break inside the caption text.)
+      const next = live ? TLM.splitCaption(S.tl, live.id, frac) : null;
+      if (next && next !== S.tl) {
+        S.tl = next;
+        done = true; CAP_EDITING = false;
+        ta.remove();
+        textEl.style.visibility = "";
+        textEl.dataset.raw = live ? (live.text || "") : (cue.text || "");
+        commitTL(); refresh();
+        status("Caption split at the cursor (CapCut-style).");
+      } else {
+        // Genuinely too short to split: keep the text edit so typing isn't lost.
+        if (live) { textEl.dataset.raw = live.text || ""; commitTL(); }
+        done = true; CAP_EDITING = false;
+        ta.remove(); textEl.style.visibility = ""; refresh();
+        if (live) status("Caption is too short to split.");
+      }
+      return;
+    }
+    if (ev.key === "Escape") finish(false);
   });
   ta.addEventListener("blur", () => {
     // Ignore transient focus flicker; commit once focus has really moved on.
@@ -2096,7 +2157,6 @@ function bindUI() {
     try {
       const data = await api("/api/parse-subtitles", { method: "POST", body: fd });
       S.subsText = null;
-      S.subsCues = null;             // a typed-in .srt has no word timings
       $("dSubPath").value = data.saved_path || "";
       $("subInfo").textContent = `${data.count} cues loaded (${f.name}) — editable`;
       $("dCues").checked = true;
@@ -2110,7 +2170,6 @@ function bindUI() {
   $("capUse").onclick = useCaptions;
   $("capNewBtn").onclick = newBlankCaptions;
   $("capOpenSrtBtn").onclick = openCaptionsFile;
-  $("capResplit").onclick = resplitCaptions;
   $("capAddCue").onclick = addCueRow;
   $("capRevert").onclick = revertCues;
   $("capSave").onclick = () => saveCues(false);
@@ -2184,7 +2243,6 @@ async function onProjectOpen(data) {
   S.thumbs = null;
   S.thumbImgs = [];
   S.subsText = null;
-  S.subsCues = null;
   $("subInfo").textContent = data.demo_subtitles ? "Bundled demo subtitles ready" : "";
   $("dSubPath").value = data.demo_subtitles || "";
   $("pathInput").value = data.info.path;

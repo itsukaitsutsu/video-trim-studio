@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Trim Studio</title>
+<link rel="stylesheet" href="/static/style.css?v=42">
+</head>
+<body>
+<header id="menubar">
+  <span class="brand-mini" title="Video Trim Studio">VTS</span>
+  <div class="menu"><button type="button" data-menu="file">File</button><div class="drop">
+    <button type="button" data-act="file-open">Open video&hellip;</button>
+    <button type="button" data-act="file-browse">Browse&hellip;</button>
+    <button type="button" data-act="file-upload">Upload&hellip;</button>
+    <hr>
+    <button type="button" data-act="file-demo">Open demo</button>
+    <button type="button" data-act="file-speech">Speech demo</button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="edit">Edit</button><div class="drop">
+    <button type="button" data-act="edit-undo">Undo <span class="k">Ctrl+Z</span></button>
+    <button type="button" data-act="edit-redo">Redo <span class="k">Ctrl+Shift+Z</span></button>
+    <hr>
+    <button type="button" data-act="edit-copy">Copy <span class="k">Ctrl+C</span></button>
+    <button type="button" data-act="edit-cut">Cut <span class="k">Ctrl+X</span></button>
+    <button type="button" data-act="edit-paste">Paste <span class="k">Ctrl+V</span></button>
+    <hr>
+    <button type="button" data-act="edit-split">Split at playhead <span class="k">Ctrl+K</span></button>
+    <button type="button" data-act="edit-delete">Delete selection <span class="k">Del</span></button>
+    <button type="button" data-act="edit-ripple">Ripple delete <span class="k">Shift+Del</span></button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="clip">Clip</button><div class="drop">
+    <button type="button" data-act="clip-up">Move clip up a lane</button>
+    <button type="button" data-act="clip-down">Move clip down a lane</button>
+    <hr>
+    <button type="button" data-act="clip-mute">Mute / unmute selected clips</button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="timeline">Timeline</button><div class="drop">
+    <button type="button" data-act="tl-zoom-in">Zoom in</button>
+    <button type="button" data-act="tl-zoom-out">Zoom out</button>
+    <button type="button" data-act="tl-zoom-fit">Zoom to fit</button>
+    <hr>
+    <button type="button" data-act="tl-snap">Toggle snapping</button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="captions">Captions</button><div class="drop">
+    <button type="button" data-act="cap-add">Add caption at playhead</button>
+    <button type="button" data-act="cap-auto">Auto-caption&hellip;</button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="export">Export</button><div class="drop">
+    <button type="button" data-act="exp-go">Export video&hellip;</button>
+  </div></div>
+  <div class="menu"><button type="button" data-menu="window">Window</button><div class="drop" id="windowDrop"></div></div>
+  <div class="menu"><button type="button" data-menu="help">Help</button><div class="drop">
+    <button type="button" data-act="help-keys">Keyboard shortcuts</button>
+  </div></div>
+  <span class="spacer"></span>
+  <div class="env" id="env">checking ffmpeg&hellip;</div>
+  <button id="workspaceReset" class="ghost mini" title="Restore the default panel arrangement">Reset workspace</button>
+</header>
+<main id="workspace" class="workspace">
+  <div id="topZones">
+  <div class="wszone" data-workspace-column="left">
+    <section class="moveunit" data-workspace-panel="project" data-default-column="left" data-unit="project" aria-label="Project panel">
+      <div class="ws-head">
+        <span class="ws-title">Project</span>
+        <span class="ws-head-spacer"></span>
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Project panel" title="Drag to move panel">⠿</button>
+        <button type="button" class="ws-hide" data-hide-unit="project" aria-label="Hide Project panel" title="Hide this panel (show it again from the Window menu)">×</button>
+      </div>
+      <div class="ws-body">
+        <div class="card" data-project-card="media">
+          <h3>Media <span id="mediaCount" class="dim small"></span></h3>
+          <div id="mediaBin" class="media-bin">
+            <div id="mediaList" class="media-list"></div>
+            <div id="mediaEmpty" class="dim small media-note">Nothing imported yet.</div>
+          </div>
+          <div class="media-tools">
+            <button id="mediaBrowse" class="ghost small" title="Import files from this computer. Files are referenced in place, not copied.">Import&hellip;</button>
+            <label class="ghost filebtn sm" title="Upload video, audio or images into the project folder">Upload<input id="mediaImportFiles" type="file" accept="video/*,audio/*,image/*" multiple></label>
+            <button id="mediaRemove" class="ghost small" title="Remove the selected tile from the bin">Remove</button>
+          </div>
+          <div class="media-tools">
+            <input id="mediaSearch" class="media-search" type="search" placeholder="search media&hellip;" spellcheck="false">
+            <label class="mini-label" title="How long a still image lasts when it is dropped on the timeline">still
+              <input id="mediaStillDur" type="number" value="5" min="0.1" step="0.5" style="width:56px"> s
+            </label>
+          </div>
+          <div id="mediaInfo" class="dim small"></div>
+          <div class="dim small media-note">Drag a tile onto a timeline track, or double-click to add it at the playhead. Drop a video on top of V1 and it lands on V2 as an overlay &mdash; that is how B&#8209;roll and picture-in-picture are built. Sound goes to the A lanes.</div>
+        </div>
+        <div class="card" data-project-card="source">
+          <h3>Source</h3>
+      <div class="openbar source-openbar">
+        <input id="pathInput" type="text" placeholder="Path to video, e.g. C:\Videos\clip.mp4  (or browse)" spellcheck="false">
+        <button id="browseBtn" class="ghost">Browse&hellip;</button>
+        <button id="openBtn" class="primary">Open</button>
+        <button id="demoBtn" class="ghost">Open demo</button>
+        <button id="speechDemoBtn" class="ghost" title="Short spoken clip - the one to try Auto-caption on">Speech demo</button>
+        <label class="ghost filebtn">Upload<input id="uploadInput" type="file" accept="video/*"></label>
+        <span id="fileMeta" class="filemeta"></span>
+      </div>
+        </div>
+        <div class="card" data-project-card="detect">
+          <h3>1 &middot; Detect sections</h3>
+      <label class="chk"><input type="checkbox" id="dSilence" checked> Detect silence (ffmpeg silencedetect)</label>
+      <div class="row"><label>Threshold (dB)</label><input id="dThresh" type="number" value="-45" step="1"></div>
+      <div class="row"><label>Min silence (ms)</label><input id="dMinSilence" type="number" value="800" step="50"></div>
+      <label class="chk"><input type="checkbox" id="dCues" checked> Use captions (.srt / .vtt)</label>
+      <div class="row"><label>Subtitle file</label>
+        <span class="grow"><input id="dSubPath" type="text" placeholder="path to .srt / .vtt (optional)"></span>
+      </div>
+      <div class="row"><label></label>
+        <span class="grow">
+          <label class="ghost filebtn sm">Upload .srt/.vtt<input id="dSubFile" type="file" accept=".srt,.vtt"></label>
+          <span id="subInfo" class="dim"></span>
+        </span>
+      </div>
+      <div class="row"><label>Min section (ms)</label><input id="dMinSection" type="number" value="120" step="10"></div>
+      <button id="detectBtn" class="primary block">Detect sections</button>
+      <div id="detectInfo" class="dim small"></div>
+        </div>
+        <div class="card" data-project-card="caption">
+          <h3>2 &middot; Auto-caption</h3>
+      <div class="dim small caption-lead">
+        Transcribe this video with faster-whisper, then feed the captions straight into detection.
+      </div>
+      <div id="capUnavailable" class="warn" hidden></div>
+      <button id="capRecheck" class="ghost block small" hidden>Re-check for faster-whisper</button>
+      <div id="capSetup">
+        <div class="row"><label>Engine</label><select id="cEngine">
+          <option value="faster-whisper" selected>faster-whisper &mdash; CPU / NVIDIA CUDA</option>
+          <option value="whispercpp">whisper.cpp &mdash; Vulkan GPU (AMD / Intel / NVIDIA) or CPU</option>
+        </select></div>
+        <div id="wcppPanel" hidden>
+          <div id="wcppStatus" class="dim small"></div>
+          <div class="row"><label>wcpp model</label><select id="wModel"></select></div>
+          <div class="row"><label>Get model</label>
+            <select id="wDlSelect"></select>
+            <button id="wDlBtn" class="ghost small">Download</button>
+          </div>
+          <div class="progress" id="wDlProg" hidden>
+            <div class="bar"><div id="wDlBar"></div></div>
+            <div class="progtext"><span id="wDlPct">0%</span><span id="wDlNote" class="dim"></span></div>
+          </div>
+          <div id="wcppHint" class="dim small"></div>
+        </div>
+        <div class="row" id="rowFwModel"><label>Model</label><select id="cModel"></select></div>
+        <div class="row"><label>Language</label><select id="cLang"></select></div>
+        <div class="row" id="rowFwDevice"><label>Device</label><select id="cDevice"></select></div>
+        <label class="chk"><input type="checkbox" id="cTranslate"> translate to English (any language &rarr; English)</label>
+        <div id="translateHint" class="dim small translation-hint" aria-live="polite">Translates non-English speech into English; English speech stays English. Turbo models are transcription-only, so checking this option will switch to a compatible model when available.</div>
+        <details class="adv">
+          <summary>Advanced options</summary>
+          <div class="row" id="rowFwCompute"><label>Compute type</label><select id="cCompute"></select></div>
+          <div class="row"><label>Beam size</label><input id="cBeam" type="number" value="1" min="1" max="10" step="1"
+              title="1 = greedy and fastest; 5 = slower, can hallucinate more"></div>
+          <div class="row"><label>Hint / prompt</label><input id="cPrompt" type="text" placeholder="names, jargon (optional)"></div>
+          <div class="row"><label>Output folder</label><input id="cOutDir" type="text" placeholder="next to the video" spellcheck="false"></div>
+          <div class="checks">
+            <span id="fwOnlyChecks"><label class="chk"><input type="checkbox" id="cVad" checked> VAD (skip silence)</label>
+            <label class="chk"><input type="checkbox" id="cWords" checked> word timestamps (JSON)</label>
+            <label class="chk"><input type="checkbox" id="cTemp" title="retry hard segments at higher temperature"> temperature fallback</label>
+            <label class="chk"><input type="checkbox" id="cNorm" title="loudnorm for quiet or uneven recordings"> normalize audio</label></span>
+            <label class="chk"><input type="checkbox" id="cKeep"> keep 16 kHz wav</label>
+            <label class="chk"><input type="checkbox" id="cBurn"> burn into a copy</label>
+          </div>
+        </details>
+        <button id="capBtn" class="primary block" disabled>Transcribe to captions</button>
+        <div id="capNote" class="dim small"></div>
+        <div class="progress" id="capProgWrap" hidden>
+          <div class="bar"><div id="capBar"></div></div>
+          <div class="progtext"><span id="capPct">0%</span><span id="capMeta" class="dim"></span></div>
+        </div>
+        <pre id="capTail" class="caption-tail" hidden></pre>
+        <button id="capCancel" class="ghost block small" hidden>Cancel transcription</button>
+        <div class="row cap-manual-row">
+          <label></label>
+          <span class="grow dim small">or start from something else:</span>
+        </div>
+        <div class="row cap-manual-row">
+          <label></label>
+          <span class="grow">
+            <button id="capNewBtn" class="ghost small" title="Empty cue list - no faster-whisper needed">New blank captions</button>
+            <button id="capOpenSrtBtn" class="ghost small" title="Open an existing .srt / .vtt into the editor">Open .srt / .vtt&hellip;</button>
+          </span>
+        </div>
+        <div id="capResult" hidden>
+          <div id="capOut" class="dim small"></div>
+          <div id="capEditor" hidden>
+            <div class="cap-editor-head">
+              <b>Caption editor</b>
+              <span id="capEdCount" class="dim small"></span>
+              <span class="grow"></span>
+              <button id="capAddCue" class="mini">+ Add cue</button>
+              <button id="capRevert" class="mini" title="Reload the last saved version">Undo changes</button>
+              <button id="capSave" class="mini primary">Save captions</button>
+            </div>
+            <div class="row cap-layout-row">
+              <select id="cSeg" title="How many words share one caption. Used for the next transcription and for Re-split."></select>
+              <button id="capResplit" class="mini" title="Re-cut these captions with this layout - no new transcription">Re-split</button>
+            </div>
+            <div id="capSaved" class="dim small"></div>
+            <div class="cap-editor-scroll">
+              <table id="capCueTable">
+                <thead>
+                  <tr><th>#</th><th>Start (s)</th><th>End (s)</th><th>Text</th><th></th></tr>
+                </thead>
+                <tbody id="capCueBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <button id="capUse" class="primary block">Use these captions &rarr; Detect sections</button>
+        </div>
+        <pre id="capError" class="error" hidden></pre>
+      </div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="zdiv" id="divL" role="separator" aria-orientation="vertical" aria-label="Resize left zone" title="Drag to resize the left zone"></div>
+  <div class="wszone" data-workspace-column="center">
+    <section class="moveunit" data-workspace-panel="program" data-default-column="center" data-unit="program" aria-label="Program Monitor panel">
+      <div class="ws-head">
+        <span class="ws-title">Program</span>
+        <span class="ws-head-spacer"></span>
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Program Monitor panel" title="Drag to move panel">⠿</button>
+        <button type="button" class="ws-hide" data-hide-unit="program" aria-label="Hide Program Monitor panel" title="Hide this panel (show it again from the Window menu)">×</button>
+      </div>
+      <div class="ws-body">
+        <div class="player-wrap">
+      <div class="preview-viewport-wrap">
+        <div id="previewViewport" class="preview-viewport" aria-label="Video preview; Ctrl+wheel zooms around the pointer; drag the hand cursor to pan">
+          <div id="previewStage" class="preview-stage">
+            <video id="player" preload="metadata" disableremoteplayback></video>
+            <div id="gapShade" hidden></div>
+            <div id="capOverlay" hidden>
+              <div id="guideV" class="cap-guide v" hidden></div>
+              <div id="guideH" class="cap-guide h" hidden></div>
+              <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
+                <div id="capBoxText" class="cap-text">Caption preview</div>
+                <div class="cap-handle w" title="Drag to resize the box"></div>
+                <div class="cap-handle e" title="Drag to resize the box"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="previewViewportResize" class="preview-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize video preview viewing area" title="Drag up or down to resize the video viewing area"></div>
+      </div>
+      <div id="previewInfo" class="dim small" hidden></div>
+      <div class="player-tools">
+        <button id="frameBack" class="mini" title="Previous frame (Left arrow)">&#9664; frame</button>
+        <button id="playBtn" class="mini primary-mini" title="Play / pause (Space)">&#9654; play</button>
+        <button id="frameFwd" class="mini" title="Next frame (Right arrow)">frame &#9654;</button>
+        <span id="timecode" style="font-family:ui-monospace,monospace"></span>
+        <span class="dim small" title="Press Space to play or pause when focus is not in a form control">Space: play/pause</span>
+        <span id="playInfo" class="dim"></span>
+        <span class="spacer"></span>
+        <div class="preview-zoom-controls" aria-label="Preview zoom controls">
+          <button id="videoZoomOut" class="mini" title="Zoom out of the video preview" aria-label="Zoom out">&minus;</button>
+          <button id="videoZoomFit" class="mini" title="Fit video to preview" aria-label="Fit video">fit</button>
+          <button id="videoZoomIn" class="mini" title="Zoom in to the video preview" aria-label="Zoom in">+</button>
+          <span id="videoZoomLevel" class="dim small" title="Ctrl+wheel to zoom; drag the video to pan when zoomed">100%</span>
+        </div>
+      </div>
+        </div>
+      </div>
+    </section>
+  </div>
+  <div class="zdiv" id="divR" role="separator" aria-orientation="vertical" aria-label="Resize right zone" title="Drag to resize the right zone"></div>
+  <div class="wszone" data-workspace-column="right">
+    <section class="moveunit" data-workspace-panel="inspector" data-default-column="right" data-unit="inspector" aria-label="Inspector panel">
+      <div class="ws-tabs" id="inspTabs" role="tablist" aria-label="Inspector tabs">
+        <span class="ws-head-spacer"></span>
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Inspector panel" title="Drag to move panel">⠿</button>
+        <button type="button" class="ws-hide" data-hide-unit="inspector" aria-label="Hide Inspector panel" title="Hide this panel (show it again from the Window menu)">×</button>
+      </div>
+      <div class="ws-body">
+        <section class="moveunit" data-workspace-panel="clip" data-default-column="right" data-unit="clip" aria-label="Clip panel">
+          <div class="ws-head">
+            <span class="ws-title">Clip</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Clip panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-clip">
+          <div class="card">
+      <div id="toolEmpty" class="dim small">Select a video clip on the timeline to edit it.</div>
+      <div id="toolBody" hidden>
+        <div class="tool-clipline"><b id="toolClipName">clip</b><span id="toolClipMeta" class="dim small"></span></div>
+        <div class="row"><label>Track</label>
+          <span class="grow tool-trackrow">
+            <button id="txTrackDown" class="mini" title="Move the clip down a track">&minus;</button>
+            <b id="txTrack">V1</b>
+            <button id="txTrackUp" class="mini" title="Move the clip up a lane">+</button>
+            <span class="dim small">higher lane overlays the one below</span>
+          </span>
+        </div>
+        <div class="row"><label>Source</label><span class="grow dim small" id="txSource">&mdash;</span></div>
+        <div class="row"><label>Fit</label><span class="grow">
+          <select id="txFit" title="How the picture fills its box">
+            <option value="fill">fill (stretch to the box)</option>
+            <option value="contain">contain (letterbox, keep shape)</option>
+            <option value="cover">cover (crop to fill the box)</option>
+          </select>
+        </span></div>
+        <div class="row"><label>Frame</label><span class="grow">
+          <button id="txFillFrame" class="mini" title="Scale and position this clip so it exactly covers the frame">fill frame</button>
+          <button id="txCorner" class="mini" title="Scale to 35% and move it to the bottom-right corner - the classic B-roll picture-in-picture">corner PiP</button>
+        </span></div>
+        <details open>
+          <summary>Transform</summary>
+          <div class="tool-grid">
+            <label>X %<input id="txX" type="range" min="-100" max="100" step="1" value="0"><input id="txXn" type="number" step="1" value="0"></label>
+            <label>Y %<input id="txY" type="range" min="-100" max="100" step="1" value="0"><input id="txYn" type="number" step="1" value="0"></label>
+            <label>Scale %<input id="txS" type="range" min="1" max="200" step="1" value="100"><input id="txSn" type="number" min="1" max="400" step="1" value="100"></label>
+            <label>Opacity %<input id="txO" type="range" min="0" max="100" step="1" value="100"><input id="txOn" type="number" min="0" max="100" step="1" value="100"></label>
+          </div>
+          <div class="row"><button id="txReset" class="mini">Reset transform</button></div>
+        </details>
+        <details open>
+          <summary>Crop %</summary>
+          <div class="tool-grid crop">
+            <label>Left<input id="tcL" type="number" min="0" max="45" step="1" value="0"></label>
+            <label>Top<input id="tcT" type="number" min="0" max="45" step="1" value="0"></label>
+            <label>Right<input id="tcR" type="number" min="0" max="45" step="1" value="0"></label>
+            <label>Bottom<input id="tcB" type="number" min="0" max="45" step="1" value="0"></label>
+          </div>
+          <div class="row"><button id="tcReset" class="mini">Reset crop</button></div>
+        </details>
+        <details open>
+          <summary>Audio</summary>
+          <div class="tool-grid">
+            <label>Volume %<input id="taV" type="range" min="0" max="200" step="1" value="100"><input id="taVn" type="number" min="0" max="400" step="1" value="100"></label>
+          </div>
+          <div class="row"><label class="chk"><input type="checkbox" id="taMute"> Mute this clip</label></div>
+          <div class="row"><label>Sound</label><span class="grow">
+            <button id="txUnlinkAudio" class="mini" title="Move this clip's sound onto its own A lane so you can slide it under the picture">Unlink audio</button>
+            <span class="dim small" id="txAudioLane"></span>
+          </span></div>
+          <div class="tool-grid crop">
+            <label>Fade in (s)<input id="taFi" type="number" min="0" step="0.1" value="0"></label>
+            <label>Fade out (s)<input id="taFo" type="number" min="0" step="0.1" value="0"></label>
+          </div>
+          <div class="row"><button id="taReset" class="mini">Reset audio</button></div>
+        </details>
+        <details>
+          <summary>Video fade</summary>
+          <div class="tool-grid crop">
+            <label>Fade in (s)<input id="tvFi" type="number" min="0" step="0.1" value="0"></label>
+            <label>Fade out (s)<input id="tvFo" type="number" min="0" step="0.1" value="0"></label>
+          </div>
+          <div class="row"><button id="tvReset" class="mini">Reset fades</button><span class="dim small">fades to black</span></div>
+        </details>
+        <details open>
+          <summary>Keyframes <span id="tkCount" class="dim small"></span></summary>
+          <div id="tkInfo" class="dim small"></div>
+          <div class="row"><button id="tkAdd" class="mini">◆ Add at playhead</button><button id="tkClear" class="mini">Clear all</button></div>
+          <div id="tkList"></div>
+          <div class="dim small">Keyframes animate position, size and opacity between ◆ marks. Export bakes them into the video.</div>
+        </details>
+      </div>
+          </div>
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="text" data-default-column="right" data-unit="text" aria-label="Text panel">
+          <div class="ws-head">
+            <span class="ws-title">Text</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Text panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-text">
+          <div class="card text-style-panel">
+      <details open>
+        <summary>Text</summary>
+        <div class="style-panel-content">
+          <div class="style-row"><select id="capFontFamily" aria-label="Font family">
+            <option>Arial</option><option>Arial Black</option><option>Segoe UI</option><option>Verdana</option><option>Tahoma</option><option>Georgia</option><option>Times New Roman</option><option>Courier New</option><option>Lucida Console</option>
+          </select><select id="capFontStyle" aria-label="Font style"><option value="regular">Regular</option><option value="bold">Bold</option><option value="italic">Italic</option><option value="bold-italic">Bold Italic</option></select></div>
+          <div class="style-row font-actions">
+            <label class="ghost filebtn">Import fonts<input id="fontImport" type="file" accept=".ttf,.otf" multiple></label>
+            <button type="button" id="fontRefresh" class="ghost mini">Refresh installed</button>
+            <button type="button" id="fontDevice" class="ghost mini">Device fonts…</button>
+          </div>
+          <p id="fontInfo" class="dim small" role="status">Loading installed fonts…</p>
+          <div class="style-row style-format-icons">
+            <button class="style-icon" id="capBold" title="Bold"><b>B</b></button><button class="style-icon" id="capItalic" title="Italic"><i>I</i></button><button class="style-icon" id="capUnderline" title="Underline"><u>U</u></button><button class="style-icon" id="capStrike" title="Strikethrough"><s>S</s></button><span class="style-spacer"></span>
+            <label>Size <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="4.5"><output id="capFontSizeValue">48</output></label>
+          </div>
+          <div class="style-row style-align-icons" aria-label="Text alignment">
+            <button class="style-icon capAlign" data-align="left" title="Align left">≡</button><button class="style-icon capAlign" data-align="center" title="Center">☰</button><button class="style-icon capAlign" data-align="right" title="Align right">≡</button><button class="style-icon capAlign" data-align="justify" title="Justify">▤</button>
+          </div>
+          <div class="style-row style-metrics"><label>Tracking <input id="capTracking" type="number" min="-0.2" max="1" step="0.01" value="0"></label><label>Leading <input id="capLineSpacing" type="number" min="0.7" max="3" step="0.05" value="1.25"></label></div>
+        </div>
+      </details>
+      <details open>
+        <summary>Align and Transform</summary>
+        <div class="style-panel-content transform-grid">
+          <div class="zone-wrap"><span class="dim small">Zone</span><div class="zone-grid" role="group" aria-label="Caption anchor zone">
+            <button class="capZone" data-x="0.08" data-y="0.08" title="Top left"></button><button class="capZone" data-x="0.5" data-y="0.08" title="Top centre"></button><button class="capZone" data-x="0.92" data-y="0.08" title="Top right"></button>
+            <button class="capZone" data-x="0.08" data-y="0.5" title="Middle left"></button><button class="capZone" data-x="0.5" data-y="0.5" title="Centre"></button><button class="capZone" data-x="0.92" data-y="0.5" title="Middle right"></button>
+            <button class="capZone" data-x="0.08" data-y="0.92" title="Bottom left"></button><button class="capZone" data-x="0.5" data-y="0.92" title="Bottom centre"></button><button class="capZone" data-x="0.92" data-y="0.92" title="Bottom right"></button>
+          </div></div>
+          <label>X <input id="capX" type="number" min="0" max="100" step="1">%</label><label>Y <input id="capY" type="number" min="0" max="100" step="1">%</label>
+          <label>W <input id="capWidth" type="number" min="5" max="100" step="1">%</label><label>H <input id="capHeight" type="number" min="0" max="100" step="1" placeholder="Auto">%</label>
+        </div>
+      </details>
+      <details open>
+        <summary>Appearance <span class="dim small">⚙</span></summary>
+        <div class="style-panel-content appearance-controls">
+          <div class="appearance-row"><b>Fill</b><label class="appearance-color"><input id="capFillEnabled" type="checkbox" checked><input id="capFill" type="color" value="#ffffff"></label><input id="capFillOpacity" type="range" min="0" max="100" value="100"><output id="capFillOpacityValue">100</output></div>
+          <div class="appearance-row"><b>Stroke</b><label class="appearance-color"><input id="capStrokeEnabled" type="checkbox"><input id="capStroke" type="color" value="#000000"></label><input id="capStrokeWidth" type="number" min="0" max="20" step="0.5" value="2"><select id="capStrokePosition"><option value="outer">Outer</option><option value="center">Center</option><option value="inner">Inner</option></select><input id="capStrokeOpacity" type="range" min="0" max="100" value="100"></div>
+          <div class="appearance-row"><b>Background</b><label class="appearance-color"><input id="capBackgroundEnabled" type="checkbox"><input id="capBackground" type="color" value="#000000"></label><input id="capBackgroundOpacity" type="range" min="0" max="100" value="72"><output id="capBackgroundOpacityValue">72</output></div>
+          <div class="appearance-row shadow-row"><b>Shadow</b><label class="appearance-color"><input id="capShadowEnabled" type="checkbox"><input id="capShadow" type="color" value="#000000"></label>
+            <label>Opacity<input id="capShadowOpacity" type="range" min="0" max="100" value="75"><output id="capShadowOpacityValue">75</output></label>
+            <label>Angle<input id="capShadowAngle" type="range" min="0" max="359" value="135"><output id="capShadowAngleValue">135°</output></label>
+            <label>Distance<input id="capShadowDistance" type="range" min="0" max="30" step="0.5" value="3"><output id="capShadowDistanceValue">3</output></label>
+            <label>Size (spread)<input id="capShadowSize" title="Expands the shadow silhouette; does not duplicate or scale the text" type="range" min="0" max="20" step="0.5" value="6"><output id="capShadowSizeValue">6</output></label>
+            <label>Blur<input id="capShadowBlur" type="range" min="0" max="20" step="0.5" value="12"><output id="capShadowBlurValue">12</output></label>
+          </div>
+        </div>
+        <div class="row"><button id="capPosReset" class="mini">Reset style</button><span id="capPosInfo" class="dim small"></span></div>
+      </details>
+          </div>
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="export" data-default-column="right" data-unit="export" aria-label="Export panel">
+          <div class="ws-head">
+            <span class="ws-title">Export</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Export panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-export">
+          <div class="card" data-export-card="settings">
+            <h3>3 &middot; Export settings</h3>
+      <div class="row"><label>Mode</label>
+        <select id="xMode">
+          <option value="reencode">Re-encode (frame accurate)</option>
+          <option value="copy" selected>Stream copy (fast when possible; other cuts may re-encode for sync)</option>
+        </select>
+      </div>
+      <div class="row"><label>Output file</label><span class="grow"><input id="xOutput" type="text" spellcheck="false"></span></div>
+      <div class="row"><label>Captions</label>
+        <select id="xCaptions">
+          <option value="none" selected>don't include</option>
+          <option value="srt">write remapped .srt next to export</option>
+          <option value="burn">burn captions into the video</option>
+          <option value="both">burn + write remapped .srt</option>
+        </select>
+      </div>
+      <div class="row"><label></label><span id="xCapInfo" class="dim small"></span></div>
+      <div class="row" id="capStyleRow" hidden><label>Caption style</label><span class="dim small">Edit captions in the Text panel.</span></div>
+      <div id="reencodeOpts">
+        <div class="row"><label>Video codec</label><select id="xCodec"></select></div>
+        <div class="row"><label>Quality</label>
+          <select id="xQuality">
+            <option value="bitrate">Match source bitrate</option>
+            <option value="crf">Constant quality (CRF / encoder equivalent)</option>
+          </select>
+        </div>
+        <div class="row" id="rowBitrate"><label>Video bitrate (kbps)</label><input id="xBitrate" type="number" step="100"></div>
+        <div class="row" id="rowCrf"><label>CRF</label><input id="xCrf" type="number" value="18" min="0" max="51"></div>
+        <div class="row"><label>Preset</label>
+          <select id="xPreset">
+            <option>ultrafast</option><option>superfast</option><option>veryfast</option>
+            <option>faster</option><option>fast</option><option selected>medium</option>
+            <option>slow</option><option>slower</option><option>veryslow</option>
+          </select>
+        </div>
+        <div class="row"><label>Pixel format</label><input id="xPixFmt" type="text"></div>
+        <div class="row"><label>Decode (hwaccel)</label><select id="xHwaccel"></select></div>
+        <div class="row"><label>Audio</label>
+          <span class="grow">
+            <input id="xAudioCodec" type="text" style="width:78px">
+            <input id="xAudioBitrate" type="number" style="width:66px" title="kbps"> kbps
+            <input id="xAudioRate" type="number" style="width:70px" title="sample rate"> Hz
+          </span>
+        </div>
+        <div class="row"><label>Audio fade (ms)</label><input id="xFade" type="number" value="30" min="0" step="5"></div>
+        <div class="checks">
+          <label class="chk"><input type="checkbox" id="xMatchFps"> match frame rate</label>
+          <label class="chk"><input type="checkbox" id="xMatchColor" checked> match colour tags</label>
+          <label class="chk"><input type="checkbox" id="xMeta" checked> copy metadata</label>
+        </div>
+      </div>
+      <button id="resetOpts" class="ghost block small">Reset everything to source values</button>
+          </div>
+          <div class="card" data-export-card="export">
+            <h3>4 &middot; Export</h3>
+      <div class="tally">
+        <div><span class="dim">source</span><b id="tSrc">--:--</b></div>
+        <div><span class="dim">removing</span><b id="tCut" class="cut">--:--</b></div>
+        <div><span class="dim">result</span><b id="tOut">--:--</b></div>
+      </div>
+      <div id="planWarn" class="warn"></div>
+      <button id="exportBtn" class="primary block big" disabled>Export clean cut</button>
+
+      <div class="progress" id="progWrap" hidden>
+        <div class="bar"><div id="progBar"></div></div>
+        <div class="progtext"><span id="progPct">0%</span><span id="progMeta" class="dim"></span></div>
+      </div>
+      <div id="exportInfo" class="dim small"></div>
+      <pre id="jobError" class="error" hidden></pre>
+          </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+  </div>
+  <div class="zdiv-h" id="divB" role="separator" aria-orientation="horizontal" aria-label="Resize bottom zone" title="Drag to resize the timeline zone"></div>
+  <div class="wszone wszone-bottom" data-workspace-column="bottom">
+    <section class="moveunit" data-workspace-panel="timeline" data-default-column="bottom" data-unit="timeline" aria-label="Timeline panel">
+      <div class="ws-tabs" id="botTabs" role="tablist" aria-label="Timeline tabs">
+        <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline panel" title="Drag to move panel">⠿</button>
+        <span class="ws-head-spacer"></span>
+        <button type="button" class="ws-hide" data-hide-unit="timeline" aria-label="Hide Timeline panel" title="Hide this panel (show it again from the Window menu)">×</button>
+      </div>
+      <div class="ws-body">
+        <section class="moveunit" data-workspace-panel="tl" data-default-column="bottom" data-unit="tl" aria-label="Timeline 01 panel">
+          <div class="ws-head">
+            <span class="ws-title">Timeline 01</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline 01 panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-tl">
+          <div class="timeline-card">
+      <div class="tl-head">
+        <strong>Timeline</strong>
+        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move (&#8597; = change track) &middot; edges = trim &middot; alt-drag = copy &middot; drop media from the bin &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
+        <span class="spacer"></span>
+        <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
+        <button class="mini" id="zoomIn" title="Zoom in">+</button>
+        <button class="mini" id="zoomFit" title="Show everything">fit</button>
+        <span class="spacer"></span>
+        <button class="mini" id="tlUndo" title="Undo (Ctrl+Z)">undo</button>
+        <button class="mini" id="tlRedo" title="Redo (Ctrl+Shift+Z)">redo</button>
+        <button class="mini" id="tlCopy" title="Copy the selection (Ctrl+C)">copy</button>
+        <button class="mini" id="tlCut" title="Cut: copy, then remove and leave a gap (Ctrl+X)">cut</button>
+        <button class="mini" id="tlPaste" title="Paste at the playhead, restacking onto free lanes (Ctrl+V; Ctrl+Shift+V inserts)">paste</button>
+        <button class="mini" id="capSplit" title="Split the selection, or everything, at the playhead (Ctrl+K)">split</button>
+        <button class="mini" id="capDel" title="Remove the selection and leave a gap (Delete)">delete</button>
+        <button class="mini" id="tlRipple" title="Remove the selection and close the gap (Shift+Delete)">ripple delete</button>
+        <span class="spacer"></span>
+        <label class="chk" title="Apply caption position, size, box width and alignment changes to every timeline caption">
+          <input id="capApplyAll" type="checkbox" checked> Apply to all captions
+        </label>
+        <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
+        <button class="mini" id="tlLane" title="Add a caption lane to stack captions">+ lane</button>
+        <button class="mini" id="tlTrack" title="Add a video track (and its audio lane) to stack another layer">+ track</button>
+        <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
+        <span id="tlStatus" class="dim small"></span>
+      </div>
+      <div class="tl-body">
+      <div id="tlTools" class="tl-tools" role="toolbar" aria-label="Timeline tools">
+        <button class="tl-tool active" data-tool="select" title="Select / move (V)"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5.5 2.8v12.6l3.4-2.9 1.9 4.8 2.3-1-1.9-4.7 3.9.3z"/></svg></button>
+        <button class="tl-tool" data-tool="razor" title="Razor: click a clip or caption to split it (R)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.6" width="7" height="14.8" rx="1.5"/><line x1="10" y1="6.2" x2="10" y2="13.8"/></svg></button>
+        <button class="tl-tool" data-tool="text" title="Caption: click the timeline to add one (T)"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M4 4.5h12v2.6h-4.6v8.4H8.6V7.1H4z"/></svg></button>
+        <button class="tl-tool" data-tool="hand" title="Pan: drag to scroll the timeline (H)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="10" y1="2.8" x2="10" y2="17.2"/><line x1="2.8" y1="10" x2="17.2" y2="10"/><path d="M10 2.8 7.9 4.9M10 2.8l2.1 2.1M10 17.2l-2.1-2.1M10 17.2l2.1-2.1M2.8 10l2.1-2.1M2.8 10l2.1 2.1M17.2 10l-2.1-2.1M17.2 10l-2.1 2.1"/></svg></button>
+        <button class="tl-tool" data-tool="zoom" title="Zoom: drag a range, click to zoom in, Alt+click to zoom out (Z)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.6" cy="8.6" r="5.1"/><line x1="12.5" y1="12.5" x2="17" y2="17"/><line x1="8.6" y1="6.4" x2="8.6" y2="10.8"/><line x1="6.4" y1="8.6" x2="10.8" y2="8.6"/></svg></button>
+        <button class="tl-tool" data-tool="mute" title="Mute: click a clip to mute / unmute it (M)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5v5h3.1L11 16.6V3.4L6.6 7.5z"/><line x1="13.6" y1="8.2" x2="17.4" y2="11.8"/><line x1="17.4" y1="8.2" x2="13.6" y2="11.8"/></svg></button>
+      </div>
+      <div id="timelineViewportWrap" class="timeline-viewport-wrap">
+        <div id="timelineViewport" class="timeline-viewport">
+          <div id="timelineStage" class="timeline-stage">
+            <div id="trackLabels" class="track-labels" aria-label="Timeline track labels"></div>
+            <canvas id="timeline" height="132"></canvas>
+          </div>
+        </div>
+        <div id="timelineViewportResize" class="timeline-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize timeline viewing area" title="Drag up or down to add or remove empty timeline viewing space; track sizes stay the same"></div>
+      </div>
+          </div>
+      <div class="legend">
+        <span><i class="sw" style="background:#2b4f6b"></i>video clip (main source)</span>
+        <span><i class="sw" style="background:#3d3b52"></i>clip from the media bin</span>
+        <span><i class="sw" style="background:#238636"></i>audio item (A lane)</span>
+        <span><i class="sw" style="background:#1f4b8f"></i>linked clip audio</span>
+        <span><i class="sw silence"></i>silence</span>
+        <span><i class="sw caption"></i>caption section</span>
+        <span><i class="sw" style="background:#274b8f"></i>caption lanes (stack = several on one frame)</span>
+        <span class="dim small">V lanes composite &middot; A lanes mix &middot; gaps export black</span>
+      </div>
+          </div>
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="list" data-default-column="bottom" data-unit="list" aria-label="List panel">
+          <div class="ws-head">
+            <span class="ws-title">List</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move List panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-list">
+          <div class="list-card">
+      <div class="list-tools">
+        <button class="chip on" data-kind="caption">caption</button>
+        <button class="chip on" data-kind="silence">silence</button>
+        <button class="chip on" data-kind="other">other</button>
+        <label class="mini-label">min section
+          <input id="minDur" type="number" value="0.4" min="0" step="0.1" style="width:64px"> s
+        </label>
+        <input id="searchBox" type="search" placeholder="search caption text&hellip;">
+        <span class="spacer"></span>
+        <button class="mini" id="selVisible">select visible</button>
+        <button class="mini" id="selNone">clear</button>
+        <button class="mini" id="selRemove" title="Remove selected timeline items and close the gaps">remove selected</button>
+        <button class="mini" id="selInvert">invert</button>
+        <button class="mini" id="selAllSilence">all silence</button>
+        <button class="mini" id="selAllCaptions">all captions</button>
+      </div>
+      <div class="dim small selection-hint">V1 sections and caption cues from every lane (T1, T2, &hellip;) are listed here. The list follows the playhead and blue edges mark active items. Click a non-text cell to select and seek; tick boxes, Shift-click, or hold-drag to select several; click text to edit it.</div>
+      <div class="list-scroll">
+        <table id="secTable">
+          <thead><tr><th></th><th>track</th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="listEmpty" class="empty">No timeline items yet &mdash; open a video or add captions.</div>
+      </div>
+          </div>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+</main>
+
+<div class="modal" id="browserModal" hidden>
+  <div class="modal-box">
+    <div class="modal-head">
+      <strong>Choose a file</strong>
+      <button id="browserClose" class="mini">Close</button>
+    </div>
+    <div class="crumbs" id="browserCwd"></div>
+    <div class="browser-list" id="browserList"></div>
+  </div>
+</div>
+
+<script src="/static/timeline-model.js?v=6"></script>
+<script src="/static/media.js?v=1"></script>
+<script src="/static/stage.js?v=2"></script>
+<script src="/static/timeline.js?v=16"></script>
+<script src="/static/clip.js?v=1"></script>
+<script src="/static/app.js?v=43"></script>
+<script src="/static/font-picker.js?v=1"></script>
+<script src="/static/fonts.js?v=1"></script>
+</body>
+</html>

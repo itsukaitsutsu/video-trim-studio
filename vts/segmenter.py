@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import re
 
+from . import morph
+
 # A cue never holds more words than this (a guard against a pathological run
 # of one-word cues being merged by the UI).
 MAX_WORDS = 200
@@ -99,7 +101,10 @@ DEFAULTS: dict = {
 PRESETS: dict[str, dict] = {
     "engine": {
         "label": "Engine segments (as transcribed)",
-        "hint": "Whatever the recogniser produced - usually whole sentences.",
+        "hint": "Whatever the recogniser produced - usually whole sentences. The "
+            "recogniser is the only thing that knows where Japanese words end, "
+            "so this is the layout to use when the cuts must be linguistically "
+            "correct rather than small.",
         "policy": {"keep_segments": True},
     },
     "line": {
@@ -112,7 +117,8 @@ PRESETS: dict[str, dict] = {
     },
     "burst": {
         "label": "Burst - 3 words (vertical video)",
-        "hint": "Up to 3 words, 18 characters or 2.5 s - the short-form look.",
+        "hint": "Up to 3 words, 18 characters or 2.5 s - the short-form look. "
+                "Japanese/Chinese/Korean count per character.",
         "policy": {
             "max_words": 3, "max_chars": 18, "max_duration": 2.5,
             "min_duration": 0.4, "pause": 0.35, "break_punct": True,
@@ -120,7 +126,8 @@ PRESETS: dict[str, dict] = {
     },
     "word": {
         "label": "One word at a time",
-        "hint": "Every word gets its own cue - the karaoke / word-pop layout.",
+        "hint": "Every word gets its own cue - the karaoke / word-pop layout. "
+                "One character per cue for Japanese/Chinese/Korean.",
         "policy": {
             "max_words": 1, "max_chars": 0, "max_duration": 0,
             "min_duration": 0, "pause": 0, "break_punct": False,
@@ -134,7 +141,12 @@ PRESETS: dict[str, dict] = {
 }
 
 PRESET_ORDER = ("engine", "line", "burst", "word", "custom")
-DEFAULT_PRESET = "burst"
+#: The layout a *new* caption set gets: the recogniser's own segments. Nothing
+#: is re-split unless the user asks for it by picking another layout - the
+#: transcription button must never silently re-cut the transcript (it used to
+#: default to Burst, which also hid any segment the engine gave no word times
+#: for). "burst" stays one click away.
+DEFAULT_PRESET = "engine"
 
 
 def normalize_policy(raw: dict | None = None, preset: str | None = None) -> dict:
@@ -240,13 +252,81 @@ def clean_words(raw, lo: float | None = None, hi: float | None = None) -> list[d
     return out[:MAX_WORDS]
 
 
-def words_from_text(text: str, start: float, end: float) -> list[dict]:
+def is_cjk_word(ch: str) -> bool:
+    """True for a CJK character that carries meaning (a letter), as opposed to
+    CJK punctuation (。、「」), which belongs to the token before it."""
+    return bool(ch) and _is_cjk(ch) and ch.isalnum()
+
+
+def has_cjk(text: str) -> bool:
+    """True when the text contains a character from a script written without
+    spaces (Japanese, Chinese, Korean, Thai, Khmer, Lao, Myanmar). Those
+    languages cannot be split on whitespace - a caption layout has to cut them
+    per character instead, which is what `text_tokens` does."""
+    return any(_is_cjk(ch) for ch in str(text or ""))
+
+
+def text_tokens(text: str) -> list[str]:
+    """Split caption text into the units a layout can cut at.
+
+    Latin words split on whitespace. CJK splits **per character**, because
+    those languages are written without spaces and Whisper returns them as
+    per-character tokens; a Japanese cue of 20 characters is 20 cut points,
+    not one. Punctuation stays glued to the token it follows, so the displayed
+    text reads "世界。" rather than "世界 ." - the same rule `clean_words`
+    applies to real word data.
+    """
+    out: list[str] = []
+    gap = True                                 # start of text = start of a unit
+    for ch in str(text or ""):
+        if ch.isspace():
+            gap = True                         # a space always ends a unit
+            continue
+        if _is_cjk(ch):
+            if is_cjk_word(ch):
+                out.append(ch)
+            elif out:
+                out[-1] += ch              # 。 and 、 belong to the word before
+            else:
+                out.append(ch)
+            gap = False
+            continue
+        if ch.isalnum():
+            tail = out[-1][-1] if (out and out[-1]) else ""
+            if not gap and tail and not _is_cjk(tail) and tail.isalnum():
+                out[-1] += ch                  # keep a Latin/digit run together
+            else:
+                out.append(ch)
+            gap = False
+            continue
+        if out:
+            out[-1] += ch                      # punctuation rides with its word
+        else:
+            out.append(ch)
+        gap = False
+    return out
+
+
+def text_units(text: str, lang: str | None = None) -> list[str]:
+    """The points a caption layout may cut this text at.
+
+    With a dictionary installed (see `vts.morph`) those are real words, which
+    is the only way to cut Japanese or Chinese correctly. Without one the
+    script heuristic is used: spaces for Latin, one character per unit for
+    languages that are written without them.
+    """
+    units = morph.split_words(text, lang)
+    return units if units else text_tokens(text)
+
+
+def words_from_text(text: str, start: float, end: float,
+                    lang: str | None = None) -> list[dict]:
     """Char-weighted word timings for a cue that has no word data.
 
     Used for .srt/.vtt imports and hand-typed cues so the burst/word layouts
     still work; the result is always labelled `estimated`.
     """
-    parts = str(text or "").split()
+    parts = text_units(text, lang)
     if not parts:
         return []
     a = _num(start, 0.0) or 0.0
@@ -276,7 +356,17 @@ def reword_for_text(words, text, source=None):
     """
     ws = clean_words(words)
     parts = str(text or "").split()
-    if not ws or len(parts) != len(ws):
+    if not ws:
+        return [], None
+    if len(parts) != len(ws):
+        # Text without spaces (Japanese, Chinese) has one "part" per sentence,
+        # so counting words cannot work. A dictionary can: re-cut the *new*
+        # text and map it onto the old timings, which still describe the same
+        # speech. Without a dictionary the words are dropped, as before.
+        units = morph.split_words(text)
+        recut = morph.recut(morph.word_spans(ws), units) if units else None
+        if recut:
+            return recut, "edited"
         return [], None
     if [w["w"] for w in ws] == parts:
         return ws, clean_word_source(source)
@@ -301,7 +391,7 @@ def word_count(cues) -> int:
     return sum(len(c.get("words") or []) for c in (cues or []))
 
 
-def with_estimated_words(cues) -> list[dict]:
+def with_estimated_words(cues, lang: str | None = None) -> list[dict]:
     """Fill in `words` for cues that have none (marked `estimated`).
 
     Keeping an estimate on hand means Burst/Word layouts and word-level edits
@@ -313,7 +403,7 @@ def with_estimated_words(cues) -> list[dict]:
         c2 = dict(c)
         if not c2.get("words"):
             est = words_from_text(c2.get("text", ""), c2.get("start", 0.0),
-                                  c2.get("end", 0.0))
+                                  c2.get("end", 0.0), lang)
             if est:
                 c2["words"] = est
                 c2["word_source"] = "estimated"
@@ -356,7 +446,25 @@ def tidy(text: str) -> str:
 
 
 def join_words(words) -> str:
-    return tidy(joiner(words).join(str(w.get("w", "")) for w in words or []))
+    """The displayed text of a group of words.
+
+    A space goes between units - except between two CJK characters, which are
+    written together: "日本" + "語" is "日本語", while "日本語" + "OK" is
+    "日本語 OK". (Deciding per boundary instead of per group is what keeps a
+    mixed Japanese/English caption readable.)
+    """
+    out = ""
+    for w in words or []:
+        part = str(w.get("w", ""))
+        if not part:
+            continue
+        if not out:
+            out = part
+        elif _is_cjk(out[-1]) and _is_cjk(part[0]):
+            out += part
+        else:
+            out += " " + part
+    return tidy(out)
 
 
 # ---------------------------------------------------------------------------
@@ -469,22 +577,37 @@ def group_words(words, policy: dict | None = None) -> list[dict]:
     return [_cue(g, pol) for g in _group_lists(clean_words(words), pol)]
 
 
-def segment_cues(cues, policy: dict | None = None) -> list[dict]:
+def segment_cues(cues, policy: dict | None = None,
+                 lang: str | None = None) -> list[dict]:
     """Re-split an existing cue list into new cues without re-transcribing.
 
     Words are taken from `words` when a cue has them, otherwise char-weighted
     per word. The returned cues carry `word_source`: "estimated" when a cue is
     built only from estimated words, otherwise the source the input declared.
+
+    When a dictionary is installed, the cue's words are first re-cut onto real
+    word units (`vts.morph`) - a Japanese cue whose engine words are
+    per-character tokens becomes a list of actual words, with the engine's
+    timings kept by splitting the token spans proportionally. This is what
+    makes Re-split work in languages that have no spaces.
     """
     pol = normalize_policy(policy)
+    if lang is None:
+        lang = morph.detect_lang_many([c.get("text") for c in cues or []
+                                       if isinstance(c, dict)])
     src = []
     for c in cues or []:
         if not isinstance(c, dict):
             continue
-        est = not c.get("words")
-        words = clean_words(c.get("words")) or words_from_text(
-            c.get("text", ""), _num(c.get("start"), 0.0) or 0.0,
-            _num(c.get("end"), 0.0) or 0.0)
+        have = clean_words(c.get("words"))
+        est = not have
+        if have:
+            units = morph.split_words(c.get("text", ""), lang)
+            words = (morph.recut(morph.word_spans(have), units) if units else None) or have
+        else:
+            words = words_from_text(
+                c.get("text", ""), _num(c.get("start"), 0.0) or 0.0,
+                _num(c.get("end"), 0.0) or 0.0, lang)
         for w in words:
             w["_est"] = est
             w["_src"] = c.get("word_source") or ("estimated" if est else None)
@@ -494,14 +617,25 @@ def segment_cues(cues, policy: dict | None = None) -> list[dict]:
         for c in cues or []:
             if not isinstance(c, dict):
                 continue
+            # The cue *boundaries* stay exactly as the engine drew them - that
+            # is what this preset promises. The words inside a cue are still
+            # re-cut onto dictionary units when one is installed, so word
+            # editing and (later) word-pop rendering have real words to work
+            # with instead of per-character tokens.
+            have = clean_words(c.get("words"))
+            units = morph.split_words(c.get("text", ""), lang)
+            words = (morph.recut(morph.word_spans(have), units)
+                     if (have and units) else None) or have
             out.append({
                 "start": _r3(_num(c.get("start"), 0.0) or 0.0),
                 "end": _r3(_num(c.get("end"), 0.0) or 0.0),
                 "text": tidy(c.get("text", "")),
-                "words": clean_words(c.get("words")),
+                "words": words,
                 **({"word_source": c["word_source"]} if c.get("word_source") else {}),
             })
-        return out
+        # Keep the engine's cue boundaries, but a cue the engine gave no word
+        # timings for still gets editable words (clearly marked `estimated`).
+        return with_estimated_words(out, lang)
     if not src:
         return []
     src.sort(key=lambda x: (x["s"], x["e"]))
