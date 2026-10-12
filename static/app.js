@@ -67,28 +67,37 @@ const WORKSPACE_STORAGE_KEY_V2 = "video-trim-studio.workspace.v2";
 const WORKSPACE_STORAGE_KEY_V1 = "video-trim-studio.workspace.v1";
 const WORKSPACE_ZONES = ["left", "center", "right", "bottom"];
 // Premiere-style units: project/program are single cards; inspector and the
-// bottom timeline unit are tabbed (mockup: #inspTabs / #botTabs).
-const UNIT_TABS_BASE = {
-  inspector: ["clip", "text", "export"],
-  timeline: ["tl", "list"],
-};
-const TAB_UNIT_BASE = {
+// Every panel is a real, movable unit now. These five simply *start life*
+// grouped inside a host, which is what makes them tabs on a fresh workspace;
+// drag one out and it becomes a panel in its own right.
+const DEFAULT_UNIT_HOST = {
   clip: "inspector", text: "inspector", export: "inspector",
   tl: "timeline", list: "timeline",
 };
-// Live copies: grouping (drop a unit onto another) adds member tabs at runtime.
-let UNIT_TABS = { ...UNIT_TABS_BASE };
-let TAB_UNIT = { ...TAB_UNIT_BASE };
+// Panels whose header is already a tab strip in the markup. Grouping a panel
+// into one of these just adds a tab; a plain panel (Project, Program Monitor)
+// first gets a strip of its own, with a tab for itself.
+const TAB_STRIP_UNITS = ["inspector", "timeline"];
+// Live copies, rebuilt from WS.host by syncGroupTabs().
+let UNIT_TABS = {};
+let TAB_UNIT = {};
 const TAB_TITLES = {
   clip: "Clip", text: "Text", export: "Export", tl: "Timeline", list: "List",
 };
 const UNIT_TITLES = {
   project: "Project", program: "Program Monitor",
   inspector: "Inspector", timeline: "Timeline",
+  clip: "Clip", text: "Text", export: "Export",
+  tl: "Timeline 01", list: "List",
 };
+// Where a panel lands when it is dragged out of a group, and the order tabs
+// are shown in. Every panel is listed: the five tabbed ones are members of a
+// host until the user pulls them out.
 const DEFAULT_UNIT_ZONE = {
   project: "left", program: "center", inspector: "right", timeline: "bottom",
+  clip: "right", text: "right", export: "right", tl: "bottom", list: "bottom",
 };
+const UNIT_ORDER = Object.keys(DEFAULT_UNIT_ZONE);
 const DEFAULT_WORKSPACE_LAYOUT = {
   zones: {
     left: ["project"],
@@ -102,7 +111,7 @@ const DEFAULT_WORKSPACE_LAYOUT = {
     tl: true, list: true,
   },
   activeTab: { inspector: "clip", timeline: "tl" },
-  host: {},
+  host: { ...DEFAULT_UNIT_HOST },
   zoneSizes: {},
   sizes: {},
 };
@@ -484,16 +493,6 @@ function applyWorkspaceLayout(layout) {
     previewViewportHeight: layout?.previewViewportHeight,
     lanes: layout?.lanes,
   };
-  if (layout?.win && typeof layout.win === "object") {
-    for (const k of Object.keys(WS.win)) {
-      if (typeof layout.win[k] === "boolean") WS.win[k] = layout.win[k];
-    }
-  }
-  if (layout?.activeTab && typeof layout.activeTab === "object") {
-    for (const u of Object.keys(WS.activeTab)) {
-      if (UNIT_TABS[u].includes(layout.activeTab[u])) WS.activeTab[u] = layout.activeTab[u];
-    }
-  }
   if (layout?.zoneSizes && typeof layout.zoneSizes === "object") WS.zoneSizes = { ...layout.zoneSizes };
   // Group map: member unit -> host unit. Single level only: a host cannot be
   // a member and a member cannot host.
@@ -502,10 +501,34 @@ function applyWorkspaceLayout(layout) {
   for (const [m, h] of Object.entries(rawHost)) {
     if (m !== h && DEFAULT_UNIT_ZONE[m] && DEFAULT_UNIT_ZONE[h]) hostMap[m] = h;
   }
+  // A layout saved before the tabbed panels became units has no `host` map.
+  // Give those panels their default home, unless the saved layout parked them
+  // in a zone of their own (i.e. the user had already pulled them out).
+  const zoned = new Set(Object.values(layout?.zones || {})
+    .flatMap((list) => (Array.isArray(list) ? list : [])));
+  for (const [m, h] of Object.entries(DEFAULT_UNIT_HOST)) {
+    if (hostMap[m] || zoned.has(m)) continue;
+    if (Object.values(hostMap).includes(m) || hostMap[h]) continue;
+    hostMap[m] = h;
+  }
   for (const [m, h] of Object.entries(hostMap)) {
     if (hostMap[h] || Object.values(hostMap).includes(m)) delete hostMap[m];
   }
   WS.host = hostMap;
+  syncGroupTabs();
+
+  if (layout?.win && typeof layout.win === "object") {
+    for (const k of Object.keys(WS.win)) {
+      if (typeof layout.win[k] === "boolean") WS.win[k] = layout.win[k];
+    }
+  }
+  if (layout?.activeTab && typeof layout.activeTab === "object") {
+    for (const u of Object.keys(WS.activeTab)) {
+      if (UNIT_TABS[u] && UNIT_TABS[u].includes(layout.activeTab[u])) {
+        WS.activeTab[u] = layout.activeTab[u];
+      }
+    }
+  }
   if (layout?.sizes && typeof layout.sizes === "object") WS.sizes = { ...layout.sizes };
 
   teardownGroups();
@@ -530,7 +553,6 @@ function applyWorkspaceLayout(layout) {
     if (!zones[z]) continue;
     for (const id of ordered[z]) zones[z].appendChild(units.get(id));
   }
-  syncGroupTabs();
   renderGroups();
   // Unit sizes.
   for (const [id, el] of units) {
@@ -566,7 +588,10 @@ function renderWorkspaceVisibility() {
     if (!el) continue;
     const tabs = UNIT_TABS[unit];
     const vis = tabs ? tabs.filter((t) => WS.win[t]) : [];
-    if (!WS.win[unit] || (tabs && !vis.length)) {
+    // A shell host (Inspector, Timeline) only exists to hold tabs; once the
+    // last one leaves, the empty container goes with it.
+    const emptyHost = TAB_STRIP_UNITS.includes(unit) && !vis.length;
+    if (!WS.win[unit] || (tabs && !vis.length) || emptyHost) {
       el.style.display = "none";
       continue;
     }
@@ -576,8 +601,9 @@ function renderWorkspaceVisibility() {
       const btn = tabBtn(unit, t);
       if (btn) btn.style.display = WS.win[t] ? "" : "none";
     }
-    // The active tab must be a visible one.
-    if (!WS.win[WS.activeTab[unit]]) WS.activeTab[unit] = vis[0];
+    // The active tab must be a visible one that still belongs to this host
+    // (it may have been dragged out into a panel of its own).
+    if (!vis.includes(WS.activeTab[unit])) WS.activeTab[unit] = vis[0];
     activateTab(unit, WS.activeTab[unit], false);
   }
   refreshWindowMenu();
@@ -688,8 +714,7 @@ function workspaceDropTarget(event, dragged) {
   const rect = top.getBoundingClientRect();
   const rel = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
   if (rel < 0.2 || rel > 0.8) return { kind: "edge", top, before: rel < 0.5 };
-  const hostsAnyone = Object.values(WS.host).includes(name);
-  if (hostsAnyone || WS.host[name] === topName) return { kind: "none", top };
+  if (WS.host[name] === topName || WS.host[topName] === name) return { kind: "none", top };
   return { kind: "merge", top, topName };
 }
 
@@ -701,6 +726,10 @@ function makeDynTab(host, key) {
   btn.dataset.wintab = key;
   btn.dataset.dynTab = "1";
   btn.dataset.host = host;
+  // Same attributes the hand-written tabs had, so styles and tests that look
+  // for [data-tab="clip"] / [data-btab="list"] keep working.
+  btn.dataset.tab = key;
+  btn.dataset.btab = key;
   btn.draggable = true;
   btn.textContent = UNIT_TITLES[key] || key;
   btn.title = "Drag to move this panel out of the group";
@@ -733,15 +762,18 @@ function ensurePlainGroupStrip(hostEl, host) {
 }
 
 function syncGroupTabs() {
-  UNIT_TABS = { ...UNIT_TABS_BASE };
-  TAB_UNIT = { ...TAB_UNIT_BASE };
-  for (const [member, host] of Object.entries(WS.host)) {
-    if (!UNIT_TABS_BASE[host]) {
-      UNIT_TABS[host] = [host];
-      TAB_UNIT[host] = host;
-    }
-    UNIT_TABS[host] = [...UNIT_TABS[host], member];
-    TAB_UNIT[member] = host;
+  UNIT_TABS = {};
+  TAB_UNIT = {};
+  const members = Object.keys(WS.host || {}).filter((m) => WS.host[m] && WS.host[m] !== m);
+  for (const host of UNIT_ORDER) {
+    const mine = members
+      .filter((m) => WS.host[m] === host)
+      .sort((a, b) => UNIT_ORDER.indexOf(a) - UNIT_ORDER.indexOf(b));
+    if (!mine.length) continue;
+    const selfTab = !TAB_STRIP_UNITS.includes(host);
+    UNIT_TABS[host] = selfTab ? [host, ...mine] : mine;
+    if (selfTab) TAB_UNIT[host] = host;
+    for (const m of mine) TAB_UNIT[m] = host;
   }
 }
 
@@ -785,7 +817,7 @@ function renderGroups() {
   for (const [host, members] of byHost) {
     const hostEl = unitEl(host);
     if (!hostEl) continue;
-    if (!UNIT_TABS_BASE[host]) ensurePlainGroupStrip(hostEl, host);
+    if (!TAB_STRIP_UNITS.includes(host)) ensurePlainGroupStrip(hostEl, host);
     const strip = hostEl.querySelector(":scope > .ws-tabs");
     const body = hostEl.querySelector(":scope > .ws-body");
     if (!strip || !body) continue;
@@ -809,6 +841,7 @@ function commitWorkspaceGroups(message) {
   teardownGroups();
   syncGroupTabs();
   renderGroups();
+  addWorkspaceResizeHandles($("workspace"));   // members lose theirs, freed ones get them
   renderWorkspaceVisibility();
   saveWorkspaceLayout();
   window.dispatchEvent(new Event("resize"));
@@ -824,6 +857,7 @@ function clearWorkspaceDropMarkers(root) {
 
 function addWorkspaceResizeHandles(root) {
   for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
+    if (panel.classList.contains("is-member")) continue;   // grouped: the host sizes
     const edges = panel.dataset.workspacePanel === "timeline"
       ? ["right", "top", "bottom"] : ["left", "right", "top", "bottom"];
     for (const edge of edges) {
@@ -955,6 +989,9 @@ function bindWorkspaceDocking() {
       : (handle && handle.closest("[data-workspace-panel]"));
     if (!panel || !event.dataTransfer) return;
     draggedPanel = panel;
+    // Emptied zones reappear as slim targets so there is somewhere to drop a
+    // panel that was pulled out of them.
+    document.body.classList.add("workspace-drag-active");
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", panel.dataset.workspacePanel);
     panel.classList.add("workspace-dragging");
@@ -997,51 +1034,64 @@ function bindWorkspaceDocking() {
 
   root.addEventListener("drop", (event) => {
     if (!draggedPanel) return;
-    const drop = workspaceDropTarget(event, draggedPanel);
-    if (drop) {
-      event.preventDefault();
-      clearWorkspaceDropMarkers(root);
-      const dragged = draggedPanel;
-      const name = dragged.dataset.workspacePanel;
-      dragged.classList.remove("workspace-dragging");
-      draggedPanel = null;
-      if (drop.kind === "merge") {
+    const dragged = draggedPanel;
+    const name = dragged.dataset.workspacePanel;
+    const drop = workspaceDropTarget(event, dragged);
+    const column = drop ? null : event.target.closest("[data-workspace-column]");
+    if (!drop && !column) return;
+    event.preventDefault();
+    clearWorkspaceDropMarkers(root);
+    dragged.classList.remove("workspace-dragging");
+    draggedPanel = null;
+    document.body.classList.remove("workspace-drag-active");
+
+    if (drop && drop.kind === "merge") {
+      // Merging a host (Inspector, Timeline) hands its panels over to the
+      // target instead of nesting one tab strip inside another, so groups
+      // stay one level deep and the emptied shell simply disappears.
+      const hosted = Object.keys(WS.host).filter((m) => WS.host[m] === name);
+      if (hosted.length) {
+        for (const m of hosted) WS.host[m] = drop.topName;
+        commitWorkspaceGroups(
+          `${hosted.map((m) => UNIT_TITLES[m] || m).join(", ")} grouped with ${UNIT_TITLES[drop.topName]}.`);
+      } else {
         WS.host[name] = drop.topName;
-        commitWorkspaceGroups(`${UNIT_TITLES[name]} grouped with ${UNIT_TITLES[drop.topName]}.`);
-      } else if (drop.kind === "edge") {
-        const wasMember = !!WS.host[name];
-        delete WS.host[name];
-        drop.top.parentElement.insertBefore(dragged, drop.before ? drop.top : drop.top.nextSibling);
-        commitWorkspaceGroups(wasMember
-          ? `${UNIT_TITLES[name]} moved out of its group.`
-          : `${UNIT_TITLES[name]} moved.`);
+        commitWorkspaceGroups(`${UNIT_TITLES[name] || name} grouped with ${UNIT_TITLES[drop.topName]}.`);
       }
       return;
     }
-    const column = event.target.closest("[data-workspace-column]");
-    if (!column) return;
-    event.preventDefault();
-    const previousColumn = draggedPanel.parentElement;
-    const target = event.target.closest("[data-workspace-panel]");
-    if (target && target !== draggedPanel && target.parentElement === column) {
-      const rect = target.getBoundingClientRect();
-      const after = event.clientY >= rect.top + rect.height / 2;
-      column.insertBefore(draggedPanel, after ? target.nextSibling : target);
-    } else if (target !== draggedPanel) {
-      column.appendChild(draggedPanel);
+
+    // Moving between panels or zones. A grouped panel has to be flattened
+    // back into a free-standing element *before* it is placed, otherwise the
+    // next rebuild of the groups would pull it back into its old host.
+    const wasMember = !!WS.host[name];
+    if (wasMember) {
+      delete WS.host[name];
+      commitWorkspaceGroups(`${UNIT_TITLES[name] || name} moved out of its group.`);
     }
-    if (previousColumn !== column) {
-      draggedPanel.style.width = "";
-      draggedPanel.style.marginLeft = "";
-      draggedPanel.style.alignSelf = "";
-      draggedPanel.style.flex = "";
-      if (!draggedPanel.style.height && !draggedPanel.style.marginTop) {
-        draggedPanel.classList.remove("workspace-panel-resized");
+    const previousColumn = dragged.parentElement;
+    if (drop && drop.kind === "edge") {
+      drop.top.parentElement.insertBefore(dragged, drop.before ? drop.top : drop.top.nextSibling);
+    } else if (column) {
+      const target = event.target.closest("[data-workspace-panel]");
+      if (target && target !== dragged && target.parentElement === column) {
+        const rect = target.getBoundingClientRect();
+        column.insertBefore(dragged,
+          event.clientY >= rect.top + rect.height / 2 ? target.nextSibling : target);
+      } else if (target !== dragged) {
+        column.appendChild(dragged);
       }
     }
-    draggedPanel.classList.remove("workspace-dragging");
-    draggedPanel = null;
-    clearWorkspaceDropMarkers(root);
+    if (previousColumn !== column && column) {
+      dragged.style.width = "";
+      dragged.style.marginLeft = "";
+      dragged.style.alignSelf = "";
+      dragged.style.flex = "";
+      if (!dragged.style.height && !dragged.style.marginTop) {
+        dragged.classList.remove("workspace-panel-resized");
+      }
+    }
+    renderWorkspaceVisibility();
     saveWorkspaceLayout();
     window.dispatchEvent(new Event("resize"));
   });
@@ -1049,6 +1099,7 @@ function bindWorkspaceDocking() {
   root.addEventListener("dragend", () => {
     if (draggedPanel) draggedPanel.classList.remove("workspace-dragging");
     draggedPanel = null;
+    document.body.classList.remove("workspace-drag-active");
     clearWorkspaceDropMarkers(root);
   });
 

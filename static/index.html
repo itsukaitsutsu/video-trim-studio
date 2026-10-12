@@ -266,15 +266,18 @@
   <div class="wszone" data-workspace-column="right">
     <section class="moveunit" data-workspace-panel="inspector" data-default-column="right" data-unit="inspector" aria-label="Inspector panel">
       <div class="ws-tabs" id="inspTabs" role="tablist" aria-label="Inspector tabs">
-        <button type="button" role="tab" data-tab="clip" data-wintab="clip" class="active" aria-selected="true">Clip</button>
-        <button type="button" role="tab" data-tab="text" data-wintab="text" aria-selected="false">Text</button>
-        <button type="button" role="tab" data-tab="export" data-wintab="export" aria-selected="false">Export</button>
         <span class="ws-head-spacer"></span>
         <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Inspector panel" title="Drag to move panel">⠿</button>
         <button type="button" class="ws-hide" data-hide-unit="inspector" aria-label="Hide Inspector panel" title="Hide this panel (show it again from the Window menu)">×</button>
       </div>
       <div class="ws-body">
-        <div class="tabpage active" id="tab-clip" role="tabpanel" data-tabpage="clip" aria-label="Clip">
+        <section class="moveunit" data-workspace-panel="clip" data-default-column="right" data-unit="clip" aria-label="Clip panel">
+          <div class="ws-head">
+            <span class="ws-title">Clip</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Clip panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-clip">
           <div class="card">
       <div id="toolEmpty" class="dim small">Select a video clip on the timeline to edit it.</div>
       <div id="toolBody" hidden>
@@ -352,8 +355,15 @@
         </details>
       </div>
           </div>
-        </div>
-        <div class="tabpage" id="tab-text" role="tabpanel" data-tabpage="text" aria-label="Text">
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="text" data-default-column="right" data-unit="text" aria-label="Text panel">
+          <div class="ws-head">
+            <span class="ws-title">Text</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Text panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-text">
           <div class="card text-style-panel">
       <details open>
         <summary>Text</summary>
@@ -406,8 +416,15 @@
         <div class="row"><button id="capPosReset" class="mini">Reset style</button><span id="capPosInfo" class="dim small"></span></div>
       </details>
           </div>
-        </div>
-        <div class="tabpage" id="tab-export" role="tabpanel" data-tabpage="export" aria-label="Export">
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="export" data-default-column="right" data-unit="export" aria-label="Export panel">
+          <div class="ws-head">
+            <span class="ws-title">Export</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Export panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-export">
           <div class="card" data-export-card="settings">
             <h3>3 &middot; Export settings</h3>
       <div class="row"><label>Mode</label>
@@ -479,7 +496,8 @@
       <div id="exportInfo" class="dim small"></div>
       <pre id="jobError" class="error" hidden></pre>
           </div>
-        </div>
+          </div>
+        </section>
       </div>
     </section>
   </div>
@@ -489,13 +507,17 @@
     <section class="moveunit" data-workspace-panel="timeline" data-default-column="bottom" data-unit="timeline" aria-label="Timeline panel">
       <div class="ws-tabs" id="botTabs" role="tablist" aria-label="Timeline tabs">
         <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline panel" title="Drag to move panel">⠿</button>
-        <button type="button" role="tab" data-btab="tl" data-wintab="tl" class="active" aria-selected="true">Timeline 01</button>
-        <button type="button" role="tab" data-btab="list" data-wintab="list" aria-selected="false">List</button>
         <span class="ws-head-spacer"></span>
         <button type="button" class="ws-hide" data-hide-unit="timeline" aria-label="Hide Timeline panel" title="Hide this panel (show it again from the Window menu)">×</button>
       </div>
       <div class="ws-body">
-        <div class="tabpage active" id="tab-tl" role="tabpanel" data-tabpage="tl" aria-label="Timeline">
+        <section class="moveunit" data-workspace-panel="tl" data-default-column="bottom" data-unit="tl" aria-label="Timeline 01 panel">
+          <div class="ws-head">
+            <span class="ws-title">Timeline 01</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline 01 panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-tl">
           <div class="timeline-card">
       <div class="tl-head">
         <strong>Timeline</strong>
@@ -553,8 +575,15 @@
         <span class="dim small">V lanes composite &middot; A lanes mix &middot; gaps export black</span>
       </div>
           </div>
-        </div>
-        <div class="tabpage" id="tab-list" role="tabpanel" data-tabpage="list" aria-label="List">
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="list" data-default-column="bottom" data-unit="list" aria-label="List panel">
+          <div class="ws-head">
+            <span class="ws-title">List</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move List panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-list">
           <div class="list-card">
       <div class="list-tools">
         <button class="chip on" data-kind="caption">caption</button>
@@ -581,7 +610,8 @@
         <div id="listEmpty" class="empty">No timeline items yet &mdash; open a video or add captions.</div>
       </div>
           </div>
-        </div>
+          </div>
+        </section>
       </div>
     </section>
   </div>

@@ -711,10 +711,33 @@ def test_units_group_by_drop_and_ungroup(browser_page):
     assert group_tab("inspector", "project").count() == 0
     assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "center"
 
-    # The bottom timeline unit can join the inspector as a tab too.
-    mouse_drag(grip("timeline"), inspector)
-    assert group_tab("inspector", "timeline").count() == 1
-    assert page.locator('[data-workspace-panel="timeline"] #tab-tl').count() == 1
+    # Dragging the Timeline shell onto a host hands its panels over, so groups
+    # stay one level deep: Inspector ends up with Timeline 01 and List tabs.
+    _dispatch_drag(page, '[data-workspace-panel="timeline"] .workspace-drag-handle',
+                   '[data-workspace-panel="inspector"]')
+    assert group_tab("inspector", "tl").count() == 1
+    assert group_tab("inspector", "list").count() == 1
+    assert page.evaluate("WS.host.tl") == "inspector"
+    assert page.evaluate("WS.host.list") == "inspector"
+    # The emptied shell is gone rather than left behind as a blank panel.
+    assert page.locator('[data-workspace-panel="timeline"]').is_visible() is False
+    assert page.locator('[data-workspace-panel="inspector"] #tab-tl').count() == 1
+
+    # An emptied zone collapses, but reappears as a slim target mid-drag so
+    # there is somewhere to put a panel that was pulled out of it.
+    bottom = page.locator('[data-workspace-column="bottom"]')
+    assert bottom.is_visible() is False
+    page.evaluate("() => document.body.classList.add('workspace-drag-active')")
+    assert bottom.is_visible() is True
+    page.evaluate("() => document.body.classList.remove('workspace-drag-active')")
+
+    # The same works the other way: pull Timeline 01 back out into a zone.
+    mouse_drag(group_tab("inspector", "tl"),
+               page.locator('[data-workspace-column="center"]'), fy=0.95)
+    assert group_tab("inspector", "tl").count() == 0
+    assert page.evaluate(
+        "() => document.querySelector('[data-workspace-panel=\"tl\"]')"
+        ".parentElement.dataset.workspaceColumn") == "center"
 
     # The header x hides the whole group; Window brings it back.
     page.click('[data-hide-unit="inspector"]')
@@ -725,7 +748,12 @@ def test_units_group_by_drop_and_ungroup(browser_page):
     page.keyboard.press("Escape")
 
     page.click("#workspaceReset")
-    assert page.locator("[data-dyn-tab]").count() == 0
+    # A reset puts the five tabbed panels back in their hosts and nothing else
+    # is grouped; Project returns to the left zone.
+    assert page.locator("[data-dyn-tab]").count() == 5
+    assert page.evaluate("JSON.stringify(WS.host)") == (
+        '{"clip":"inspector","text":"inspector","export":"inspector",'
+        '"tl":"timeline","list":"timeline"}')
     assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "left"
     assert not page_errors, page_errors
 
@@ -1097,4 +1125,112 @@ def test_audio_lane_unlink_and_music_drop(browser_page, tmp_path):
     page.reload()
     page.wait_for_function("S.project && S.tl.auds.length === 2")
     assert page.evaluate("S.tl.clips[0].audio") is False
+    assert not page_errors, page_errors
+
+
+# ---------------------------------------------------------------------------
+# Workspace: every panel is a real unit and can be regrouped freely
+# ---------------------------------------------------------------------------
+
+def _dispatch_drag(page, source_sel, target_sel, fy=0.5):
+    """Drive the app's dragstart/dragover/drop handlers directly.
+
+    Playwright's *synchronous* mouse drag can wedge on a `draggable` element in
+    a low-memory headless browser, so use this for the drags that only need to
+    exercise the handlers rather than the gesture itself.
+    """
+    page.evaluate("""([srcSel, dstSel, frac]) => {
+      const src = document.querySelector(srcSel);
+      const dst = document.querySelector(dstSel);
+      const r = dst.getBoundingClientRect();
+      const dt = new DataTransfer();
+      const opts = {bubbles: true, cancelable: true, dataTransfer: dt,
+                    clientX: r.left + r.width / 2, clientY: r.top + r.height * frac};
+      src.dispatchEvent(new DragEvent('dragstart', {bubbles: true, cancelable: true,
+                                                    dataTransfer: dt}));
+      dst.dispatchEvent(new DragEvent('dragover', opts));
+      dst.dispatchEvent(new DragEvent('drop', opts));
+      src.dispatchEvent(new DragEvent('dragend', {bubbles: true, dataTransfer: dt}));
+    }""", [source_sel, target_sel, fy])
+    page.wait_for_timeout(250)
+
+
+def _drag_panel(page, source, target, to_bottom_edge=False):
+    """Drag with real mouse events: the app listens for HTML5 dragstart/drop."""
+    sb, tb = source.bounding_box(), target.bounding_box()
+    sx, sy = sb["x"] + sb["width"] / 2, sb["y"] + sb["height"] / 2
+    ty = tb["y"] + (tb["height"] - 6 if to_bottom_edge else tb["height"] / 2)
+    tx = tb["x"] + tb["width"] / 2
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    for step in range(1, 13):
+        page.mouse.move(sx + (tx - sx) * step / 12, sy + (ty - sy) * step / 12)
+        page.wait_for_timeout(20)
+    page.mouse.up()
+    page.wait_for_timeout(300)
+
+
+def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
+    """Clip/Text/Export and Timeline/List start tabbed but are real panels."""
+    page, page_errors = browser_page
+    page.set_viewport_size({"width": 1600, "height": 2700})
+    open_demo(page)
+
+    def tabs(strip):
+        return page.eval_on_selector_all(
+            "#" + strip + " [role=tab]", "els => els.map(e => e.dataset.wintab)")
+
+    def zones():
+        return page.evaluate("""() => {
+          const out = {};
+          for (const z of ['left', 'center', 'right', 'bottom']) {
+            const col = document.querySelector('[data-workspace-column="' + z + '"]');
+            out[z] = [...col.children]
+              .filter(e => e.hasAttribute('data-workspace-panel'))
+              .map(e => e.dataset.workspacePanel);
+          }
+          return out;
+        }""")
+
+    # Default layout is unchanged: the five are tabs, not loose panels.
+    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
+    assert tabs("botTabs") == ["tl", "list"], tabs("botTabs")
+    assert zones() == {"left": ["project"], "center": ["program"],
+                       "right": ["inspector"], "bottom": ["timeline"]}
+    assert page.eval_on_selector_all(
+        "#inspTabs [role=tab]", "els => els.every(e => e.dataset.dynTab === '1')")
+
+    # 1. Pull List out of the Timeline group, into the left zone.
+    _drag_panel(page, page.locator("#botTabs [data-btab='list']"),
+                page.locator("[data-workspace-column='left']"), to_bottom_edge=True)
+    assert tabs("botTabs") == ["tl"], tabs("botTabs")
+    assert zones()["left"] == ["project", "list"], zones()
+    assert page.evaluate("WS.host.list") in (None, "")
+    # The panel moved intact: its own content came with it.
+    assert page.locator("[data-workspace-panel='list'] .list-card").count() == 1
+
+    # 2. Pull Clip out of the Inspector and group it into the Program Monitor.
+    _drag_panel(page, page.locator("#inspTabs [data-tab='clip']"),
+                page.locator("[data-workspace-panel='program']"))
+    assert tabs("inspTabs") == ["text", "export"], tabs("inspTabs")
+    assert page.evaluate("WS.host.clip") == "program"
+    assert page.evaluate("JSON.stringify(UNIT_TABS.program)") == '["program","clip"]'
+    assert page.locator("[data-workspace-panel='program'] [data-wintab='clip']").count() == 1
+    # And its controls are still there, now inside the Program Monitor.
+    assert page.locator("[data-workspace-panel='program'] #txS").count() == 1
+
+    # 3. It survives a reload, and Reset workspace restores the default.
+    page.reload()
+    page.wait_for_function("typeof WS !== 'undefined' && WS && S.project && S.tl.clips.length")
+    page.wait_for_timeout(500)
+    assert page.evaluate("WS.host.clip") == "program"
+    assert page.evaluate("WS.host.list") in (None, "")
+    assert tabs("inspTabs") == ["text", "export"], tabs("inspTabs")
+
+    page.evaluate("resetWorkspace()")
+    page.wait_for_timeout(400)
+    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
+    assert tabs("botTabs") == ["tl", "list"], tabs("botTabs")
+    assert zones() == {"left": ["project"], "center": ["program"],
+                       "right": ["inspector"], "bottom": ["timeline"]}
     assert not page_errors, page_errors

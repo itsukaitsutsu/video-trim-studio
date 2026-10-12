@@ -604,10 +604,12 @@ details.adv summary:hover { color: var(--text); }
   text-transform: uppercase; letter-spacing: .6px;
 }
 .wszone.zone-empty { display: none; }
+body.workspace-drag-active .wszone.zone-empty { display: flex; min-height: 72px; }
 
 /* Groups (drop a unit onto another to tab it): members are tab pages. */
 .is-member { border: 0; border-radius: 0; background: none; }
 .is-member > .ws-head { display: none; }
+.moveunit.is-member > .workspace-resize-handle { display: none; }
 .ws-dyn-head { padding: 5px 10px; }
 .ws-dyn-head > .ws-title { display: none; }
 .tabpage > .moveunit { flex: 1 1 auto; min-height: 0; min-width: 0; width: auto; height: auto; }

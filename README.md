@@ -15,9 +15,9 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 - **Text fonts:** discover installed TTF/OTF fonts, import fonts into the app, or grant browser-device font access. Imported fonts are available for both preview and FFmpeg burn-in.
 - **Shadows:** independent enable toggle, opacity, angle, distance, continuous glyph-outline spread and blur with consistent 1080p design-pixel scaling in preview/export.
 - Local web UI with a video preview, a multi-row timeline (stacked video lanes plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
-- **Menu bar + Premiere-style units:** File / Edit / Clip / Timeline / Captions / Export / Window / Help across the top; below it four movable units — **Project** (Source + Detect + Auto-caption cards) on the left, **Program** monitor in the center, a tabbed **Inspector** (Clip / Text / Export) on the right, and a tabbed full-width **Timeline** (Timeline 01 / List) at the bottom.
+- **Menu bar + Premiere-style units:** File / Edit / Clip / Timeline / Captions / Export / Window / Help across the top; below it nine movable panels — **Project** (Source + Detect + Auto-caption cards) on the left, **Program** monitor in the center, **Clip**, **Text** and **Export** on the right (tabbed together in the Inspector by default), and **Timeline 01** and **List** along the bottom (tabbed together by default). Every one of them is a real panel you can drag anywhere; see **Workspace** below.
 - Rearrange any unit by dragging its ⠿ grip handle into another zone, resize zones with the divider grips, and resize individual units by their edges (other units have four handles, Timeline has right/top/bottom).
-- **Group units into tabs:** drop a unit onto the middle of another unit and it becomes one of that unit's tabs (Premiere-style panel groups); drop it near a unit's top or bottom edge to place it beside that unit instead. Drag a group's tab out to a zone edge to split it off again. A group's header × hides the whole group, and the Window menu brings back any hidden unit or tab. Grouped units keep their own content, so a grouped Timeline is shown as a tab inside its host (it is narrower there than in its own zone). Every unit header also has a **× button** that hides the whole unit; anything hidden comes back from the **Window** menu, which shows or hides units and individual tabs with checkmarks (picking a tab re-shows its unit). The Program monitor's centered inner bottom grip resizes only its viewing window; the Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. Zones, visibility, active tabs, sizes and viewport heights are saved in this browser; **Reset workspace** restores the defaults.
+- **Group panels into tabs:** drop a panel onto the middle of another and it becomes one of that panel's tabs (Premiere-style panel groups); drop it near a panel's top or bottom edge to place it beside that panel instead. Drag a group's tab out to a zone or to another panel to split it off again. A group's header × hides the whole group, and the Window menu brings back any hidden panel or tab. Grouped panels keep their own content, so a grouped Timeline is shown as a tab inside its host (it is narrower there than in its own zone). Every unit header also has a **× button** that hides the whole unit; anything hidden comes back from the **Window** menu, which shows or hides units and individual tabs with checkmarks (picking a tab re-shows its unit). The Program monitor's centered inner bottom grip resizes only its viewing window; the Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. Zones, visibility, active tabs, sizes and viewport heights are saved in this browser; **Reset workspace** restores the defaults.
 - **Lane lock / eye:** every V/T label has a lock (blocks timeline move/trim/razor/split/delete/cut/mute on that lane — the Clip panel and text edits still work) and an eye (hides the lane's blocks on the timeline to declutter; preview and export are unaffected).
 - Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
@@ -312,6 +312,31 @@ Notes:
 - The `.srt` refers to the **source** timeline. After a trim, cue times no longer
   match the exported file unless you regenerate captions for it.
 
+## Workspace
+
+Every panel is a first-class unit — **Project**, **Program Monitor**, **Clip**,
+**Text**, **Export**, **Timeline 01** and **List** — and any of them can go
+anywhere.
+
+- **Rearrange:** drag a panel's ⠿ grip into another zone, or onto the top/bottom
+  edge of another panel to sit beside it.
+- **Group:** drag a panel (or its tab) onto the *middle* of another panel and it
+  becomes a tab there. Clip / Text / Export start tabbed in the Inspector and
+  Timeline 01 / List start tabbed together at the bottom purely because that is
+  the default layout — pull any of them out and they become panels in their own
+  right.
+- **Ungroup:** drag a tab out to a zone, or onto another panel. Nothing is
+  welded: there are no hard-coded tabs.
+- **Merge a whole group:** dropping the Timeline shell onto another panel hands
+  Timeline 01 and List over to it, so groups stay one level deep instead of
+  nesting tab strips. An emptied shell disappears rather than lingering as a
+  blank panel.
+- **Hide:** the × on a panel header hides the whole panel; individual tabs are
+  shown and hidden from the **Window** menu. **Reset workspace** restores the
+  default arrangement.
+- An emptied zone collapses, but reappears as a slim target while you are
+  dragging, so there is always somewhere to put a panel you just pulled out.
+
 ## Media bin and multi-track editing
 
 The **Media** card is a small Premiere-style Project panel, and the timeline now
@@ -480,11 +505,11 @@ static/timeline-model.js   pure editing rules: tracks, audio lanes, split, move,
 static/timeline.js         timeline canvas (V1..Vn + A1..An + caption lanes),
                            Tools toolbar, lane lock/eye, multi-layer playback,
                            drag and drop from the bin, timeline list
+static/app.js              menu bar, workspace zones/panel grouping, source
+                           panel, caption card, caption box, export options
 static/stage.js            program monitor compositor: one <video> layer per track
 static/media.js            media bin: import, upload, proxies, waveforms, thumbnails
 static/clip.js             Clip panel: transform, fit, crop, audio, fades, keyframes
-static/app.js              menu bar, workspace zones, source panel, caption card,
-                           caption box, export options
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)
 demo/                      18-second sample video + captions, and a short spoken clip
 setup.bat, run.bat         Windows install/run helpers
