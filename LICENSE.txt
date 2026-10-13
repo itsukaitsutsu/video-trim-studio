@@ -1,0 +1,133 @@
+ALL RIGHTS RESERVED — PROPRIETARY LICENSE
+Copyright (c) 2026 itsukaitsutsu. All Rights Reserved.
+
+Project: Video Trim Studio
+Repository: https://github.com/itsukaitsutsu/video-trim-studio
+
+
+1. OWNERSHIP
+
+The software, source code, scripts, configuration, documentation, assets,
+designs, and all other contents of this repository (collectively, "the
+Software") are the exclusive property of itsukaitsutsu ("the Author"). The
+Software is proprietary and confidential. All copyrights, intellectual
+property rights, and other rights, title, and interest in and to the
+Software remain vested solely in the Author and are fully reserved.
+
+
+2. NO LICENSE GRANTED
+
+No license, right, title, interest, or permission of any kind is granted to
+any person or entity, whether by implication, estoppel, or otherwise, except
+for the limited right to view the contents of this repository for personal,
+informational purposes only.
+
+The Software is not open-source software. Public availability of the
+Software (including on GitHub or any other platform) does not place it in
+the public domain, does not constitute a waiver of any rights, and does not
+grant any right to use the Software.
+
+
+3. PROHIBITED USES
+
+Without the prior express written permission of the Author, you may NOT:
+
+  (a) copy, reproduce, duplicate, download, or store the Software, in whole
+      or in part, by any means or in any medium (except for temporary,
+      incidental viewing);
+
+  (b) use, run, execute, compile, install, host, deploy, operate, or
+      otherwise make use of the Software, in whole or in part, for any
+      purpose whatsoever, whether personal, educational, academic,
+      commercial, or non-commercial;
+
+  (c) modify, adapt, translate, transform, or create derivative works based
+      on the Software;
+
+  (d) distribute, publish, post, upload, mirror, fork, sublicense, sell,
+      resell, rent, lease, lend, assign, or otherwise transfer or make the
+      Software available to any third party;
+
+  (e) incorporate the Software, in whole or in part, into any product,
+      service, project, or offering, whether commercial or not-for-profit;
+
+  (f) use the Software for any commercial purpose or for direct or indirect
+      monetary gain of any kind;
+
+  (g) remove, obscure, or alter any copyright notice, attribution, or
+      proprietary marking contained in the Software; or
+
+  (h) use the Software, or any of its source code, documentation, or assets,
+      to develop, train, fine-tune, evaluate, or improve any machine
+      learning, artificial intelligence, or automated code-generation model
+      or system.
+
+Any use of the Software in violation of this License constitutes an
+infringement of the Author's intellectual property rights and may result in
+legal action. The ability to view, clone, or fork this repository via a
+hosting platform's features does not grant any license or permission under
+this License.
+
+Requests for permission may be directed to the Author via
+https://github.com/itsukaitsutsu. Any permission granted by the Author is
+valid only if given expressly in writing and only for the specific uses,
+terms, and duration stated in that writing.
+
+
+4. THIRD-PARTY COMPONENTS
+
+The Software depends on or interoperates with third-party components,
+including but not limited to FFmpeg, FFprobe, faster-whisper and its models,
+and various Python and JavaScript libraries. Those components are governed
+solely by their own license terms. Nothing in this License grants any right
+to those components, and no license governing any third-party component
+grants any right to the Software.
+
+
+5. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. THE AUTHOR
+MAKES NO WARRANTY THAT THE SOFTWARE IS ERROR-FREE, ACCURATE, OR FIT FOR ANY
+PARTICULAR PURPOSE. YOU USE ANY PART OF THE SOFTWARE ENTIRELY AT YOUR OWN
+RISK.
+
+
+6. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY CLAIM, DAMAGES, LOSS, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE,
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ANY USE OF OR
+OTHER DEALINGS IN THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+
+
+7. GOVERNING LAW
+
+This License and any dispute arising out of or in connection with the
+Software or this License shall be governed by and construed in accordance
+with the laws of [YOUR JURISDICTION], without regard to its conflict-of-law
+provisions.
+
+
+8. SEVERABILITY
+
+If any provision of this License is held to be invalid or unenforceable, the
+remaining provisions shall continue in full force and effect, and the
+invalid or unenforceable provision shall be replaced by an enforceable
+provision that most closely reflects the Author's intent.
+
+
+9. ENTIRE AGREEMENT
+
+This License constitutes the entire agreement concerning the Software and
+supersedes any prior or contemporaneous understandings regarding it. No
+failure or delay by the Author in enforcing any provision shall constitute a
+waiver of that or any other provision.
+
+-------------------------------------------------------------------------------
+This is a proprietary, "All Rights Reserved" license. It is NOT an
+open-source license. No part of the Software may be used, copied, modified,
+or distributed without the prior written permission of the Author.
+-------------------------------------------------------------------------------
