@@ -561,7 +561,7 @@
   <div class="legend">
     <span><i class="sw" style="background:#3373d1"></i>video</span>
     <span><i class="sw" style="background:#9f63d6"></i>image / overlay</span>
-    <span><i class="sw" style="background:#cf5a99"></i>caption (C lanes)</span>
+    <span><i class="sw" style="background:#cf5a99"></i>caption (own V track above video)</span>
     <span><i class="sw" style="background:#34c46f"></i>audio</span>
     <span><i class="sw" style="background:#f97316"></i>silence section</span>
     <span class="dim small">top lane = top layer · A lanes mix · gaps export black</span>
@@ -594,7 +594,7 @@
         <button class="mini" id="selAllSilence">all silence</button>
         <button class="mini" id="selAllCaptions">all captions</button>
       </div>
-      <div class="dim small selection-hint">V1 sections and caption cues from every lane (T1, T2, &hellip;) are listed here. The list follows the playhead and blue edges mark active items. Click a non-text cell to select and seek; tick boxes, Shift-click, or hold-drag to select several; click text to edit it.</div>
+      <div class="dim small selection-hint">V1 sections and captions (each on its own V track above the video) are listed here. The list follows the playhead and blue edges mark active items. Click a non-text cell to select and seek; tick boxes, Shift-click, or hold-drag to select several; click text to edit it.</div>
       <div class="list-scroll">
         <table id="secTable">
           <thead><tr><th></th><th>track</th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
@@ -621,10 +621,10 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=7"></script>
+<script src="/static/timeline-model.js?v=8"></script>
 <script src="/static/media.js?v=1"></script>
 <script src="/static/stage.js?v=2"></script>
-<script src="/static/timeline.js?v=19"></script>
+<script src="/static/timeline.js?v=20"></script>
 <script src="/static/clip.js?v=1"></script>
 <script src="/static/app.js?v=47"></script>
 <script src="/static/font-picker.js?v=1"></script>

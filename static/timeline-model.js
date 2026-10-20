@@ -880,8 +880,8 @@
   // New UI: captions floating on V tracks (no lane stacking, transparent overlay)
   function addCaptionOnTrack(tl, at, text, style, track) {
     const out = normalise(tl);
-    const vt = vtracksOf(out);
-    const wantTrack = (track !== undefined && Number.isFinite(Number(track))) ? Math.max(0, Math.min(vt - 1, Math.floor(Number(track)))) : 0;
+    // caption tracks grow on demand above the footage (clamped only by MAX_VTRACKS)
+    const wantTrack = (track !== undefined && Number.isFinite(Number(track))) ? Math.max(0, Math.min(MAX_VTRACKS - 1, Math.floor(Number(track)))) : 0;
     const cap = {
       id: newId("t"), track: wantTrack, lane: wantTrack, start: r3(at), end: r3(at + 2),
       text, style: style ? clone(style) : null, words: [],

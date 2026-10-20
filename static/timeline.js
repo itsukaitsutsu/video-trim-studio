@@ -144,24 +144,28 @@ function laneLabelsDirty() { /* legacy hook from app.js — DOM render reads S d
 function laneKeyOf(it) {
   if (TLM.isAudioItem(it)) return `a${TLM.atrackOf(it)}`;
   if (TLM.isClip(it)) return `v${TLM.trackOf(it)}`;
-  // captions live on their own C lanes above the video tracks (Premiere-style)
-  return `c${capLaneOf(it)}`;
+  // captions share the V numbering but sit on their own V track above
+  // the footage (Premiere-style) — never in the same lane as video clips
+  return `v${capTrackOf(it)}`;
 }
-function capLaneOf(c) { return c.lane ?? c.track ?? 0; }
-function cLanesOf() {
-  // derive from the captions themselves — a stale tl.lanes counter
-  // must not conjure empty caption lanes
-  const caps = (S.tl && S.tl.caps) || [];
-  if (!caps.length) return 0;
-  let n = 1;
-  for (const c of caps) n = Math.max(n, capLaneOf(c) + 1);
+function capTrackOf(c) { return c.track !== undefined ? c.track : (c.lane ?? 0); }
+function vTrackCount() {
+  let n = TLM.vtracksOf(S.tl);
+  for (const c of (S.tl && S.tl.caps) || []) n = Math.max(n, capTrackOf(c) + 1);
   return n;
 }
-function cDisplayOrder() {
-  const n = cLanesOf();
-  const arr = [];
-  for (let i = n - 1; i >= 0; i--) arr.push(i);
-  return arr;
+function migrateCapsToVTracks() {
+  // One-way view migration: legacy lane captions (lane L) become V-track
+  // captions on the first track above all video clips (+ L for stacking).
+  const caps = (S.tl && S.tl.caps) || [];
+  if (!caps.length || !caps.some((c) => c.track === undefined)) return;
+  const maxClip = Math.max(-1, ...((S.tl.clips || []).map((k) => TLM.trackOf(k))));
+  const baseV = Math.max(0, maxClip + 1);
+  S.tl = {
+    ...S.tl,
+    caps: caps.map((c) => c.track !== undefined ? c
+      : { ...c, track: baseV + (c.lane || 0), lane: baseV + (c.lane || 0) }),
+  };
 }
 function laneHidden(key) { laneSets(); return S.laneHidden.has(key); }
 function laneLocked(key) { laneSets(); return S.laneLocked.has(key); }
@@ -175,7 +179,6 @@ function laneName(key) {
 function rowHForKey(key) {
   const v = S.laneH[key];
   if (v != null) return v;
-  if (key[0] === "c") return 32;
   return key[0] === "a" ? 44 : 56;
 }
 function trackNameV(idx) {
@@ -184,7 +187,7 @@ function trackNameV(idx) {
 }
 function trackNameA(idx) { return `A${idx + 1}`; }
 function vDisplayOrder() {
-  const n = TLM.vtracksOf(S.tl);
+  const n = vTrackCount(); // includes caption-only V tracks above the footage
   const arr = [];
   for (let i = n - 1; i >= 0; i--) arr.push(i);
   return arr;
@@ -338,17 +341,21 @@ function splitAtPlayhead() {
 function addCaptionAtPlayhead() {
   if (!S.project) return alert("Open a video first.");
   const style = (S.capSel && S.tl.caps.find((c) => c.id === S.capSel)?.style) || (typeof CAPPOS !== "undefined" ? CAPPOS : null);
-  // Premiere-style: captions stack onto their own C lanes above the video.
-  // addCaption picks the lowest free caption lane automatically.
+  // Premiere-style: the caption goes on the first V track ABOVE all video
+  // clips (V2 when footage is on V1); stacks higher when that spot is
+  // taken by another caption at this time, and skips locked lanes.
   laneSets();
-  const r = TLM.addCaption(S.tl, playheadTime(), "New caption", style);
-  const made = r.tl.caps.find((c) => c.id === r.id);
-  const key = `c${made ? capLaneOf(made) : 0}`;
-  if (S.laneLocked.has(key)) return toast(`lane ${laneName(key)} is locked`);
+  const t = playheadTime();
+  const maxClip = Math.max(-1, ...((S.tl.clips || []).map((k) => TLM.trackOf(k))));
+  const ov = (c, a, b) => c.start < b - 1e-6 && c.end > a + 1e-6;
+  let tr = Math.max(0, maxClip + 1);
+  while (S.laneLocked.has(`v${tr}`) ||
+         (S.tl.caps || []).some((c) => capTrackOf(c) === tr && ov(c, t, t + 2))) tr += 1;
+  const r = TLM.addCaptionOnTrack(S.tl, t, "New caption", style, tr);
   S.sel = new Set([r.id]);
   S.capSel = r.id;
   setTL(r.tl);
-  toast(`caption added on ${laneName(key)} at ${fmtTime(playheadTime(), false)}`);
+  toast(`caption added on V${tr + 1} at ${fmtTime(t, false)}`);
 }
 function addLane() { // legacy still used nowhere, keep for compat
   if (!S.project) return;
@@ -357,7 +364,7 @@ function addLane() { // legacy still used nowhere, keep for compat
 }
 function addVideoTrack() {
   if (!S.project) return;
-  const v = TLM.vtracksOf(S.tl);
+  const v = vTrackCount(); // on top of everything, caption tracks included
   S.tl = TLM.normalise({ ...S.tl, vtracks: v + 1, atracks: Math.max(TLM.atracksOf(S.tl), v + 1) });
   commitTL(); refresh();
   status(`V${v + 1} added — drop media on it to overlay the tracks below.`);
@@ -435,7 +442,6 @@ const GROUPS = [
   { label: "Video", kinds: ["V"], color: "#3373d1" },
   { label: "Audio", kinds: ["A"], color: "#34c46f" },
 ];
-const CAP_GROUP_COLOR = "#e75fa0";
 const KIND_ICON = { video: "film", audio: "music", caption: "type", image: "film" };
 
 function fmt(s) {
@@ -460,6 +466,7 @@ function render() {
     if (tc) tc.textContent = `${fmtTime(playheadTime(), false)} / ${fmtTime(timelineEnd(), false)}`;
     return;
   }
+  migrateCapsToVTracks();
   renderHeaders();
   renderLanes();
   renderTray();
@@ -511,26 +518,17 @@ function renderHeaders() {
   if (!box) return;
   box.innerHTML = "";
   laneSets();
-  // prune stale keys
-  const vc = TLM.vtracksOf(S.tl), ac = TLM.atracksOf(S.tl), cc = cLanesOf();
+  // prune stale keys (c* keys are from the retired caption group)
+  const vc = vTrackCount(), ac = TLM.atracksOf(S.tl);
   for (const key of [...S.laneHidden, ...S.laneLocked]) {
     const n = Number(key.slice(1));
     let live = false;
     if (key[0] === "v") live = n < vc;
     else if (key[0] === "a") live = n < ac;
-    else if (key[0] === "c") live = n < cc;
     if (!live) { S.laneHidden.delete(key); S.laneLocked.delete(key); }
   }
-  // Caption group on top (Premiere-style: captions above video tracks)
-  const cOrder = cDisplayOrder();
-  if (cOrder.length) {
-    const bar = document.createElement("div");
-    bar.className = "gbar";
-    bar.innerHTML = `<span class="dot" style="background:${CAP_GROUP_COLOR}"></span>CAPTIONS`;
-    box.appendChild(bar);
-    cOrder.forEach((idx) => box.appendChild(headerRowC(idx)));
-  }
-  // Video group (display top lane = top layer = highest index first)
+  // Video group (display top lane = top layer = highest index first);
+  // caption-only V tracks live here too, above the footage
   const vOrder = vDisplayOrder();
   if (vOrder.length) {
     const bar = document.createElement("div");
@@ -546,58 +544,6 @@ function renderHeaders() {
     bar.innerHTML = `<span class="dot" style="background:${GROUPS[1].color}"></span>AUDIO`;
     box.appendChild(bar);
     aOrder.forEach((idx) => box.appendChild(headerRowA(idx)));
-  }
-}
-function headerRowC(idx) {
-  const key = `c${idx}`;
-  const r = document.createElement("div");
-  r.className = "hrow"; r.style.height = rowHForKey(key) + "px";
-  const name = laneName(key);
-  const locked = laneLocked(key);
-  const hidden = laneHidden(key);
-  r.innerHTML =
-    `<button class="hbtn ${locked ? "on" : ""}" data-h="lock" title="${locked ? "Unlock" : "Lock"} lane ${name}">${icon(locked ? "lock" : "unlock", 2)}</button>` +
-    `<button class="hbtn ${hidden ? "on" : ""}" data-h="vis" title="${hidden ? "Show" : "Hide"} lane ${name}">${icon(hidden ? "eyeoff" : "eye", 2)}</button>` +
-    `<span class="kind">${name}</span><span class="hsp"></span>` +
-    `<button class="hbtn" data-h="more" title="More actions for lane ${name}">${icon("more", 2)}</button>`;
-  r.title = `Alt+scroll: lane height · double-click: auto height (${name})`;
-  r.querySelectorAll(".hbtn").forEach((b) => b.addEventListener("click", (ev) => {
-    ev.stopPropagation();
-    headerActC(idx, b.dataset.h, b);
-  }));
-  r.addEventListener("wheel", (ev) => {
-    if (!ev.altKey) return;
-    ev.preventDefault();
-    const cur = rowHForKey(key);
-    S.laneH[key] = Math.min(140, Math.max(24, cur + (ev.deltaY < 0 ? 4 : -4)));
-    render();
-    status(`lane ${name} height ${S.laneH[key]}px (double-click header for auto)`);
-  }, { passive: false });
-  r.addEventListener("dblclick", (ev) => {
-    if (ev.target.closest(".hbtn")) return;
-    delete S.laneH[key];
-    render();
-    status(`lane ${name} height: auto`);
-  });
-  return r;
-}
-function headerActC(idx, act, btn) {
-  const key = `c${idx}`;
-  laneSets();
-  if (act === "lock") {
-    if (S.laneLocked.has(key)) S.laneLocked.delete(key);
-    else S.laneLocked.add(key);
-    saveWorkspaceLayout();
-    render();
-    status(`lane ${laneName(key)} ${S.laneLocked.has(key) ? "locked" : "unlocked"}`);
-  } else if (act === "vis") {
-    if (S.laneHidden.has(key)) S.laneHidden.delete(key);
-    else S.laneHidden.add(key);
-    saveWorkspaceLayout();
-    render();
-    status(`lane ${laneName(key)} ${S.laneHidden.has(key) ? "hidden" : "shown"}`);
-  } else if (act === "more") {
-    openMoreMenu(key, btn || null);
   }
 }
 function headerRowV(idx) {
@@ -758,27 +704,7 @@ function renderLanes() {
   // rows + clips, grouped Premiere-style (video on top, audio bottom)
   const vOrder = vDisplayOrder();
   const aOrder = aDisplayOrder();
-  // Caption lanes on top (Premiere-style: captions in their own tracks, never overlapping video)
-  const cOrder = cDisplayOrder();
-  if (cOrder.length) {
-    const bar = document.createElement("div");
-    bar.className = "gbar-lane"; bar.style.width = W + "px";
-    L.appendChild(bar);
-    cOrder.forEach((idx) => {
-      const key = `c${idx}`;
-      const row = document.createElement("div");
-      row.className = `row b${idx % 2}${laneLocked(key) ? " locked" : ""}`;
-      row.style.cssText += `;width:${W}px;height:${rowHForKey(key)}px`;
-      row.dataset.trackKey = key;
-      row.innerHTML = gridHTML;
-      row.addEventListener("mousedown", (ev) => { if (ev.target === row) lanePress(ev, idx, "c"); });
-      (S.tl.caps || []).filter((c) => capLaneOf(c) === idx).forEach((c) => {
-        row.appendChild(clipElCap(c, key, idx));
-      });
-      L.appendChild(row);
-    });
-  }
-  // Video tracks
+  // Video tracks (captions ride their own V track above the footage)
   if (vOrder.length) {
     const bar = document.createElement("div");
     bar.className = "gbar-lane"; bar.style.width = W + "px";
@@ -794,6 +720,10 @@ function renderLanes() {
       // video/image clips on this track
       (S.tl.clips || []).filter((c) => TLM.trackOf(c) === idx).forEach((c) => {
         row.appendChild(clipEl(c, key, idx, "video"));
+      });
+      // captions assigned to this V track
+      (S.tl.caps || []).filter((c) => capTrackOf(c) === idx).forEach((c) => {
+        row.appendChild(clipElCap(c, key, idx));
       });
       L.appendChild(row);
     });
@@ -983,6 +913,27 @@ function lanePress(ev, idx, kind) {
     S.sel = new Set(); syncCapSel(); render();
   }
 }
+function laneChangeBlocked(base, ids, dLane) {
+  // Keep captions and video clips in separate lanes: a vertical move is
+  // rejected when any moved caption would time-overlap a clip on its
+  // target V track, or any moved clip would overlap a caption there.
+  const sel = new Set(ids);
+  const caps = base.caps || [], clips = base.clips || [];
+  const ov = (a, b) => a.start < b.end - 1e-6 && a.end > b.start + 1e-6;
+  for (const c of caps) {
+    if (!sel.has(c.id)) continue;
+    const tgt = capTrackOf(c) + dLane;
+    if (tgt < 0) return true;
+    if (clips.some((k) => !sel.has(k.id) && TLM.trackOf(k) === tgt && ov(c, k))) return true;
+  }
+  for (const k of clips) {
+    if (!sel.has(k.id)) continue;
+    const tgt = TLM.trackOf(k) + dLane;
+    if (tgt < 0) return true;
+    if (caps.some((c) => !sel.has(c.id) && capTrackOf(c) === tgt && ov(c, k))) return true;
+  }
+  return false;
+}
 function clipPress(ev, item, key, idx) {
   const locked = itemLocked(item);
   if (S.pan) { startPan(ev); return; }
@@ -1046,14 +997,16 @@ function clipPress(ev, item, key, idx) {
       }
       if (targetRow && targetRow.dataset.trackKey) {
         const targetKey = targetRow.dataset.trackKey;
-        // only shift lanes within the same group (c→c, v→v, a→a) —
-        // dragging a caption over a video row must not re-lane it
+        // only shift lanes within the same group (v→v, a→a)
         if (targetKey[0] === S.drag.key0[0]) {
           const srcIdx = S.drag.idx0;
           const tgtIdx = Number(targetKey.slice(1));
           dLane = tgtIdx - srcIdx;
         }
       }
+      // the-bug-before guard: a caption may not land in a lane where it
+      // would overlap a video clip in time (and vice versa)
+      if (dLane && laneChangeBlocked(S.drag.base, S.drag.ids, dLane)) dLane = 0;
     }
     if (S.drag.alt) {
       const dup = TLM.duplicateItems(S.drag.base, S.drag.ids, dt);
@@ -1160,8 +1113,7 @@ function openMoreMenu(key, anchor) {
     }
   }
   openPop(anchor, (box) => {
-    // caption lanes are never "the last lane standing" — video/audio remain
-    const isLast = key[0] === "c" ? false : (TLM.vtracksOf(S.tl) + TLM.atracksOf(S.tl)) < 2;
+    const isLast = (vTrackCount() + TLM.atracksOf(S.tl)) < 2;
     const b = document.createElement("button");
     b.className = "del";
     b.disabled = isLast;
@@ -1174,9 +1126,17 @@ function openMoreMenu(key, anchor) {
       const kind = key[0];
       const idx = Number(key.slice(1));
       if (kind === "v") {
-        // delete V lane: remove clips on that track (captions live on C lanes now)
+        // delete V track: remove its clips AND captions, shift everything above down
         const keepClips = S.tl.clips.filter((c) => TLM.trackOf(c) !== idx);
-        S.tl = TLM.normalise({ ...S.tl, clips: keepClips, vtracks: Math.max(1, TLM.vtracksOf(S.tl) - 1) });
+        const keepCaps = S.tl.caps.filter((c) => capTrackOf(c) !== idx)
+          .map((c) => {
+            const tr = capTrackOf(c);
+            if (tr <= idx) return c;
+            const m = { ...c, track: tr - 1 };
+            if (m.lane !== undefined) m.lane = tr - 1;
+            return m;
+          });
+        S.tl = TLM.normalise({ ...S.tl, clips: keepClips, caps: keepCaps, vtracks: Math.max(1, TLM.vtracksOf(S.tl) - 1) });
         S.tl.clips.forEach((c) => { if (TLM.trackOf(c) > idx) c.track = TLM.trackOf(c) - 1; });
         S.tl = TLM.normalise(S.tl);
       } else if (kind === "a") {
@@ -1184,17 +1144,6 @@ function openMoreMenu(key, anchor) {
         S.tl = TLM.normalise({ ...S.tl, auds: keepAuds, atracks: Math.max(1, TLM.atracksOf(S.tl) - 1) });
         S.tl.auds.forEach((a) => { if (TLM.atrackOf(a) > idx) a.atrack = TLM.atrackOf(a) - 1; });
         S.tl = TLM.normalise(S.tl);
-      } else if (kind === "c") {
-        // delete caption lane: drop its captions, shift higher lanes down
-        const keepCaps = S.tl.caps.filter((c) => capLaneOf(c) !== idx)
-          .map((c) => {
-            const ln = capLaneOf(c);
-            if (ln <= idx) return c;
-            const m = { ...c, lane: ln - 1 };
-            if (m.track !== undefined) m.track = ln - 1;
-            return m;
-          });
-        S.tl = TLM.normalise({ ...S.tl, caps: keepCaps });
       }
       // cleanup laneH/lock/hidden for deleted key and reindex keys above
       laneSets();
@@ -1335,7 +1284,7 @@ function bindTray() {
   });
   function addTrackV() {
     if (!S.project) return;
-    const v = TLM.vtracksOf(S.tl);
+    const v = vTrackCount(); // on top of everything, caption tracks included
     S.tl = TLM.normalise({ ...S.tl, vtracks: v + 1, atracks: Math.max(TLM.atracksOf(S.tl), v + 1) });
     commitTL(); refresh();
     status(`added video track V${v + 1} on top (top lane = top layer)`);
@@ -1591,10 +1540,7 @@ function escapeHtml(str) {
 function allListItems() {
   const entries = [
     ...S.tl.clips.map((item) => ({ id: item.id, item, type: "clip", track: `V${TLM.trackOf(item) + 1}`, kind: item.kind || "other" })),
-    ...S.tl.caps.map((item) => {
-      const tr = item.track !== undefined ? item.track : (item.lane || 0);
-      return ({ id: item.id, item, type: "caption", track: `T${Math.max(0, tr) + 1}`, kind: "caption" });
-    }),
+    ...S.tl.caps.map((item) => ({ id: item.id, item, type: "caption", track: `V${Math.max(0, capTrackOf(item)) + 1}`, kind: "caption" })),
   ];
   const rank = (entry) => entry.type === "clip" ? 0 : 1;
   return entries.sort((a, b) => a.item.start - b.item.start || rank(a) - rank(b) || (a.type === "caption" ? (a.item.lane || a.item.track || 0) - (b.item.lane || b.item.track || 0) : 0) || a.item.end - b.item.end || a.id.localeCompare(b.id));
