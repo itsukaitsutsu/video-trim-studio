@@ -88,8 +88,8 @@
   .pop button.del:not(:disabled):hover { background: #f8514933; }
 
   /* lane grid: fixed header column + scrolling lanes */
-  .grid { display: flex; align-items: stretch; background: var(--lane); }
-  .headers { flex: none; width: 152px; border-right: 1px solid var(--line); background: var(--panel); }
+  .grid { display: flex; align-items: stretch; background: var(--lane); position: relative; }
+  .headers { flex: none; width: 152px; border-right: 1px solid var(--line); background: var(--panel); overflow: hidden; }
   .hcorner { height: 28px; background: var(--ruler); border-bottom: 1px solid var(--line); }
   .gbar { height: 18px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
     font-size: 10px; font-weight: 700; letter-spacing: .8px; color: var(--dim);
@@ -107,9 +107,9 @@
   .hbtn.on { background: #1c2f4d; border-color: #58a6ff66; color: #fff; }
   .hsp { flex: 1; }
 
-  .lanes-scroll { flex: 1; min-width: 0; overflow-x: auto; position: relative; }
+  .lanes-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: auto; position: relative; }
   .lanes { position: relative; }
-  .ruler { position: relative; height: 28px; background: var(--ruler);
+  .ruler { position: sticky; top: 0; z-index: 4; height: 28px; background: var(--ruler);
     border-bottom: 1px solid var(--line); overflow: hidden; cursor: pointer; }
   .tick { position: absolute; top: 0; height: 22px; border-left: 1px solid #3d4a5c;
     color: var(--dim); font-size: 10px; padding: 3px 0 0 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -149,6 +149,15 @@
   .playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #f0f6fc; z-index: 6; pointer-events: none; }
   .playhead::before { content: ""; position: absolute; top: 0; left: -5px;
     border: 5.5px solid transparent; border-top: 8px solid #f0f6fc; }
+
+  /* lane-area resize: the standard workspace bottom-edge handle. Drag adds
+     or removes empty viewing space; track sizes stay the same. */
+  .workspace-resize-handle { position: absolute; z-index: 20; display: block; background: transparent;
+    touch-action: none; user-select: none; transition: background-color .12s; }
+  .workspace-resize-handle.resize-top, .workspace-resize-handle.resize-bottom {
+    left: 10px; right: 10px; height: 5px; cursor: row-resize; }
+  .workspace-resize-handle.resize-bottom { bottom: 0; }
+  .workspace-resize-handle:hover, .workspace-resize-handle.resizing { background: var(--accent-2); }
 
   .statusline { display: flex; align-items: center; gap: 10px; padding: 5px 12px;
     border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--dim); }
@@ -243,8 +252,9 @@
   </div>
 
   <div class="grid">
-    <div class="headers" id="headers"><div class="hcorner"></div></div>
+    <div class="headers" id="headers"><div class="hcorner"></div><div class="hrows" id="hrows"></div></div>
     <div class="lanes-scroll" id="scroll"><div class="lanes" id="lanes"></div></div>
+    <div class="workspace-resize-handle resize-bottom" data-resize-edge="bottom" role="separator" aria-orientation="horizontal" title="Drag the bottom edge to resize this panel"></div>
   </div>
 
   <div class="statusline"><span id="status">click = select + seek &middot; shift = add &middot; drag empty lane with pan on to scroll &middot; ctrl+wheel = zoom &middot; alt+wheel on a header = lane height</span><span class="tc" id="tc"></span></div>
@@ -282,6 +292,7 @@
       <tr><td class="k">+ caption / + lane / + track</td><td><span class="tag mov">moved</span>Tray&rsquo;s <b>+</b> menu has just <b>Add video track</b> / <b>Add audio track</b> (new V above the V stack, new A at the bottom). There are no caption lanes: <b>+ caption</b> drops a floating caption on the topmost video track. Auto-caption stays where it already is (no tray button).</td></tr>
       <tr><td class="k">snap &#9745;</td><td><span class="tag mov">moved</span>Magnet toggle beside magnetic.</td></tr>
       <tr><td class="k">status text</td><td><span class="tag keep">kept</span>Slim status line under the lanes.</td></tr>
+      <tr><td class="k">viewport grip</td><td><span class="tag keep">kept</span>The standard workspace bottom-edge handle at the foot of the lane grid: drag up/down to add or remove empty viewing space (80px&ndash;85vh), track sizes untouched. Double-click resets to auto height. (Real port keeps <code>saveWorkspaceLayout</code>.)</td></tr>
     </table>
   </div>
   <div class="card">
@@ -441,8 +452,8 @@ function renderTray(){
   $('lanes').style.cursor = S.tool === 'split' ? 'crosshair' : S.pan ? 'grab' : '';
 }
 function renderHeaders(){
-  const box = $('headers');
-  box.querySelectorAll('.hrow,.gbar').forEach(e => e.remove());
+  const box = $('hrows');
+  box.innerHTML = '';
   GROUPS.forEach(g => {
     const gt = tracks.filter(t => g.kinds.includes(t.kind));
     if (!gt.length) return;
@@ -781,10 +792,52 @@ window.addEventListener('keydown', ev => {
   else if ((k === 'delete' || k === 'backspace') && clips.some(c => c.selected)){ $('btnTrash').click(); }
 });
 
+/* ---------- lane-area resize (standard workspace bottom-edge handle) --
+   Drag up/down to add or remove empty viewing space; track sizes stay
+   the same. Double-click resets to auto height. (The real port keeps
+   app.js's saveWorkspaceLayout() call, skipped here — nothing persists.) */
+(function bindViewResize(){
+  const vp = $('scroll');
+  const handle = vp && vp.parentElement.querySelector(':scope > .workspace-resize-handle');
+  if (!handle || !vp) return;
+  let act = null;
+  const move = ev => {
+    if (!act || ev.pointerId !== act.id) return;
+    const max = Math.max(80, window.innerHeight * .85);
+    vp.style.height = Math.min(max, Math.max(80, act.h + ev.clientY - act.y)) + 'px';
+  };
+  const done = ev => {
+    if (!act || ev.pointerId !== act.id) return;
+    act = null; handle.classList.remove('resizing');
+    try { handle.releasePointerCapture(ev.pointerId); } catch(_){}
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', done);
+    window.removeEventListener('pointercancel', done);
+  };
+  handle.addEventListener('pointerdown', ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    act = { id: ev.pointerId, y: ev.clientY, h: vp.getBoundingClientRect().height };
+    handle.classList.add('resizing');
+    document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+    try { handle.setPointerCapture(ev.pointerId); } catch(_){}
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', done);
+    window.addEventListener('pointercancel', done);
+  });
+  handle.addEventListener('dblclick', () => {
+    vp.style.height = ''; status('timeline viewing area: auto height');
+  });
+  // headers live outside the lane scroller, so ride them along vertically
+  vp.addEventListener('scroll', () => {
+    $('hrows').style.transform = `translateY(${-vp.scrollTop}px)`;
+  });
+})();
+
 /* ---------- go ---------- */
 S.pps = Math.max(1.2, (($('scroll').clientWidth || 900) - 40) / end());
 render();
-status('Mixed V tracks · top lane = top layer · Alt+scroll on a header resizes that lane');
+status('Mixed V tracks · top lane = top layer · Alt+scroll = lane height · bottom grip = viewing space');
 </script>
 </body>
 </html>
