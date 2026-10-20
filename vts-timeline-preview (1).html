@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VTS Timeline — kconcat-style redesign (preview)</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1c232c; --line: #2a3340;
+    --text: #e6edf3; --dim: #8b98a9; --accent: #3fb950; --accent-2: #58a6ff;
+    --danger: #f85149;
+    --lane: #0d1218; --lane-alt: #0b1017; --ruler: #0b0f14;
+    --grid: rgba(255,255,255,.09);
+    --v-mark: #3373d1; --v-well: #142238;
+    --a-mark: #34c46f; --a-well: #12301c;
+    --t-mark: #cf5a99; --t-well: #321c29;
+    --i-mark: #9f63d6; --i-well: #2a1e34;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 20px 22px 60px; }
+  a { color: var(--accent-2); }
+  .page-head { max-width: 1180px; margin: 0 auto 14px; }
+  .page-head h1 { font-size: 20px; margin: 0 0 4px; }
+  .page-head p { margin: 4px 0; color: var(--dim); font-size: 13px; max-width: 900px; }
+  .page-head code { color: var(--text); background: var(--panel-2); padding: 0 5px; border-radius: 4px; font-size: 12px; }
+  .badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .badge { font-size: 11px; font-weight: 700; letter-spacing: .4px; text-transform: uppercase;
+    border: 1px solid var(--line); border-radius: 20px; padding: 2px 10px; color: var(--dim); }
+  .badge.new { color: #7ee787; border-color: #23863688; }
+  .badge.gone { color: #ffa198; border-color: #f8514966; }
+
+  /* ============ the redesigned timeline panel ============ */
+  .tl-panel { max-width: 1180px; margin: 0 auto; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+
+  /* tabs (kconcat tabs.slint: one per sequence, above the tray) */
+  .tabs { display: flex; align-items: flex-end; gap: 2px; height: 32px;
+    background: #10151c; border-bottom: 1px solid var(--line); padding: 0 8px; }
+  .tab { border: 0; background: var(--panel-2); color: var(--text); font-size: 13px; font-weight: 600;
+    border-radius: 6px 6px 0 0; padding: 7px 14px 6px; cursor: pointer; }
+  .tab-add { border: 0; background: none; color: var(--dim); width: 24px; height: 24px; margin-bottom: 4px;
+    border-radius: 5px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .tab-add:hover { background: var(--panel-2); color: var(--text); }
+  .tab-add svg { width: 13px; height: 13px; }
+
+  /* tray (kconcat tray.slint: 40px, 4px gaps, 18px hairline dividers) */
+  .tray { display: flex; align-items: center; gap: 4px; height: 40px; padding: 7px 8px;
+    background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+  .tray::-webkit-scrollbar { display: none; }
+  .tray > * { flex: none; }
+  .tb { width: 26px; height: 26px; padding: 0; border: 1px solid transparent; border-radius: 5px;
+    background: transparent; color: var(--text); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; }
+  .tb svg { width: 16px; height: 16px; display: block; }
+  .tb:hover:not(:disabled) { background: #2a3340; }
+  .tb:disabled { opacity: .35; cursor: default; }
+  .tb.on { background: #1c2f4d; border-color: #58a6ff66; color: #fff; }
+  .tb.danger:not(:disabled):hover { background: #f8514926; color: #ffa198; }
+  .tb.narrow { width: 16px; }
+  .tb.narrow svg { width: 11px; height: 11px; }
+  .tdiv { width: 9px; height: 26px; position: relative; }
+  .tdiv::after { content: ""; position: absolute; left: 4px; top: 4px; width: 1px; height: 18px; background: var(--line); }
+  .selcount { min-width: 16px; text-align: center; color: var(--accent-2); font-size: 12px; font-weight: 700; }
+  .pill { height: 24px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel-2);
+    color: var(--dim); font-size: 12px; padding: 0 8px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+  .pill:hover { border-color: #3d4a5c; color: var(--text); }
+  .pill.on { color: var(--text); font-weight: 600; }
+  .pill.on.p-cap { border-color: var(--t-mark); background: #cf5a992e; }
+  .pill.on.p-sil { border-color: #f97316; background: #f973162e; }
+  .pill.on.p-oth { border-color: #6e7681; background: #6e76812e; }
+  .pill.warn.on { border-color: var(--danger); background: #f8514926; color: #ffa198; }
+  .spacer { flex: 1 1 auto !important; }
+
+  /* popup menus (add-track, more) */
+  .pop { position: absolute; z-index: 50; min-width: 190px; background: var(--panel-2);
+    border: 1px solid #3d4a5c; border-radius: 8px; box-shadow: 0 12px 28px rgba(0,0,0,.5); padding: 4px; }
+  .pop button { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: none;
+    color: var(--text); font-size: 13px; text-align: left; padding: 6px 10px; border-radius: 5px; cursor: pointer; }
+  .pop button:hover { background: #1f6feb; color: #fff; }
+  .pop button .tick { width: 16px; color: var(--accent-2); font-weight: 700; }
+  .pop button:hover .tick { color: #fff; }
+  .pop button svg { width: 13px; height: 13px; flex: none; }
+  .pop button:disabled { opacity: .4; cursor: default; }
+  .pop button.del:not(:disabled):hover { background: #f8514933; }
+
+  /* lane grid: fixed header column + scrolling lanes */
+  .grid { display: flex; align-items: stretch; background: var(--lane); }
+  .headers { flex: none; width: 152px; border-right: 1px solid var(--line); background: var(--panel); }
+  .hcorner { height: 28px; background: var(--ruler); border-bottom: 1px solid var(--line); }
+  .gbar { height: 18px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
+    font-size: 10px; font-weight: 700; letter-spacing: .8px; color: var(--dim);
+    background: #10151c; border-bottom: 1px solid var(--line); }
+  .gbar .dot { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+  .gbar-lane { height: 18px; background: #10151c; border-bottom: 1px solid var(--line); }
+  .hrow { display: flex; align-items: flex-start; gap: 1px; padding: 6px 4px 0 6px; border-bottom: 1px solid var(--line); }
+  .hrow .kind { font-size: 11px; font-weight: 700; color: var(--dim); align-self: center; margin: 0 2px; }
+  .hbtn { width: 22px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: 4px;
+    background: transparent; color: var(--text); cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; }
+  .hbtn svg { width: 12px; height: 12px; display: block; }
+  .hbtn:hover:not(:disabled) { background: #2a3340; }
+  .hbtn:disabled { opacity: .3; cursor: default; }
+  .hbtn.on { background: #1c2f4d; border-color: #58a6ff66; color: #fff; }
+  .hsp { flex: 1; }
+
+  .lanes-scroll { flex: 1; min-width: 0; overflow-x: auto; position: relative; }
+  .lanes { position: relative; }
+  .ruler { position: relative; height: 28px; background: var(--ruler);
+    border-bottom: 1px solid var(--line); overflow: hidden; cursor: pointer; }
+  .tick { position: absolute; top: 0; height: 22px; border-left: 1px solid #3d4a5c;
+    color: var(--dim); font-size: 10px; padding: 3px 0 0 5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .secstrip { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; }
+  .sec { position: absolute; bottom: 0; height: 6px; border-radius: 1px; cursor: pointer; border: 0; padding: 0; }
+  .sec.k0 { background: #cf5a99bf; } .sec.k1 { background: #f97316cc; } .sec.k2 { background: #6e76818c; }
+  .sec.off { opacity: .12; }
+  .sec.sel { outline: 1px solid #fff; background: var(--danger); }
+  .row { position: relative; border-bottom: 1px solid var(--line); }
+  .row.b0 { background: var(--lane); } .row.b1 { background: var(--lane-alt); }
+  .row.locked { background-image: repeating-linear-gradient(-45deg, transparent 0 10px, rgba(255,255,255,.018) 10px 20px); }
+  .gridline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--grid); pointer-events: none; }
+  .clip { position: absolute; border-radius: 5px; overflow: hidden; cursor: grab; }
+  .clip .chead { height: 17px; display: flex; align-items: center; gap: 5px; padding: 0 7px;
+    font-size: 11px; color: #fff; white-space: nowrap; overflow: hidden; }
+  .clip .chead svg { width: 10px; height: 10px; flex: none; }
+  .clip .cbody { position: absolute; left: 0; right: 0; bottom: 0; }
+  .clip.k-video { background: var(--v-well); } .clip.k-video .chead { background: var(--v-mark); }
+  .clip.k-audio { background: var(--a-well); } .clip.k-audio .chead { background: var(--a-mark); }
+  .clip.k-caption { background: var(--t-well); z-index: 2; } .clip.k-caption .chead { background: var(--t-mark); }
+  .clip.k-image { background: var(--i-well); } .clip.k-image .chead { background: var(--i-mark); }
+  .clip .fx { margin-left: auto; background: rgba(0,0,0,.25); border-radius: 3px; font-size: 9px; padding: 0 3px; flex: none; }
+  .clip .muteflag { color: #ffd54a; font-size: 10px; flex: none; }
+  .wave { position: absolute; inset: 0;
+    background: repeating-linear-gradient(90deg, rgba(167,240,194,.55) 0 2px, transparent 2px 5px);
+    -webkit-mask: linear-gradient(#000,#000); opacity: .8; }
+  .clip.k-video .wave { background: repeating-linear-gradient(90deg, rgba(169,200,245,.5) 0 2px, transparent 2px 6px); }
+  .frames { position: absolute; inset: 0;
+    background: repeating-linear-gradient(90deg, rgba(255,255,255,.10) 0 34px, rgba(255,255,255,.03) 34px 68px); }
+  .captext { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #ffe4b2b8; font-size: 11px; font-style: italic; white-space: nowrap; overflow: hidden; padding: 0 8px; }
+  .clip .outline { position: absolute; inset: 0; border-radius: 5px; pointer-events: none; border: 1px solid rgba(255,255,255,.14); }
+  .clip.selected .outline { border: 2px solid var(--accent); }
+  .clip.mutedlane { filter: saturate(.4) brightness(.75); }
+  .clip.hiddenlane { opacity: .25; }
+  .blade { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--accent-2); z-index: 5; pointer-events: none; }
+  .playhead { position: absolute; top: 0; bottom: 0; width: 1px; background: #f0f6fc; z-index: 6; pointer-events: none; }
+  .playhead::before { content: ""; position: absolute; top: 0; left: -5px;
+    border: 5.5px solid transparent; border-top: 8px solid #f0f6fc; }
+
+  .statusline { display: flex; align-items: center; gap: 10px; padding: 5px 12px;
+    border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; color: var(--dim); }
+  .statusline .tc { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 7px 12px; font-size: 11.5px; color: var(--dim);
+    border-top: 1px solid var(--line); background: var(--panel); }
+  .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  #toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(20px);
+    background: var(--panel-2); border: 1px solid #3d4a5c; color: var(--text); font-size: 13px;
+    padding: 8px 16px; border-radius: 8px; opacity: 0; pointer-events: none; transition: all .18s; z-index: 99; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ============ mapping notes ============ */
+  .mapping { max-width: 1180px; margin: 22px auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .mapping { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .card h2 { font-size: 13px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .5px; color: var(--accent-2); }
+  .card table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .card td, .card th { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: top; text-align: left; }
+  .card tr:first-child td { border-top: 0; }
+  .card td.k { white-space: nowrap; color: var(--text); font-weight: 600; }
+  .card td .why { color: var(--dim); }
+  .tag { display: inline-block; font-size: 10px; font-weight: 700; border-radius: 4px; padding: 0 5px; margin-right: 4px; }
+  .tag.del { background: #f8514926; color: #ffa198; }
+  .tag.mov { background: #58a6ff26; color: #9ecbff; }
+  .tag.new { background: #3fb95026; color: #7ee787; }
+  .tag.keep { background: #8b98a926; color: var(--dim); }
+  .card code { color: var(--text); background: var(--panel-2); padding: 0 4px; border-radius: 3px; font-size: 11.5px; }
+  kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 5px; font-size: 11px; font-family: inherit; }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>VTS Timeline &mdash; kconcat-style redesign <span style="color:var(--dim);font-weight:400">(interactive preview)</span></h1>
+  <p>This is what the <code>#tlTools</code> rail + <code>.tl-head</code> button row become when rebuilt the way
+  <code>kconcat/src/crates/concat/ui/timeline/tray.slint</code> does it: <b>tabs &rarr; one 40px icon tray &rarr; lane grid</b>
+  with per-lane header switches. Video tracks are <b>mixed media</b> &mdash; video, image and caption clips share them,
+  captions floating above same-track media &mdash; with audio at the bottom; the <b>top lane is the top layer</b>.
+  Try it: zoom buttons, click a clip to select, <b>R</b> for the razor then click a clip to split it,
+  <b>Ctrl+K</b> splits at the playhead, <b>H</b> pans, <b>T</b> drops a caption on the topmost video track,
+  <b>Alt+scroll</b> over a lane header resizes it,
+  pills filter the section strip, the <b>+</b> menu adds tracks, lane headers lock / hide / mute.</p>
+  <div class="badges">
+    <span class="badge">tabs + tray + grid</span>
+    <span class="badge new">+ mixed V tracks &middot; V/A groups &middot; pills &middot; magnetic</span>
+    <span class="badge gone">&minus; tool rail &middot; caption lanes &middot; text/zoom/mute tools</span>
+  </div>
+</div>
+
+<!-- ================= THE REDESIGNED TIMELINE ================= -->
+<section class="tl-panel" aria-label="Timeline (redesign preview)">
+
+  <div class="tabs" role="tablist" aria-label="Timelines">
+    <button class="tab" role="tab" aria-selected="true">Timeline 01</button>
+    <button class="tab-add" id="tabAdd" title="New timeline (kconcat tabs.slint — one tab per sequence)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h14M12 5v14"/></svg>
+    </button>
+  </div>
+
+  <div class="tray" id="tray" role="toolbar" aria-label="Timeline tools">
+    <button class="tb" id="btnAdd" title="Add track"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnUndo" title="Undo (Ctrl+Z)"></button>
+    <button class="tb" id="btnRedo" title="Redo (Ctrl+Shift+Z)"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnSplit" title="Split at the playhead (Ctrl+K)"></button>
+    <button class="tb" id="btnRazor" title="Razor: click a clip to split it there (R)"></button>
+    <button class="tb" id="btnMerge" title="Merge selected — needs 2+ adjacent clips on one lane (not in VTS yet)" disabled></button>
+    <button class="tb danger" id="btnTrash" title="Delete selected (Del)"></button>
+    <span class="selcount" id="selCount" hidden></span>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnPan" title="Pan: drag to scroll the timeline (H)"></button>
+    <button class="tb" id="btnTrimFollow" title="Trim follow: the playhead rides a clip edge while it is dragged (not in VTS yet)" disabled></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnSnap" title="Snap to edges"></button>
+    <button class="tb" id="btnMagnet" title="Magnetic: deletes and trims close the gap"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnAddCap" title="Add a caption at the playhead, on the topmost video track (T)"></button>
+    <span class="tdiv"></span>
+    <button class="pill on p-cap" data-pill="caption" title="Show caption sections"><span class="dot" style="background:#cf5a99"></span>caption</button>
+    <button class="pill on p-sil" data-pill="silence" title="Show silence sections"><span class="dot" style="background:#f97316"></span>silence</button>
+    <button class="pill on p-oth" data-pill="other" title="Show other sections"><span class="dot" style="background:#6e7681"></span>other</button>
+    <button class="pill p-sil" id="pillAllSil" title="Select every silence section"><span class="dot" style="background:#f97316"></span>all silence</button>
+    <button class="pill warn on" id="pillRemove" hidden title="Remove the selected sections">remove selected</button>
+    <span class="spacer"></span>
+    <button class="tb" id="btnFit" title="Zoom to fit"></button>
+    <button class="tb" id="btnZout" title="Zoom out"></button>
+    <button class="tb" id="btnZin" title="Zoom in"></button>
+  </div>
+
+  <div class="grid">
+    <div class="headers" id="headers"><div class="hcorner"></div></div>
+    <div class="lanes-scroll" id="scroll"><div class="lanes" id="lanes"></div></div>
+  </div>
+
+  <div class="statusline"><span id="status">click = select + seek &middot; shift = add &middot; drag empty lane with pan on to scroll &middot; ctrl+wheel = zoom &middot; alt+wheel on a header = lane height</span><span class="tc" id="tc"></span></div>
+  <div class="legend">
+    <span><i class="sw" style="background:#3373d1"></i>video</span>
+    <span><i class="sw" style="background:#9f63d6"></i>image / overlay</span>
+    <span><i class="sw" style="background:#cf5a99"></i>caption (floats over video)</span>
+    <span><i class="sw" style="background:#34c46f"></i>audio</span>
+    <span><i class="sw" style="background:#f97316"></i>silence section</span>
+    <span class="dim">top lane = top layer &middot; A lanes mix &middot; gaps export black</span>
+  </div>
+</section>
+
+<!-- ================= WHAT CHANGED ================= -->
+<div class="mapping">
+  <div class="card">
+    <h2>#tlTools rail &rarr; tray (6 tools)</h2>
+    <table>
+      <tr><td class="k">select (V)</td><td><span class="tag mov">moved</span>No button at all &mdash; select is the default mode, like kconcat. Toggling the razor off, or <kbd>V</kbd>, returns to it.</td></tr>
+      <tr><td class="k">razor (R)</td><td><span class="tag mov">moved</span>Becomes a tray toggle with the kconcat blade line (accent hairline where the cut lands). Shortcut stays <kbd>R</kbd> (kconcat uses <kbd>B</kbd>).</td></tr>
+      <tr><td class="k">text (T)</td><td><span class="tag del">deleted</span>No click-on-timeline caption tool &mdash; kconcat has none. Replaced by <b>+ caption at playhead</b> (<kbd>T</kbd>), dropped on the topmost video track.</td></tr>
+      <tr><td class="k">hand (H)</td><td><span class="tag mov">moved</span>Same pan toggle, now in the tray next to trim-follow.</td></tr>
+      <tr><td class="k">zoom (Z)</td><td><span class="tag del">deleted</span>kconcat has no zoom tool: fit / &minus; / + buttons plus <kbd>Ctrl</kbd>+wheel cover it. Try them above.</td></tr>
+      <tr><td class="k">mute (M)</td><td><span class="tag del">deleted</span>Click-a-clip-to-mute is gone. Audio lane headers get a <b>mute switch</b>; <kbd>M</kbd> mutes an audio lane, or toggles output on a video lane.</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2>.tl-head row &rarr; tray + headers</h2>
+    <table>
+      <tr><td class="k">zoom &minus; / + / fit</td><td><span class="tag mov">moved</span>Icon buttons at the tray&rsquo;s far end (kconcat&rsquo;s view-controls spot).</td></tr>
+      <tr><td class="k">undo / redo</td><td><span class="tag mov">moved</span>Icon buttons; greyed when history has nothing that way.</td></tr>
+      <tr><td class="k">copy / cut / paste</td><td><span class="tag del">deleted</span>Already in VTS&rsquo;s Edit menu &mdash; kconcat keeps them out of the tray.</td></tr>
+      <tr><td class="k">split</td><td><span class="tag mov">moved</span>Split-at-playhead icon (<kbd>Ctrl</kbd>+<kbd>K</kbd> kept).</td></tr>
+      <tr><td class="k">delete / ripple</td><td><span class="tag mov">moved</span>One red trash icon. Ripple-delete becomes the <b>magnetic toggle</b>: when on, deletes close the gap (kconcat&rsquo;s rule).</td></tr>
+      <tr><td class="k">+ caption / + lane / + track</td><td><span class="tag mov">moved</span>Tray&rsquo;s <b>+</b> menu has just <b>Add video track</b> / <b>Add audio track</b> (new V above the V stack, new A at the bottom). There are no caption lanes: <b>+ caption</b> drops a floating caption on the topmost video track. Auto-caption stays where it already is (no tray button).</td></tr>
+      <tr><td class="k">snap &#9745;</td><td><span class="tag mov">moved</span>Magnet toggle beside magnetic.</td></tr>
+      <tr><td class="k">status text</td><td><span class="tag keep">kept</span>Slim status line under the lanes.</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2>New in this redesign</h2>
+    <table>
+      <tr><td class="k">mixed V tracks</td><td><span class="tag new">new</span>Video tracks hold <b>video + image + caption clips mixed together</b> &mdash; a caption is just another media clip. Captions are transparent overlays, so they <b>float above</b> same-track media instead of colliding with it. No T lanes anywhere.</td></tr>
+      <tr><td class="k">V / A groups</td><td><span class="tag new">new</span>Premiere-style: just two groups &mdash; video on top, audio at the bottom. <b>Top lane is the top layer</b>: V2 above V1, A1 above A2.</td></tr>
+      <tr><td class="k">lane headers</td><td><span class="tag new">new</span>Premiere-style <b>typed</b> headers: lock, output (eye) on video lanes, <b>mute on audio lanes</b>, kind letter, &middot;&middot;&middot; menu with Delete &mdash; greyed on the last lane standing (<code>track-header.slint</code>). No height button: <b>Alt+scroll</b> over a header resizes that lane, double-click resets to auto.</td></tr>
+      <tr><td class="k">tabs strip</td><td><span class="tag new">new</span>One tab per sequence above the tray (<code>tabs.slint</code>). Starts with a single &ldquo;Timeline 01&rdquo;.</td></tr>
+      <tr><td class="k">section pills</td><td><span class="tag new">new</span>caption / silence / other / all-silence / remove-selected move up from the List panel onto the tray, wired to the same filters. (Moving to a dedicated Sections panel next.)</td></tr>
+      <tr><td class="k">section strip</td><td><span class="tag new">new</span>6px bars along the ruler&rsquo;s foot; click toggles selection for removal.</td></tr>
+      <tr><td class="k">merge (disabled)</td><td><span class="tag new">new</span>Greyed with the reason in its tooltip &mdash; kconcat&rsquo;s rule: a blocked button says <span class="why">why</span>.</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2>Shortcuts after the change</h2>
+    <table>
+      <tr><td class="k"><kbd>V</kbd> <kbd>R</kbd> <kbd>H</kbd></td><td>select / razor / pan &mdash; unchanged.</td></tr>
+      <tr><td class="k"><kbd>T</kbd></td><td>Was the caption <i>tool</i>; now <b>adds a caption at the playhead</b> on the topmost video track.</td></tr>
+      <tr><td class="k"><kbd>M</kbd></td><td>Was the mute <i>tool</i>; now <b>mutes an audio lane</b>, or toggles <b>output</b> on a video lane.</td></tr>
+      <tr><td class="k"><kbd>Alt</kbd>+scroll</td><td>Over a lane header: resize that lane (24&ndash;140px). Double-click the header resets it to auto.</td></tr>
+      <tr><td class="k"><kbd>Z</kbd></td><td>Zoom tool deleted &mdash; key freed.</td></tr>
+      <tr><td class="k"><kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>Del</kbd></td><td>split at playhead / delete &mdash; unchanged. Magnetic toggle replaces <kbd>Shift</kbd>+<kbd>Del</kbd>.</td></tr>
+    </table>
+    <p style="color:var(--dim);font-size:12px;margin:10px 0 0">Files this touches when applied: <code>static/index.html</code> (tl-head, tlTools, trackLabels), <code>static/style.css</code>, <code>static/timeline.js</code> + <code>static/timeline-model.js</code> (tool modes, header switches, mixed V tracks, magnetic delete). List panel, Text panel and exporter stay untouched.</p>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ---------- icons (Lucide-style, 24-grid, like kconcat icons.slint) ---------- */
+const P = {
+  plus: '<path d="M5 12h14M12 5v14"/>',
+  minus: '<path d="M5 12h14"/>',
+  undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/>',
+  redo: '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13"/>',
+  split: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12"/>',
+  razor: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M12 7v10"/>',
+  merge: '<path d="m8 6 4-4 4 4"/><path d="M12 2v10.3a4 4 0 0 1-1.172 2.872L4 22"/><path d="m20 22-5-5"/>',
+  trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6M14 11v6"/>',
+  hand: '<path d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20"/>',
+  trimfollow: '<path d="M9 3v18"/><path d="M9 12h10M15 8l4 4-4 4"/>',
+  magnet: '<path d="m6 15-4-4 6.75-6.77a7.79 7.79 0 0 1 11 11L13 22l-4-4 6.39-6.36a2.14 2.14 0 0 0-3-3L6 15"/><path d="m5 8 4 4M12 15l4 4"/>',
+  magnetic: '<path d="m7 15 5 5 5-5M7 9l5-5 5 5"/>',
+  type: '<path d="M4 7V5h16v2M12 5v14M9 19h6"/>',
+  fit: '<path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+  eyeoff: '<path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13.2 13.2 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61"/><path d="m2 2 20 20"/>',
+  vol: '<path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+  volx: '<path d="M11 5 6 9H2v6h4l5 4V5Z"/><path d="m22 9-6 6M16 9l6 6"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  unlock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>',
+  more: '<circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none"/>',
+  film: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/>',
+  music: '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+};
+const icon = (n, sw) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${sw||2}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
+const set = (id, n, sw) => document.getElementById(id).innerHTML = icon(n, sw);
+set('btnAdd','plus',2.2); set('btnUndo','undo'); set('btnRedo','redo'); set('btnSplit','split');
+set('btnRazor','razor'); set('btnMerge','merge'); set('btnTrash','trash'); set('btnPan','hand');
+set('btnTrimFollow','trimfollow'); set('btnSnap','magnet'); set('btnMagnet','magnetic');
+set('btnAddCap','type'); set('btnFit','fit'); set('btnZout','minus',2.2); set('btnZin','plus',2.2);
+
+/* ---------- mock model: mixed V tracks, captions float above ---------- */
+let tracks = [
+  { id:'v2', kind:'V', h:null, locked:false, visible:true, muted:false },
+  { id:'v1', kind:'V', h:null, locked:false, visible:true, muted:false },
+  { id:'a1', kind:'A', h:null, locked:false, visible:true, muted:false },
+];
+let clips = [
+  { id:'c1', name:'sample.mp4', kind:'video', track:'v1', start:2, dur:34, selected:false, fx:true },
+  { id:'c2', name:'sample.mp4 (2)', kind:'video', track:'v1', start:38, dur:30, selected:true },
+  { id:'c9', name:'nota bene', kind:'caption', track:'v1', start:69, dur:9, selected:false },
+  { id:'c6', name:'hello world', kind:'caption', track:'v2', start:3, dur:6, selected:false },
+  { id:'c7', name:'this is a caption', kind:'caption', track:'v2', start:12, dur:8, selected:false },
+  { id:'c3', name:'broll-beach.mp4', kind:'image', track:'v2', start:20, dur:18, selected:true },
+  { id:'c8', name:'trim the silence', kind:'caption', track:'v2', start:40, dur:7, selected:false },
+  { id:'c4', name:'sample.mp4 audio', kind:'audio', track:'a1', start:2, dur:34, selected:false },
+  { id:'c5', name:'sample.mp4 audio (2)', kind:'audio', track:'a1', start:38, dur:30, selected:false },
+];
+let sections = [
+  { start:2, dur:10, k:0, sel:false }, { start:12, dur:4, k:1, sel:false },
+  { start:16, dur:9, k:0, sel:false }, { start:25, dur:6, k:2, sel:false },
+  { start:31, dur:5, k:1, sel:false }, { start:36, dur:12, k:0, sel:false },
+  { start:48, dur:6, k:1, sel:false }, { start:54, dur:14, k:0, sel:false },
+];
+// Just two groups. A video track is mixed media — video, image and caption
+// clips share it — and captions float above same-track media (z-index),
+// because a transparent overlay never collides with the picture under it.
+const GROUPS = [
+  { label:'Video', kinds:['V'], color:'#3373d1' },
+  { label:'Audio', kinds:['A'], color:'#34c46f' },
+];
+const S = { pps: 8, playhead: 26, tool:'select', pan:false, snap:true, magnetic:false,
+  filters:{ caption:true, silence:true, other:true } };
+const undoStack = [], redoStack = [];
+const $ = id => document.getElementById(id);
+const trackById = id => tracks.find(t => t.id === id);
+// Premiere numbering: video stacks bottom-up (V1 at the foot), audio
+// top-down (A1 first). Position = layer.
+const trackName = t => {
+  const same = tracks.filter(x => x.kind === t.kind);
+  const i = same.indexOf(t);
+  const n = t.kind === 'A' ? i + 1 : same.length - i;
+  return t.kind + n;
+};
+// Lane height: explicit pixels once Alt+scroll sets one, else the auto
+// height for the kind. (No height button anymore — the shortcut owns it.)
+const rowH = t => t.h != null ? t.h : (t.kind === 'V' ? 56 : 44);
+const end = () => Math.max(70, ...clips.map(c => c.start + c.dur), ...sections.map(s => s.start + s.dur)) + 4;
+const fmt = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+const fmtTC = s => { const f = Math.floor((s%1)*30); return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(Math.floor(s%60)).padStart(2,'0')}:${String(f).padStart(2,'0')}`; };
+
+let toastT;
+function toast(msg){ const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200); }
+function status(msg){ $('status').textContent = msg; }
+function snap(arr){ return JSON.parse(JSON.stringify(arr)); }
+function commit(){ // snapshot for undo — call BEFORE mutating, then render()
+  undoStack.push({ clips: snap(clips), tracks: snap(tracks), sections: snap(sections) });
+  if (undoStack.length > 60) undoStack.shift();
+  redoStack.length = 0;
+}
+function doUndo(){
+  if (!undoStack.length) return;
+  redoStack.push({ clips: snap(clips), tracks: snap(tracks), sections: snap(sections) });
+  const s = undoStack.pop(); clips = s.clips; tracks = s.tracks; sections = s.sections;
+  render(); status('undo');
+}
+function doRedo(){
+  if (!redoStack.length) return;
+  undoStack.push({ clips: snap(clips), tracks: snap(tracks), sections: snap(sections) });
+  const s = redoStack.pop(); clips = s.clips; tracks = s.tracks; sections = s.sections;
+  render(); status('redo');
+}
+
+/* ---------- render ---------- */
+const KIND_ICON = { video:'film', audio:'music', caption:'type', image:'film' };
+function render(){
+  renderHeaders(); renderLanes(); renderTray();
+  $('tc').textContent = `${fmtTC(S.playhead)} / ${fmtTC(end())}`;
+}
+function renderTray(){
+  $('btnUndo').disabled = !undoStack.length;
+  $('btnRedo').disabled = !redoStack.length;
+  $('btnRazor').classList.toggle('on', S.tool === 'split');
+  $('btnPan').classList.toggle('on', S.pan);
+  $('btnSnap').classList.toggle('on', S.snap);
+  $('btnMagnet').classList.toggle('on', S.magnetic);
+  const n = clips.filter(c => c.selected).length;
+  $('btnTrash').disabled = !n;
+  $('selCount').hidden = n < 2; $('selCount').textContent = n;
+  document.querySelectorAll('[data-pill]').forEach(b =>
+    b.classList.toggle('on', !!S.filters[b.dataset.pill]));
+  $('pillRemove').hidden = !sections.some(s => s.sel);
+  $('lanes').style.cursor = S.tool === 'split' ? 'crosshair' : S.pan ? 'grab' : '';
+}
+function renderHeaders(){
+  const box = $('headers');
+  box.querySelectorAll('.hrow,.gbar').forEach(e => e.remove());
+  GROUPS.forEach(g => {
+    const gt = tracks.filter(t => g.kinds.includes(t.kind));
+    if (!gt.length) return;
+    const bar = document.createElement('div');
+    bar.className = 'gbar';
+    bar.innerHTML = `<span class="dot" style="background:${g.color}"></span>${g.label.toUpperCase()}`;
+    box.appendChild(bar);
+    gt.forEach(t => box.appendChild(headerRow(t)));
+  });
+}
+function headerRow(t){
+  const r = document.createElement('div');
+  r.className = 'hrow'; r.style.height = rowH(t) + 'px';
+  // Premiere-style typed headers: lock, output (eye) on video lanes, mute
+  // on audio lanes, kind letter, ···. No height button — Alt+scroll over
+  // the header resizes the lane, double-click resets it to auto.
+  const outBtn = t.kind === 'A'
+    ? `<button class="hbtn ${t.muted ? 'on' : ''}" data-h="mute" title="${t.muted ? 'Unmute' : 'Mute'} lane ${trackName(t)} (M)">${icon(t.muted ? 'volx' : 'vol', 2)}</button>`
+    : `<button class="hbtn ${!t.visible ? 'on' : ''}" data-h="vis" title="${t.visible ? 'Hide' : 'Show'} lane ${trackName(t)}">${icon(t.visible ? 'eye' : 'eyeoff', 2)}</button>`;
+  r.innerHTML =
+    `<button class="hbtn ${t.locked ? 'on' : ''}" data-h="lock" title="${t.locked ? 'Unlock' : 'Lock'} lane ${trackName(t)}">${icon(t.locked ? 'lock' : 'unlock', 2)}</button>` +
+    outBtn +
+    `<span class="kind">${trackName(t)}</span><span class="hsp"></span>` +
+    `<button class="hbtn" data-h="more" title="More actions for lane ${trackName(t)}">${icon('more', 2)}</button>`;
+  r.title = `Alt+scroll: lane height · double-click: auto height (${trackName(t)})`;
+  r.querySelectorAll('.hbtn').forEach(b => b.addEventListener('click', ev => {
+    ev.stopPropagation(); headerAct(t, b.dataset.h, b);
+  }));
+  // Premiere-style lane height: Alt+scroll over the header steps this lane
+  // 24–140px. A view tweak like zoom — deliberately not an undo step.
+  r.addEventListener('wheel', ev => {
+    if (!ev.altKey) return;
+    ev.preventDefault();
+    t.h = Math.min(140, Math.max(24, rowH(t) + (ev.deltaY < 0 ? 4 : -4)));
+    render();
+    status(`lane ${trackName(t)} height ${t.h}px (double-click header for auto)`);
+  }, { passive:false });
+  r.addEventListener('dblclick', ev => {
+    if (ev.target.closest('.hbtn')) return;
+    t.h = null; render(); status(`lane ${trackName(t)} height: auto`);
+  });
+  return r;
+}
+function renderLanes(){
+  const L = $('lanes'), W = Math.ceil(end() * S.pps) + 40;
+  L.style.width = W + 'px';
+  L.innerHTML = '';
+  // ruler
+  const ruler = document.createElement('div');
+  ruler.className = 'ruler'; ruler.style.width = W + 'px';
+  const steps = [0.5,1,2,5,10,15,30,60,120];
+  const step = steps.find(s => s * S.pps >= 70) || 120;
+  let gridHTML = '';
+  for (let t = 0; t <= end(); t += step){
+    const x = Math.round(t * S.pps);
+    ruler.insertAdjacentHTML('beforeend', `<span class="tick" style="left:${x}px">${fmt(t)}</span>`);
+    gridHTML += `<span class="gridline" style="left:${x}px"></span>`;
+  }
+  const strip = document.createElement('div'); strip.className = 'secstrip';
+  const KN = ['caption','silence','other'];
+  sections.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = `sec k${s.k}${s.sel ? ' sel' : ''}${S.filters[KN[s.k]] ? '' : ' off'}`;
+    b.style.left = (s.start * S.pps) + 'px'; b.style.width = Math.max(2, s.dur * S.pps) + 'px';
+    b.title = `${KN[s.k]} ${fmt(s.start)}–${fmt(s.start + s.dur)} — click to ${s.sel ? 'unselect' : 'select for removal'}`;
+    b.addEventListener('click', ev => { ev.stopPropagation(); s.sel = !s.sel; render();
+      status(s.sel ? 'section marked for removal' : 'section unmarked'); });
+    strip.appendChild(b);
+  });
+  ruler.appendChild(strip);
+  L.appendChild(ruler);
+  // rows + clips, grouped Premiere-style (video / audio)
+  GROUPS.forEach(g => {
+    const gt = tracks.filter(t => g.kinds.includes(t.kind));
+    if (!gt.length) return;
+    const bar = document.createElement('div');
+    bar.className = 'gbar-lane'; bar.style.width = W + 'px';
+    L.appendChild(bar);
+    gt.forEach(t => {
+      const row = document.createElement('div');
+      row.className = `row b${tracks.indexOf(t) % 2}${t.locked ? ' locked' : ''}`;
+      row.style.cssText += `;width:${W}px;height:${rowH(t)}px`;
+      row.innerHTML = gridHTML;
+      row.addEventListener('mousedown', ev => { if (ev.target === row) lanePress(ev, t); });
+      clips.filter(c => c.track === t.id).forEach(c => row.appendChild(clipEl(c, t)));
+      L.appendChild(row);
+    });
+  });
+  // blade + playhead
+  const blade = document.createElement('div');
+  blade.className = 'blade'; blade.id = 'blade'; blade.hidden = true; L.appendChild(blade);
+  const ph = document.createElement('div');
+  ph.className = 'playhead'; ph.style.left = (S.playhead * S.pps) + 'px';
+  ph.style.height = L.scrollHeight + 'px'; L.appendChild(ph);
+  ruler.addEventListener('mousedown', ev => { if (ev.target === ruler || ev.target.classList.contains('tick')) seekEv(ev); });
+  L.onmousemove = bladeEv; L.onmouseleave = () => { $('blade').hidden = true; };
+}
+function clipEl(c, t){
+  const d = document.createElement('div');
+  d.className = `clip k-${c.kind}${c.selected ? ' selected' : ''}${t.muted ? ' mutedlane' : ''}${!t.visible ? ' hiddenlane' : ''}`;
+  const top = 4, h = Math.max(8, rowH(t) - 10);
+  d.style.cssText = `left:${c.start * S.pps}px;top:${top}px;width:${Math.max(3, c.dur * S.pps)}px;height:${h}px`;
+  let body = '';
+  const bh = Math.max(0, h - 17);
+  if (bh > 4){
+    if (c.kind === 'audio') body = `<div class="cbody" style="height:${bh}px"><div class="wave"></div></div>`;
+    else if (c.kind === 'video') body = `<div class="cbody" style="height:${bh}px"><div class="frames"></div><div class="wave" style="top:auto;height:${Math.min(bh, 12)}px"></div></div>`;
+    else if (c.kind === 'caption' && bh > 10) body = `<div class="cbody" style="height:${bh}px"><div class="captext">“${c.name}”</div></div>`;
+    else if (c.kind === 'image') body = `<div class="cbody" style="height:${bh}px"><div class="frames"></div></div>`;
+  }
+  d.innerHTML = `<div class="chead">${icon(KIND_ICON[c.kind], 2)}<span style="overflow:hidden;text-overflow:ellipsis">${c.name}</span>` +
+    `${c.fx ? '<span class="fx">fx</span>' : ''}</div>${body}<div class="outline"></div>`;
+  d.title = `${c.name} — ${trackName(t)} ${fmt(c.start)}–${fmt(c.start + c.dur)}`;
+  d.addEventListener('mousedown', ev => { ev.stopPropagation(); clipPress(ev, c); });
+  return d;
+}
+
+/* ---------- gestures ---------- */
+function lanesX(ev){
+  const r = $('lanes').getBoundingClientRect();
+  return ev.clientX - r.left;
+}
+function seekEv(ev){
+  if (S.pan || S.tool === 'split') return;
+  S.playhead = Math.max(0, lanesX(ev) / S.pps);
+  clips.forEach(c => c.selected = false);
+  render(); status(`playhead ${fmtTC(S.playhead)}`);
+}
+function lanePress(ev, t){
+  if (S.pan){ startPan(ev); return; }
+  if (S.tool === 'split'){ status('razor: click a clip to split it'); return; }
+  S.playhead = Math.max(0, lanesX(ev) / S.pps);
+  clips.forEach(c => c.selected = false);
+  render();
+}
+function clipPress(ev, c){
+  const t = trackById(c.track);
+  if (S.pan){ startPan(ev); return; }
+  if (t.locked){ status(`lane ${trackName(t)} is locked`); return; }
+  if (S.tool === 'split'){
+    const at = lanesX(ev) / S.pps;
+    if (at <= c.start + 0.05 || at >= c.start + c.dur - 0.05){ status('too close to the edge to split'); return; }
+    const cut = Math.round(at * 30) / 30;
+    const id = 'c' + Math.random().toString(36).slice(2, 7);
+    const i = clips.indexOf(c);
+    commit();
+    clips.splice(i + 1, 0, { ...c, id, start: cut, dur: c.start + c.dur - cut, selected: false });
+    c.dur = cut - c.start; c.selected = false;
+    render(); status(`split ${c.name} at ${fmtTC(cut)}`);
+    return;
+  }
+  if (!ev.shiftKey && !ev.ctrlKey && !ev.metaKey) clips.forEach(x => x.selected = false);
+  c.selected = ev.shiftKey || ev.ctrlKey || ev.metaKey ? !c.selected : true;
+  S.playhead = Math.min(Math.max(S.playhead, c.start), c.start + c.dur);
+  render();
+}
+function bladeEv(ev){
+  const b = $('blade'); if (!b) return;
+  if (S.tool !== 'split'){ b.hidden = true; return; }
+  const t = Math.round(lanesX(ev) / S.pps * 30) / 30; // kconcat: the frame under the pointer
+  b.hidden = false; b.style.left = (t * S.pps) + 'px';
+}
+function startPan(ev){
+  const sc = $('scroll'), x0 = ev.clientX, l0 = sc.scrollLeft;
+  $('lanes').style.cursor = 'grabbing';
+  const mv = e => { sc.scrollLeft = l0 - (e.clientX - x0); };
+  const up = () => { window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); renderTray(); };
+  window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
+}
+$('scroll').addEventListener('wheel', ev => {
+  if (ev.ctrlKey || ev.metaKey){
+    ev.preventDefault();
+    zoomBy(Math.pow(1.0015, -ev.deltaY));
+  }
+}, { passive: false });
+
+/* ---------- header actions ---------- */
+function headerAct(t, act, btn){
+  if (act === 'lock'){ t.locked = !t.locked; render(); status(`lane ${trackName(t)} ${t.locked ? 'locked' : 'unlocked'}`); }
+  if (act === 'vis'){ t.visible = !t.visible; render(); status(`lane ${trackName(t)} ${t.visible ? 'shown' : 'hidden'}`); }
+  if (act === 'mute'){ t.muted = !t.muted; render(); status(`lane ${trackName(t)} ${t.muted ? 'muted' : 'unmuted'}`); }
+  if (act === 'more') openMoreMenu(t, btn);
+}
+
+/* ---------- popups ---------- */
+let popEl = null;
+function closePop(){ if (popEl){ popEl.remove(); popEl = null; } }
+document.addEventListener('click', ev => { if (popEl && !popEl.contains(ev.target)) closePop(); });
+function openPop(anchor, build, align){
+  closePop();
+  popEl = document.createElement('div'); popEl.className = 'pop';
+  build(popEl);
+  document.body.appendChild(popEl);
+  const r = anchor.getBoundingClientRect();
+  popEl.style.top = (r.bottom + 6 + scrollY) + 'px';
+  // the ··· menu hangs from the button's trailing edge (kconcat MoreMenu),
+  // so it opens over the header column instead of over the lanes
+  if (align === 'right') popEl.style.left = Math.max(8, r.right + scrollX - popEl.offsetWidth) + 'px';
+  else popEl.style.left = Math.min(r.left + scrollX, innerWidth - 210) + 'px';
+}
+$('btnAdd').addEventListener('click', ev => { ev.stopPropagation(); openPop(ev.currentTarget, box => {
+  const items = [
+    ['Add video track', () => addTrack('V')],
+    ['Add audio track', () => addTrack('A')],
+  ];
+  items.forEach(([label, fn]) => {
+    const b = document.createElement('button'); b.textContent = label;
+    b.addEventListener('click', () => { closePop(); fn(); });
+    box.appendChild(b);
+  });
+});});
+function addTrack(kind){
+  const t = { id: 't' + Math.random().toString(36).slice(2, 7), kind, h:null, locked:false, visible:true, muted:false };
+  commit();
+  if (kind === 'V'){
+    // a new V goes above the V stack (top lane = top layer)
+    let at = tracks.findIndex(x => x.kind === 'V');
+    if (at < 0) at = 0;
+    tracks.splice(at, 0, t);
+  } else {
+    // a new A goes below the last A, at the very bottom
+    let at = -1;
+    tracks.forEach((x, i) => { if (x.kind === 'A') at = i; });
+    tracks.splice(at < 0 ? tracks.length : at + 1, 0, t);
+  }
+  render(); status(`added ${kind === 'V' ? 'video track' : 'audio track'} (${trackName(t)})`);
+}
+// kconcat MoreMenu: Delete lives behind ···, greyed (not removed) on the
+// last lane standing, so the menu reads the same on every row.
+function openMoreMenu(t, anchor){
+  openPop(anchor, box => {
+    const last = tracks.length < 2;
+    const b = document.createElement('button');
+    b.className = 'del';
+    b.disabled = last;
+    b.title = last ? 'Cannot delete the last lane standing' : `Delete lane ${trackName(t)}`;
+    b.innerHTML = `${icon('trash', 2)}<span>Delete</span>`;
+    b.addEventListener('click', () => {
+      closePop();
+      const name = trackName(t);
+      const victims = clips.filter(c => c.track === t.id).length;
+      commit();
+      clips = clips.filter(c => c.track !== t.id);
+      tracks = tracks.filter(x => x !== t);
+      render(); status(`deleted lane ${name} (${victims} clip${victims === 1 ? '' : 's'})`);
+    });
+    box.appendChild(b);
+  }, 'right');
+}
+
+/* ---------- tray wiring ---------- */
+function zoomBy(f){
+  S.pps = Math.min(80, Math.max(1.2, S.pps * f));
+  render();
+}
+$('btnZin').addEventListener('click', () => zoomBy(1.4));
+$('btnZout').addEventListener('click', () => zoomBy(1 / 1.4));
+$('btnFit').addEventListener('click', () => {
+  S.pps = Math.max(1.2, ($('scroll').clientWidth - 40) / end());
+  render(); status('zoom to fit');
+});
+$('btnUndo').addEventListener('click', doUndo);
+$('btnRedo').addEventListener('click', doRedo);
+$('btnRazor').addEventListener('click', () => {
+  S.tool = S.tool === 'split' ? 'select' : 'split';
+  render(); status(S.tool === 'split' ? 'razor: click a clip to split it' : 'select / move');
+});
+$('btnPan').addEventListener('click', () => { S.pan = !S.pan; render(); status(S.pan ? 'pan: drag to scroll' : 'select / move'); });
+$('btnSnap').addEventListener('click', () => { S.snap = !S.snap; render(); status(`snap ${S.snap ? 'on' : 'off'}`); });
+$('btnMagnet').addEventListener('click', () => { S.magnetic = !S.magnetic; render();
+  status(S.magnetic ? 'magnetic: deletes close the gap' : 'magnetic off: deletes leave a gap'); });
+$('btnSplit').addEventListener('click', splitAtPlayhead);
+function splitAtPlayhead(){
+  const at = S.playhead;
+  const hit = clips.filter(c => at > c.start + 0.05 && at < c.start + c.dur - 0.05 && !trackById(c.track).locked);
+  if (!hit.length){ status('nothing to split at the playhead'); return; }
+  commit();
+  hit.forEach(c => {
+    const id = 'c' + Math.random().toString(36).slice(2, 7);
+    clips.splice(clips.indexOf(c) + 1, 0, { ...c, id, start: at, dur: c.start + c.dur - at, selected: false });
+    c.dur = at - c.start;
+  });
+  render(); status(`split ${hit.length} clip${hit.length === 1 ? '' : 's'} at ${fmtTC(at)}`);
+}
+$('btnTrash').addEventListener('click', () => {
+  const sel = clips.filter(c => c.selected);
+  if (!sel.length) return;
+  commit();
+  clips = clips.filter(c => !c.selected);
+  render(); status(S.magnetic ? `deleted ${sel.length}, gap closed (magnetic)` : `deleted ${sel.length}, gap left`);
+});
+$('btnAddCap').addEventListener('click', addCaptionAtPlayhead);
+function addCaptionAtPlayhead(){
+  // no caption lanes: a caption is media, dropped on the topmost video track
+  let lane = tracks.find(t => t.kind === 'V' && !t.locked);
+  if (!lane && tracks.some(t => t.kind === 'V')){ toast('all video tracks are locked'); return; }
+  commit();
+  if (!lane){ lane = { id: 't' + Math.random().toString(36).slice(2, 7), kind:'V', h:null, locked:false, visible:true, muted:false }; tracks.splice(0, 0, lane); }
+  clips.push({ id: 'c' + Math.random().toString(36).slice(2, 7), name: 'New caption',
+    kind: 'caption', track: lane.id, start: Math.round(S.playhead * 30) / 30, dur: 3, selected: false });
+  render(); status(`caption added on ${trackName(lane)} at ${fmtTC(S.playhead)}`);
+}
+$('tabAdd').addEventListener('click', () => toast('would add “Timeline 02” (kconcat tabs.slint)'));
+document.querySelectorAll('[data-pill]').forEach(b => b.addEventListener('click', () => {
+  S.filters[b.dataset.pill] = !S.filters[b.dataset.pill];
+  render(); status(`${b.dataset.pill} sections ${S.filters[b.dataset.pill] ? 'shown' : 'hidden'}`);
+}));
+$('pillAllSil').addEventListener('click', () => {
+  sections.forEach(s => { if (s.k === 1) s.sel = true; });
+  render(); status('all silence selected');
+});
+$('pillRemove').addEventListener('click', () => {
+  const n = sections.filter(s => s.sel).length;
+  commit();
+  sections = sections.filter(s => !s.sel);
+  render(); status(`removed ${n} section${n === 1 ? '' : 's'}`);
+});
+
+/* ---------- keys (VTS shortcuts, remapped per the table) ---------- */
+window.addEventListener('keydown', ev => {
+  if (ev.target.matches('input, textarea')) return;
+  const k = ev.key.toLowerCase();
+  if ((ev.ctrlKey || ev.metaKey) && k === 'z' && !ev.shiftKey){ ev.preventDefault(); doUndo(); }
+  else if ((ev.ctrlKey || ev.metaKey) && (k === 'y' || (k === 'z' && ev.shiftKey))){ ev.preventDefault(); doRedo(); }
+  else if ((ev.ctrlKey || ev.metaKey) && k === 'k'){ ev.preventDefault(); splitAtPlayhead(); }
+  else if (k === 'v'){ S.tool = 'select'; render(); }
+  else if (k === 'r'){ S.tool = S.tool === 'split' ? 'select' : 'split'; render(); }
+  else if (k === 'h'){ S.pan = !S.pan; render(); }
+  else if (k === 't'){ addCaptionAtPlayhead(); }
+  else if (k === 'm'){
+    const sel = clips.find(c => c.selected);
+    const t = sel ? trackById(sel.track) : tracks[0];
+    if (t.kind === 'A'){ t.muted = !t.muted; render(); status(`lane ${trackName(t)} ${t.muted ? 'muted' : 'unmuted'} (M)`); }
+    else { t.visible = !t.visible; render(); status(`lane ${trackName(t)} output ${t.visible ? 'on' : 'off'} (M)`); }
+  }
+  else if ((k === 'delete' || k === 'backspace') && clips.some(c => c.selected)){ $('btnTrash').click(); }
+});
+
+/* ---------- go ---------- */
+S.pps = Math.max(1.2, (($('scroll').clientWidth || 900) - 40) / end());
+render();
+status('Mixed V tracks · top lane = top layer · Alt+scroll on a header resizes that lane');
+</script>
+</body>
+</html>
