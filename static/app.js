@@ -18,6 +18,8 @@ const S = {
   duration: 0,
   view: { start: 0, span: 1 },
   filter: { kinds: new Set(["caption", "silence", "other"]), minDur: 0.4, q: "" },
+  laneHidden: new Set(), laneLocked: new Set(), laneH: {}, audioMuted: new Set(),
+  snap: true, magnetic: false, pan: false,
   job: null,
   jobTimer: null,
   subsText: null,
@@ -181,7 +183,7 @@ function applyWorkspacePanelSize(panel, size) {
     return;
   }
   const parentWidth = panel.parentElement?.clientWidth || Number(size.width) || 320;
-  const minWidth = Math.min(180, parentWidth);
+  const minWidth = Math.min(48, parentWidth);
   let marginLeft = Number(size.marginLeft);
   if (!Number.isFinite(marginLeft)) marginLeft = 0;
   marginLeft = clampWorkspaceSize(marginLeft, 0, Math.max(0, parentWidth - minWidth));
@@ -189,8 +191,8 @@ function applyWorkspacePanelSize(panel, size) {
   if (!Number.isFinite(width)) width = parentWidth - marginLeft;
   width = clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth - marginLeft));
 
-  const minHeight = 120;
-  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  const minHeight = 48;
+  const maxHeight = Infinity; // free: user decides, page scrolls
   let height = Number(size.height);
   if (!Number.isFinite(height)) height = panel.getBoundingClientRect().height;
   height = clampWorkspaceSize(height, minHeight, maxHeight);
@@ -211,10 +213,10 @@ function applyTimelinePanelSize(panel, size) {
   clearWorkspacePanelSize(panel);
   if (!size || typeof size !== "object") return;
   const parentWidth = panel.parentElement?.clientWidth || Number(size.width) || 320;
-  const minWidth = Math.min(180, parentWidth);
+  const minWidth = Math.min(48, parentWidth);
   const width = Number(size.width);
-  const minHeight = 120;
-  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  const minHeight = 48;
+  const maxHeight = Infinity; // free: user decides, page scrolls
   const height = Number(size.height);
   const marginTop = Number(size.marginTop);
   if (![width, height, marginTop].some(Number.isFinite)) return;
@@ -229,7 +231,7 @@ function applyTimelinePanelSize(panel, size) {
 }
 
 function applyTimelineViewportHeight(height) {
-  const viewport = $("timelineViewport");
+  const viewport = $("scroll");
   if (!viewport) return;
   const savedHeight = Number(height);
   if (!Number.isFinite(savedHeight) || savedHeight <= 0) {
@@ -238,8 +240,8 @@ function applyTimelineViewportHeight(height) {
     viewport.scrollLeft = 0;
     return;
   }
-  const minHeight = 80;
-  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  const minHeight = 48;
+  const maxHeight = Infinity; // free
   viewport.style.height = `${clampWorkspaceSize(savedHeight, minHeight, maxHeight)}px`;
 }
 
@@ -252,15 +254,15 @@ function applyPreviewViewportHeight(height) {
     viewport.style.height = "";
     return;
   }
-  const minHeight = 160;
-  const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+  const minHeight = 48;
+  const maxHeight = Infinity; // free
   PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(savedHeight, minHeight, maxHeight);
   viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;
 }
 
 function bindTimelineViewportResize() {
-  const handle = $("timelineViewportResize");
-  const viewport = $("timelineViewport");
+  const handle = $("tlResizeHandle");
+  const viewport = $("scroll");
   if (!handle || !viewport) return;
   let active = null;
 
@@ -281,8 +283,8 @@ function bindTimelineViewportResize() {
 
   const move = (event) => {
     if (!active || event.pointerId !== active.pointerId) return;
-    const minHeight = 80;
-    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    const minHeight = 48;
+    const maxHeight = Infinity; // free
     viewport.style.height = `${clampWorkspaceSize(active.height + event.clientY - active.y, minHeight, maxHeight)}px`;
     window.dispatchEvent(new Event("resize"));
   };
@@ -329,8 +331,8 @@ function bindPreviewViewportResize() {
 
   const move = (event) => {
     if (!active || event.pointerId !== active.pointerId) return;
-    const minHeight = 160;
-    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    const minHeight = 48;
+    const maxHeight = Infinity; // free
     PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(
       active.height + event.clientY - active.y, minHeight, maxHeight);
     viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;
@@ -361,48 +363,48 @@ function zoneEl(zone) {
   return document.querySelector(`[data-workspace-column="${zone}"]`);
 }
 
+function zoneResizeLimits(zone) {
+  // Free-form: only a tiny floor so a zone can't vanish into an
+  // ungrabbable sliver, and a ceiling of nearly the full row width.
+  // The user decides the layout; nothing is reserved.
+  const el = zoneEl(zone);
+  if (!el) return null;
+  const MIN = 48;
+  if (zone !== "left" && zone !== "right") return null;
+  const row = el.parentElement;
+  const rowW = row ? row.clientWidth : window.innerWidth;
+  return [MIN, Math.max(MIN, rowW - MIN)];
+}
+
 function setZoneSize(zone, px) {
   const el = zoneEl(zone);
   if (!el) return;
-  const limits = { left: [220, 640], right: [240, 720], bottom: [200, 1200] };
-  if (!limits[zone]) return;
-  if (!Number.isFinite(px) || px <= 0) { el.style.flexBasis = ""; return; }
-  el.style.flexBasis = `${clampWorkspaceSize(px, limits[zone][0], limits[zone][1])}px`;
+  if (zone === "bottom") {
+    // #workspace is block layout, so a flex-basis on the bottom zone is
+    // inert; the zone's height follows the timeline viewport (#scroll).
+    // Delegate the drag to the viewport height instead.
+    const viewport = $("scroll");
+    if (!viewport || !Number.isFinite(px)) return;
+    const chrome = Math.max(0, el.getBoundingClientRect().height
+      - viewport.getBoundingClientRect().height);
+    applyTimelineViewportHeight(px - chrome);
+    return;
+  }
+  const limits = zoneResizeLimits(zone);
+  if (!limits) return;
+  if (!Number.isFinite(px)) { el.style.flexBasis = ""; return; }
+  el.style.flexBasis = `${clampWorkspaceSize(px, limits[0], limits[1])}px`;
 }
 
 function refreshWorkspaceResizeHandleTitles(root) {
-  // Panel edges resize their own panel; zone widths use the divider grips.
+  // Edges facing the center resize the whole column; the rest resize the panel.
   for (const handle of root.querySelectorAll(".workspace-resize-handle")) {
     const edge = handle.dataset.resizeEdge;
-    handle.title = `Drag the ${edge} edge to resize this panel`;
-  }
-}
-
-function bindZoneDividers() {
-  const binds = [
-    [$("divL"), "left", "x", 1], [$("divR"), "right", "x", -1], [$("divB"), "bottom", "y", -1],
-  ];
-  for (const [handle, zone, axis, dir] of binds) {
-    if (!handle || !zoneEl(zone)) continue;
-    handle.addEventListener("pointerdown", (ev) => {
-      ev.preventDefault();
-      const el = zoneEl(zone);
-      const start = axis === "x" ? ev.clientX : ev.clientY;
-      const rect = el.getBoundingClientRect();
-      const base = axis === "x" ? rect.width : rect.height;
-      const move = (e) => {
-        const d = (axis === "x" ? e.clientX : e.clientY) - start;
-        setZoneSize(zone, base + dir * d);
-        window.dispatchEvent(new Event("resize"));
-      };
-      const up = () => {
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", up);
-        saveWorkspaceLayout();
-      };
-      window.addEventListener("pointermove", move);
-      window.addEventListener("pointerup", up);
-    });
+    const zone = handle.closest("[data-workspace-column]")?.dataset.workspaceColumn;
+    const isColumn = (zone === "left" && edge === "right") || (zone === "right" && edge === "left");
+    handle.title = isColumn
+      ? `Drag to resize the ${zone} column`
+      : `Drag the ${edge} edge to resize this panel`;
   }
 }
 
@@ -578,6 +580,8 @@ function applyWorkspaceLayout(layout) {
   const lanes = WS.lanes || {};
   S.laneHidden = new Set(Array.isArray(lanes.hidden) ? lanes.hidden : []);
   S.laneLocked = new Set(Array.isArray(lanes.locked) ? lanes.locked : []);
+  S.laneH = lanes.h && typeof lanes.h === "object" ? { ...lanes.h } : {};
+  S.audioMuted = new Set(Array.isArray(lanes.muted) ? lanes.muted : []);
   laneLabelsDirty();
 }
 
@@ -615,12 +619,6 @@ function refreshZoneCollapse() {
     const host = zoneEl(z);
     if (host) host.classList.toggle("zone-empty", !zoneHasVisibleUnit(z));
   }
-  // Dividers only make sense between two visible zones.
-  const L = zoneHasVisibleUnit("left"), C = zoneHasVisibleUnit("center");
-  const R = zoneHasVisibleUnit("right"), B = zoneHasVisibleUnit("bottom");
-  if ($("divL")) $("divL").style.display = (L && (C || R)) ? "" : "none";
-  if ($("divR")) $("divR").style.display = (R && (L || C)) ? "" : "none";
-  if ($("divB")) $("divB").style.display = (B && (L || C || R)) ? "" : "none";
 }
 
 function afterWorkspaceVisibility() {
@@ -680,13 +678,15 @@ function saveWorkspaceLayout() {
   if (Number.isFinite(PREVIEW_VIEW.viewportHeight))
     WS.previewViewportHeight = PREVIEW_VIEW.viewportHeight;
   else delete WS.previewViewportHeight;
-  const timelineViewportHeight = parseFloat($("timelineViewport")?.style.height || "");
+  const timelineViewportHeight = parseFloat($("scroll")?.style.height || "");
   if (Number.isFinite(timelineViewportHeight)) WS.timelineViewportHeight = timelineViewportHeight;
   else delete WS.timelineViewportHeight;
-  if ((S.laneHidden && S.laneHidden.size) || (S.laneLocked && S.laneLocked.size)) {
+  if ((S.laneHidden && S.laneHidden.size) || (S.laneLocked && S.laneLocked.size) || (S.laneH && Object.keys(S.laneH).length) || (S.audioMuted && S.audioMuted.size)) {
     WS.lanes = {
       hidden: [...(S.laneHidden || [])],
       locked: [...(S.laneLocked || [])],
+      h: S.laneH ? { ...S.laneH } : {},
+      muted: [...(S.audioMuted || [])],
     };
   } else delete WS.lanes;
   try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(WS)); }
@@ -893,12 +893,22 @@ function bindWorkspaceResize(root) {
 
   const move = (event) => {
     if (!active || event.pointerId !== active.pointerId) return;
+    if (active.zoneResize) {
+      // the edge facing the center drags the whole column width
+      const r = active.zoneRect;
+      const px = active.zoneResize === "left"
+        ? event.clientX - r.left
+        : r.right - event.clientX;
+      setZoneSize(active.zoneResize, px);
+      window.dispatchEvent(new Event("resize"));
+      return;
+    }
     const dx = event.clientX - active.x;
     const dy = event.clientY - active.y;
     const parentWidth = active.parent.clientWidth;
-    const minWidth = Math.min(180, parentWidth);
-    const minHeight = 120;
-    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    const minWidth = Math.min(48, parentWidth);
+    const minHeight = 48;
+    const maxHeight = Infinity; // free: user decides, page scrolls
     let width = active.width;
     let height = active.height;
     let marginLeft = active.marginLeft;
@@ -959,6 +969,13 @@ function bindWorkspaceResize(root) {
       bodyCursor: document.body.style.cursor,
       bodyUserSelect: document.body.style.userSelect,
     };
+    // Side columns: the edge facing the center resizes the whole column
+    // (free width), instead of the panel inside it.
+    const zcol = panel.closest("[data-workspace-column]")?.dataset.workspaceColumn;
+    if ((zcol === "left" && edge === "right") || (zcol === "right" && edge === "left")) {
+      const zel = zoneEl(zcol);
+      if (zel) { active.zoneResize = zcol; active.zoneRect = zel.getBoundingClientRect(); }
+    }
     handle.classList.add("resizing");
     document.body.style.cursor = active.edge === "left" || active.edge === "right" ? "col-resize" : "row-resize";
     document.body.style.userSelect = "none";
@@ -975,7 +992,6 @@ function bindWorkspaceDocking() {
   applyWorkspaceLayout(readWorkspaceLayout());
   addWorkspaceResizeHandles(root);
   bindWorkspaceResize(root);
-  bindZoneDividers();
   bindTimelineViewportResize();
   bindPreviewViewportResize();
   bindMenuBar();
@@ -1176,25 +1192,22 @@ const MENU_ACTS = {
   "file-upload": () => { const u = $("uploadInput"); if (u) u.click(); },
   "file-demo": () => clickBtn("demoBtn"),
   "file-speech": () => clickBtn("speechDemoBtn"),
-  "edit-undo": () => clickBtn("tlUndo"),
-  "edit-redo": () => clickBtn("tlRedo"),
-  "edit-copy": () => clickBtn("tlCopy"),
-  "edit-cut": () => clickBtn("tlCut"),
-  "edit-paste": () => clickBtn("tlPaste"),
-  "edit-split": () => clickBtn("capSplit"),
-  "edit-delete": () => clickBtn("capDel"),
-  "edit-ripple": () => clickBtn("tlRipple"),
+  "edit-undo": () => clickBtn("btnUndo"),
+  "edit-redo": () => clickBtn("btnRedo"),
+  "edit-copy": () => { if (typeof copySel === "function") copySel(); },
+  "edit-cut": () => { if (typeof cutSel === "function") cutSel(); },
+  "edit-paste": () => { if (typeof pasteSel === "function") pasteSel(false); },
+  "edit-split": () => clickBtn("btnSplit"),
+  "edit-delete": () => clickBtn("btnTrash"),
+  "edit-ripple": () => { if (typeof deleteSel === "function") deleteSel(true); },
   "clip-up": () => clickBtn("txTrackUp"),
   "clip-down": () => clickBtn("txTrackDown"),
   "clip-mute": () => muteSelectedClips(),
-  "tl-zoom-in": () => clickBtn("zoomIn"),
-  "tl-zoom-out": () => clickBtn("zoomOut"),
-  "tl-zoom-fit": () => clickBtn("zoomFit"),
-  "tl-snap": () => {
-    const c = $("tlSnap");
-    if (c) { c.checked = !c.checked; status(`Snap ${c.checked ? "on" : "off"}.`); }
-  },
-  "cap-add": () => clickBtn("capAdd"),
+  "tl-zoom-in": () => clickBtn("btnZin"),
+  "tl-zoom-out": () => clickBtn("btnZout"),
+  "tl-zoom-fit": () => clickBtn("btnFit"),
+  "tl-snap": () => clickBtn("btnSnap"),
+  "cap-add": () => clickBtn("btnAddCap"),
   "cap-auto": () => { ensureUnitVisible("project"); flashEl(document.querySelector('[data-project-card="caption"]')); const b = $("capBtn"); if (b) b.focus(); },
   "exp-go": () => {
     revealTab("export");
@@ -1698,8 +1711,8 @@ function layoutPreviewZoom() {
   stage.style.width = `${baseW}px`;
   stage.style.height = `${baseH}px`;
   if (Number.isFinite(PREVIEW_VIEW.viewportHeight)) {
-    const minHeight = 160;
-    const maxHeight = Math.max(minHeight, window.innerHeight * 0.85);
+    const minHeight = 48;
+    const maxHeight = Infinity; // free
     PREVIEW_VIEW.viewportHeight = clampWorkspaceSize(
       PREVIEW_VIEW.viewportHeight, minHeight, maxHeight);
     viewport.style.height = `${PREVIEW_VIEW.viewportHeight}px`;

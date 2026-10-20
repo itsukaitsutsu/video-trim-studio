@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=42">
+<link rel="stylesheet" href="/static/style.css?v=44">
 </head>
 <body>
 <header id="menubar">
@@ -217,7 +217,6 @@
       </div>
     </section>
   </div>
-  <div class="zdiv" id="divL" role="separator" aria-orientation="vertical" aria-label="Resize left zone" title="Drag to resize the left zone"></div>
   <div class="wszone" data-workspace-column="center">
     <section class="moveunit" data-workspace-panel="program" data-default-column="center" data-unit="program" aria-label="Program Monitor panel">
       <div class="ws-head">
@@ -266,7 +265,6 @@
       </div>
     </section>
   </div>
-  <div class="zdiv" id="divR" role="separator" aria-orientation="vertical" aria-label="Resize right zone" title="Drag to resize the right zone"></div>
   <div class="wszone" data-workspace-column="right">
     <section class="moveunit" data-workspace-panel="inspector" data-default-column="right" data-unit="inspector" aria-label="Inspector panel">
       <div class="ws-tabs" id="inspTabs" role="tablist" aria-label="Inspector tabs">
@@ -506,7 +504,6 @@
     </section>
   </div>
   </div>
-  <div class="zdiv-h" id="divB" role="separator" aria-orientation="horizontal" aria-label="Resize bottom zone" title="Drag to resize the timeline zone"></div>
   <div class="wszone wszone-bottom" data-workspace-column="bottom">
     <section class="moveunit" data-workspace-panel="timeline" data-default-column="bottom" data-unit="timeline" aria-label="Timeline panel">
       <div class="ws-tabs" id="botTabs" role="tablist" aria-label="Timeline tabs">
@@ -522,64 +519,56 @@
             <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Timeline 01 panel" title="Drag to move panel">⠿</button>
           </div>
           <div class="ws-body" id="tab-tl">
-          <div class="timeline-card">
-      <div class="tl-head">
-        <strong>Timeline</strong>
-        <span class="dim" id="tlHint">click = select + preview &middot; shift/ctrl = add &middot; drag = move (&#8597; = change track) &middot; edges = trim &middot; alt-drag = copy &middot; drop media from the bin &middot; dbl-click caption = edit &middot; ctrl+wheel = zoom</span>
-        <span class="spacer"></span>
-        <button class="mini" id="zoomOut" title="Zoom out">&minus;</button>
-        <button class="mini" id="zoomIn" title="Zoom in">+</button>
-        <button class="mini" id="zoomFit" title="Show everything">fit</button>
-        <span class="spacer"></span>
-        <button class="mini" id="tlUndo" title="Undo (Ctrl+Z)">undo</button>
-        <button class="mini" id="tlRedo" title="Redo (Ctrl+Shift+Z)">redo</button>
-        <button class="mini" id="tlCopy" title="Copy the selection (Ctrl+C)">copy</button>
-        <button class="mini" id="tlCut" title="Cut: copy, then remove and leave a gap (Ctrl+X)">cut</button>
-        <button class="mini" id="tlPaste" title="Paste at the playhead, restacking onto free lanes (Ctrl+V; Ctrl+Shift+V inserts)">paste</button>
-        <button class="mini" id="capSplit" title="Split the selection, or everything, at the playhead (Ctrl+K)">split</button>
-        <button class="mini" id="capDel" title="Remove the selection and leave a gap (Delete)">delete</button>
-        <button class="mini" id="tlRipple" title="Remove the selection and close the gap (Shift+Delete)">ripple delete</button>
-        <span class="spacer"></span>
-        <label class="chk" title="Apply caption position, size, box width and alignment changes to every timeline caption">
-          <input id="capApplyAll" type="checkbox" checked> Apply to all captions
-        </label>
-        <button class="mini" id="capAdd" title="Add a caption at the playhead">+ caption</button>
-        <button class="mini" id="tlLane" title="Add a caption lane to stack captions">+ lane</button>
-        <button class="mini" id="tlTrack" title="Add a video track (and its audio lane) to stack another layer">+ track</button>
-        <label class="chk" title="Snap moves and trims to the playhead and to other edges"><input type="checkbox" id="tlSnap" checked> snap</label>
-        <span id="tlStatus" class="dim small"></span>
-      </div>
-      <div class="tl-body">
-      <div id="tlTools" class="tl-tools" role="toolbar" aria-label="Timeline tools">
-        <button class="tl-tool active" data-tool="select" title="Select / move (V)"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M5.5 2.8v12.6l3.4-2.9 1.9 4.8 2.3-1-1.9-4.7 3.9.3z"/></svg></button>
-        <button class="tl-tool" data-tool="razor" title="Razor: click a clip or caption to split it (R)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="2.6" width="7" height="14.8" rx="1.5"/><line x1="10" y1="6.2" x2="10" y2="13.8"/></svg></button>
-        <button class="tl-tool" data-tool="text" title="Caption: click the timeline to add one (T)"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M4 4.5h12v2.6h-4.6v8.4H8.6V7.1H4z"/></svg></button>
-        <button class="tl-tool" data-tool="hand" title="Pan: drag to scroll the timeline (H)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="10" y1="2.8" x2="10" y2="17.2"/><line x1="2.8" y1="10" x2="17.2" y2="10"/><path d="M10 2.8 7.9 4.9M10 2.8l2.1 2.1M10 17.2l-2.1-2.1M10 17.2l2.1-2.1M2.8 10l2.1-2.1M2.8 10l2.1 2.1M17.2 10l-2.1-2.1M17.2 10l-2.1 2.1"/></svg></button>
-        <button class="tl-tool" data-tool="zoom" title="Zoom: drag a range, click to zoom in, Alt+click to zoom out (Z)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8.6" cy="8.6" r="5.1"/><line x1="12.5" y1="12.5" x2="17" y2="17"/><line x1="8.6" y1="6.4" x2="8.6" y2="10.8"/><line x1="6.4" y1="8.6" x2="10.8" y2="8.6"/></svg></button>
-        <button class="tl-tool" data-tool="mute" title="Mute: click a clip to mute / unmute it (M)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 7.5v5h3.1L11 16.6V3.4L6.6 7.5z"/><line x1="13.6" y1="8.2" x2="17.4" y2="11.8"/><line x1="17.4" y1="8.2" x2="13.6" y2="11.8"/></svg></button>
-      </div>
-      <div id="timelineViewportWrap" class="timeline-viewport-wrap">
-        <div id="timelineViewport" class="timeline-viewport">
-          <div id="timelineStage" class="timeline-stage">
-            <div id="trackLabels" class="track-labels" aria-label="Timeline track labels"></div>
-            <canvas id="timeline" height="132"></canvas>
-          </div>
-        </div>
-        <div id="timelineViewportResize" class="timeline-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize timeline viewing area" title="Drag up or down to add or remove empty timeline viewing space; track sizes stay the same"></div>
-      </div>
-          </div>
-      <div class="legend">
-        <span><i class="sw" style="background:#2b4f6b"></i>video clip (main source)</span>
-        <span><i class="sw" style="background:#3d3b52"></i>clip from the media bin</span>
-        <span><i class="sw" style="background:#238636"></i>audio item (A lane)</span>
-        <span><i class="sw" style="background:#1f4b8f"></i>linked clip audio</span>
-        <span><i class="sw silence"></i>silence</span>
-        <span><i class="sw caption"></i>caption section</span>
-        <span><i class="sw" style="background:#274b8f"></i>caption lanes (stack = several on one frame)</span>
-        <span class="dim small">V lanes composite &middot; A lanes mix &middot; gaps export black</span>
-      </div>
-          </div>
-          </div>
+<div id="tlNew">
+  <div class="tray" id="tray" role="toolbar" aria-label="Timeline tools">
+    <button class="tb" id="btnAdd" title="Add track"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnUndo" title="Undo (Ctrl+Z)"></button>
+    <button class="tb" id="btnRedo" title="Redo (Ctrl+Shift+Z)"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnSplit" title="Split at the playhead (Ctrl+K)"></button>
+    <button class="tb" id="btnRazor" title="Razor: click a clip to split it there (R)"></button>
+    <button class="tb" id="btnMerge" title="Merge selected — needs 2+ adjacent clips on one lane (not in VTS yet)" disabled></button>
+    <button class="tb danger" id="btnTrash" title="Delete selected (Del)"></button>
+    <span class="selcount" id="selCount" hidden></span>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnPan" title="Pan: drag to scroll the timeline (H)"></button>
+    <button class="tb" id="btnTrimFollow" title="Trim follow: the playhead rides a clip edge while it is dragged (not in VTS yet)" disabled></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnSnap" title="Snap to edges"></button>
+    <button class="tb" id="btnMagnet" title="Magnetic: deletes and trims close the gap"></button>
+    <span class="tdiv"></span>
+    <button class="tb" id="btnAddCap" title="Add a caption at the playhead, on the topmost video track (T)"></button>
+    <span class="tdiv"></span>
+    <button class="pill on p-cap" data-pill="caption" title="Show caption sections"><span class="dot" style="background:#cf5a99"></span>caption</button>
+    <button class="pill on p-sil" data-pill="silence" title="Show silence sections"><span class="dot" style="background:#f97316"></span>silence</button>
+    <button class="pill on p-oth" data-pill="other" title="Show other sections"><span class="dot" style="background:#6e7681"></span>other</button>
+    <button class="pill p-sil" id="pillAllSil" title="Select every silence section"><span class="dot" style="background:#f97316"></span>all silence</button>
+    <button class="pill warn on" id="pillRemove" hidden title="Remove the selected sections">remove selected</button>
+    <span class="spacer"></span>
+    <button class="tb" id="btnFit" title="Zoom to fit"></button>
+    <button class="tb" id="btnZout" title="Zoom out"></button>
+    <button class="tb" id="btnZin" title="Zoom in"></button>
+  </div>
+
+  <div class="grid" id="tlGrid">
+    <div class="headers" id="headers"><div class="hcorner"></div><div class="hrows" id="hrows"></div></div>
+    <div class="lanes-scroll" id="scroll"><div class="lanes" id="lanes"></div></div>
+    <div class="workspace-resize-handle resize-bottom" id="tlResizeHandle" data-resize-edge="bottom" role="separator" aria-orientation="horizontal" aria-label="Resize timeline viewing area" title="Drag up or down to add or remove empty timeline viewing space; track sizes stay the same"></div>
+  </div>
+
+  <div class="statusline"><span id="status">click = select + seek · shift = add · drag = move (↕ = change track) · edges = trim · alt-drag = copy · drop media from the bin · dbl-click caption = edit · ctrl+wheel = zoom</span><span class="tc" id="tc"></span></div>
+  <div class="legend">
+    <span><i class="sw" style="background:#3373d1"></i>video</span>
+    <span><i class="sw" style="background:#9f63d6"></i>image / overlay</span>
+    <span><i class="sw" style="background:#cf5a99"></i>caption (C lanes)</span>
+    <span><i class="sw" style="background:#34c46f"></i>audio</span>
+    <span><i class="sw" style="background:#f97316"></i>silence section</span>
+    <span class="dim small">top lane = top layer · A lanes mix · gaps export black</span>
+  </div>
+</div>
+<div id="pvToast" role="status" aria-live="polite"></div>
+</div>
         </section>
         <section class="moveunit" data-workspace-panel="list" data-default-column="bottom" data-unit="list" aria-label="List panel">
           <div class="ws-head">
@@ -632,12 +621,12 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=6"></script>
+<script src="/static/timeline-model.js?v=7"></script>
 <script src="/static/media.js?v=1"></script>
 <script src="/static/stage.js?v=2"></script>
-<script src="/static/timeline.js?v=16"></script>
+<script src="/static/timeline.js?v=19"></script>
 <script src="/static/clip.js?v=1"></script>
-<script src="/static/app.js?v=43"></script>
+<script src="/static/app.js?v=47"></script>
 <script src="/static/font-picker.js?v=1"></script>
 <script src="/static/fonts.js?v=1"></script>
 </body>

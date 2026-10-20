@@ -154,6 +154,14 @@
     return Math.max(0, Math.min(MAX_ATRACKS - 1, t));
   }
 
+  // Captions now live on V tracks (mixed media). `track` is the V lane they float above;
+  // legacy `lane` (caption lane) is kept for backward compat and migrated on load.
+  function capTrackOf(it) {
+    if (it && it.track !== undefined) return trackOf(it);
+    if (it && it.lane !== undefined) return Math.max(0, Math.min(MAX_VTRACKS - 1, Math.floor(num(it.lane, 0))));
+    return 0;
+  }
+
   function vtracksOf(tl) {
     let n = Math.max(1, Math.floor(num(tl && tl.vtracks, 1)) || 1);
     for (const c of (tl && tl.clips) || []) n = Math.max(n, trackOf(c) + 1);
@@ -296,6 +304,13 @@
     if (!Array.isArray(out.clips)) out.clips = [];
     if (!Array.isArray(out.auds)) out.auds = [];
     if (!Array.isArray(out.caps)) out.caps = [];
+    // Keep legacy lane-based caps as-is for backward compat (tests rely on lane stacking).
+    // New V-track caps have `track` set; legacy ones only have `lane` and should not be auto-migrated
+    // to `track`, otherwise they would lose lane collision handling and break existing tests.
+    // Only ensure that V-track caps have a synced lane for old code that reads lane.
+    for (const c of out.caps) {
+      if (c.track !== undefined && c.lane === undefined) c.lane = c.track;
+    }
     out.lanes = Math.max(1, num(out.lanes, 1));
     out.vtracks = vtracksOf(out);
     out.atracks = atracksOf(out);
@@ -506,7 +521,13 @@
   }
 
   // Place a caption on its lane, or on the lowest lane where it fits.
+  // For new V-track captions (track defined), captions are transparent overlays and never collide,
+  // so we place them directly on the requested V track.
   function placeCap(list, cap) {
+    if (cap.track !== undefined) {
+      // V-track caption: no collision check, just clamp to existing V range
+      return { ...cap, track: capTrackOf(cap) };
+    }
     const clash = (lane) => list.some((o) => o.lane === lane && overlaps(o, cap));
     if (!clash(cap.lane)) return cap;
     let lane = 0;
@@ -515,7 +536,9 @@
   }
 
   function lanesOf(tl) {
-    return Math.max(1, tl.lanes || 1, ...tl.caps.map((c) => c.lane + 1));
+    // legacy: max lane index; for V-track caps, lanes is deprecated but we keep at least 1
+    const maxLane = tl.caps.length ? Math.max(...tl.caps.map((c) => (c.lane !== undefined ? c.lane : (c.track !== undefined ? c.track : 0))) ) + 1 : 1;
+    return Math.max(1, tl.lanes || 1, maxLane);
   }
 
   // ------------------------------------------------------------ operations
@@ -711,7 +734,13 @@
     }
     out.auds.sort(byStart);
     for (const c of movedCaps) {
-      const moved = {
+      const isVTrack = c.track !== undefined;
+      const moved = isVTrack ? {
+        ...c, start: r3(c.start + shift), end: r3(c.end + shift),
+        track: clamp(capTrackOf(c) + (dLane || 0), 0, MAX_VTRACKS - 1),
+        lane: clamp(capTrackOf(c) + (dLane || 0), 0, MAX_VTRACKS - 1),
+        words: shiftWords(capWords(c), shift),
+      } : {
         ...c, start: r3(c.start + shift), end: r3(c.end + shift),
         lane: Math.max(0, c.lane + (dLane || 0)),
         words: shiftWords(capWords(c), shift),
@@ -739,6 +768,8 @@
       if (c.id === id) return false;
       if (isAud) return c.atrack !== undefined;            // audio lanes mix
       if (isC) return trackOf(c) === trackOf(it);
+      // captions: compare V track if track-based, else lane
+      if (it.track !== undefined || c.track !== undefined) return capTrackOf(c) === capTrackOf(it);
       return c.lane === it.lane;
     });
     const prevEnd = Math.max(0, ...others.filter((o) => o.end <= it.start + EPS).map((o) => o.end));
@@ -833,13 +864,33 @@
 
   function addCaption(tl, at, text, style, lane) {
     const out = normalise(tl);
+    const wantLane = (lane !== undefined && Number.isFinite(Number(lane))) ? Math.max(0, Math.floor(Number(lane))) : 0;
     const cap = {
-      id: newId("t"), lane: lane || 0, start: r3(at), end: r3(at + 2),
+      id: newId("t"), lane: wantLane, start: r3(at), end: r3(at + 2),
       text, style: style ? clone(style) : null, words: [],
     };
     const placed = placeCap(out.caps, cap);
     out.caps.push(placed);
     out.lanes = lanesOf(out);
+    out.vtracks = vtracksOf(out);
+    out.atracks = atracksOf(out);
+    return { tl: out, id: placed.id };
+  }
+
+  // New UI: captions floating on V tracks (no lane stacking, transparent overlay)
+  function addCaptionOnTrack(tl, at, text, style, track) {
+    const out = normalise(tl);
+    const vt = vtracksOf(out);
+    const wantTrack = (track !== undefined && Number.isFinite(Number(track))) ? Math.max(0, Math.min(vt - 1, Math.floor(Number(track)))) : 0;
+    const cap = {
+      id: newId("t"), track: wantTrack, lane: wantTrack, start: r3(at), end: r3(at + 2),
+      text, style: style ? clone(style) : null, words: [],
+    };
+    // V-track caps float — don't restack, just place
+    out.caps.push(cap);
+    out.lanes = lanesOf(out);
+    out.vtracks = vtracksOf(out);
+    out.atracks = atracksOf(out);
     return { tl: out, id: cap.id };
   }
 
@@ -1090,6 +1141,8 @@
       for (let j = i + 1; j < t.caps.length; j += 1) {
         const a = t.caps[i];
         const b = t.caps[j];
+        // V-track captions (with track) are transparent overlays and may overlap; only legacy lane caps are checked
+        if (a.track !== undefined || b.track !== undefined) continue;
         if (a.lane === b.lane && overlaps(a, b)) problems.push(`captions ${a.id} and ${b.id} overlap`);
       }
     }
@@ -1103,9 +1156,9 @@
     defaultFx, cleanFx, fxIsDefault, cleanKf, evalFxAt, fadeEnv,
     emptyTimeline, clipsFromSource, clipsFromSections,
     capsFromCues, assignLanes, splitSelection, splitCaption, splitClip, deleteItems, moveItems, trimItem,
-    copyItems, pasteItems, duplicateItems, addCaption, setClipText, setCaptionText,
+    copyItems, pasteItems, duplicateItems, addCaption, addCaptionOnTrack, setClipText, setCaptionText,
     timelineEnd, contentEnd, clipAt, clipStackAt, audioStackAt, flattenClips,
-    placeClip, placeAudio, placeCap, makeClip, makeAudioItem, addMedia,
+    placeClip, placeAudio, placeCap, capTrackOf, makeClip, makeAudioItem, addMedia,
     firstFreeTrack, unlinkClipAudio, relinkClipAudio, linkedAudioOf,
     mergeRanges, validate,
     cleanWords, shiftWords, sliceWords, capWords, rewordForText,
