@@ -1,0 +1,79 @@
+Video Trim Studio - workspace resize + default layout fix
+=========================================================
+
+Replace these files in your project folder (keep the same paths):
+
+    static/app.js            <- the only runtime file that changed
+    README.md                <- docs only (optional)
+    tests/test_timeline_ui.py<- test updates (optional)
+
+Then reload http://127.0.0.1:8765/ with Ctrl+F5 (or Ctrl+Shift+R) so the
+browser drops the cached app.js. No restart of server.py is needed, no
+`pip install` is needed, and nothing else in the project is touched.
+
+
+1) Column resize no longer "sticks"
+-----------------------------------
+Every vertical grip that sits ON a column boundary now drags that split
+free-form, both directions, with no maximum width - exactly like the divider
+grip you liked:
+
+    Program monitor, left edge   -> left column
+    Program monitor, right edge  -> right column
+    Project panel, right edge    -> left column
+    Inspector panel, left edge   -> right column
+
+The outer window edges still resize the panel inside its column (they have no
+column to give space to). Handles on a divider say
+"Drag the divider to resize the left/right column" and their hover cursor
+follows the divider too.
+
+Two follow-on bugs fixed in the same code path:
+
+  * Dragging a panel's TOP or BOTTOM edge used to write an inline width, which
+    froze the panel at that moment's column width. From then on its side edges
+    could never reach the divider again ("stuck"). Vertical drags now only
+    touch height.
+  * Saved layouts written by the old build often stored `width` equal to the
+    column width (that frozen state). Those pins are ignored on load, so an
+    existing workspace is repaired instead of staying stuck.
+
+Divider drags are also delta-based now: grabbing a grip no longer snaps the
+column by the width of the grip itself.
+
+Handle bookkeeping was hardened as well: exactly one grip per edge per
+standalone panel, and stale grips left inside a panel body (an older layout
+could keep a duplicate, which then sat on top of the real one) are removed.
+The idle cursor of each grip is also derived from the live geometry.
+
+
+2) Default workspace: List belongs to the Inspector group
+--------------------------------------------------------
+A fresh workspace (and "Reset workspace") now opens as:
+
+    left   : Project
+    center : Program monitor
+    right  : Inspector  -> tabs: Clip | Text | List | Export   (List active)
+    bottom : Timeline 01
+
+Layouts saved by the previous build are migrated once:
+
+  * a List that was still tabbed under the Timeline moves into the Inspector
+    group, and becomes the visible tab if it was the visible one before;
+  * a List you had deliberately pulled out of a group stays exactly where it
+    is (no host entry = your choice);
+  * your zones, column widths, panel heights and hidden panels are kept.
+
+Tab order inside a group is now canonical (Clip, Text, List, Export) instead
+of following the order the group map happened to be saved in.
+
+
+Notes
+-----
+* vts/static/app.js and vts/static/style.css are an older copy of the front
+  end bundled in the repo. They are NOT served by server.py at the project
+  root, so they were left untouched. If you ever run vts/server.py instead,
+  say so and the same fix can be mirrored there.
+* Verified in Chromium at 1280x720 and 1400x1000: all four dividers drag
+  freely both ways and return exactly; no page-wide horizontal overflow at
+  extreme widths; layout and tab choice survive a reload.

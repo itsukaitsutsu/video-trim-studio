@@ -549,38 +549,40 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert inspector.evaluate(zone_of) == "right"
     assert timeline.evaluate(zone_of) == "bottom"
 
-    # Tabbed units: inspector (Clip/Text/Export) and bottom (Timeline/List).
-    assert page.locator("#inspTabs [role=tab]").count() == 3
-    assert page.locator("#botTabs [role=tab]").count() == 2
-    assert page.locator("#tab-clip").is_visible()
+    # Tabbed units: inspector (Clip/Text/List/Export) and bottom (Timeline).
+    assert page.locator("#inspTabs [role=tab]").count() == 4
+    assert page.locator("#botTabs [role=tab]").count() == 1
+    assert page.locator("#tab-list").is_visible()
+    assert page.locator("#tab-clip").is_visible() is False
     assert page.locator("#tab-text").is_visible() is False
     assert page.locator("#tab-tl").is_visible()
-    assert page.locator("#tab-list").is_visible() is False
     page.click('#inspTabs [data-tab="text"]')
-    page.click('#botTabs [data-btab="list"]')
     assert page.locator("#tab-text").is_visible()
-    assert page.locator("#tab-clip").is_visible() is False
-    assert page.locator("#tab-list").is_visible()
+    assert page.locator("#tab-list").is_visible() is False
     page.reload()
     page.wait_for_function("S.project && S.project.info")
     assert page.locator("#tab-text").is_visible()
+    page.click('#inspTabs [data-tab="list"]')
     assert page.locator("#tab-list").is_visible()
-    page.click('#inspTabs [data-tab="clip"]')
-    page.click('#botTabs [data-btab="tl"]')
 
     # Resize handles live on the units now (timeline keeps no left edge).
-    assert program.locator(".resize-bottom").count() == 1
-    assert timeline.locator(".resize-left").count() == 0
-    assert timeline.locator(".resize-right").count() == 1
+    assert program.locator(":scope > .resize-bottom").count() == 1
+    assert timeline.locator(":scope > .resize-left").count() == 0
+    assert timeline.locator(":scope > .resize-right").count() == 1
     for edge in ["top", "bottom"]:
-        assert timeline.locator(f".resize-{edge}").count() == 1
-    assert project.locator(".resize-left").count() == 1
+        assert timeline.locator(f":scope > .resize-{edge}").count() == 1
+    assert project.locator(":scope > .resize-left").count() == 1
     # Panel edges resize their own panel; the zone dividers resize the zones.
-    assert timeline.locator(".resize-right").get_attribute("title") == \
+    assert timeline.locator(":scope > .resize-right").get_attribute("title") == \
         "Drag the right edge to resize this panel"
+    # The center column's edges sit on the two column dividers.
+    assert program.locator(":scope > .resize-left").get_attribute("title") == \
+        "Drag the divider to resize the left column"
+    assert program.locator(":scope > .resize-right").get_attribute("title") == \
+        "Drag the divider to resize the right column"
 
     def drag_handle(edge, dx, dy):
-        handle = timeline.locator(f".resize-{edge}")
+        handle = timeline.locator(f":scope > .resize-{edge}")
         handle.scroll_into_view_if_needed()
         box = handle.bounding_box()
         x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
@@ -597,22 +599,43 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert timeline.bounding_box()["height"] < old["height"]
     saved_height = timeline.bounding_box()["height"]
 
-    # The left divider resizes the left zone against the center zone.
+    # The Program monitor's edges ARE the column dividers: dragging one moves
+    # the split freely in both directions instead of resizing the panel box
+    # inside a column whose width it cannot exceed.
     left_zone = page.locator('[data-workspace-column="left"]')
     center_zone = page.locator('[data-workspace-column="center"]')
+    right_zone = page.locator('[data-workspace-column="right"]')
     old_left = left_zone.bounding_box()["width"]
     old_center = center_zone.bounding_box()["width"]
-    divider = page.locator("#divL")
-    divider.scroll_into_view_if_needed()
-    box = divider.bounding_box()
-    x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-    page.mouse.move(x, y)
-    page.mouse.down()
-    page.mouse.move(x + 70, y, steps=5)
-    page.mouse.up()
+
+    def drag_program_edge(edge, dx):
+        handle = program.locator(f":scope > .resize-{edge}")
+        handle.scroll_into_view_if_needed()
+        box = handle.bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x + dx, y, steps=5)
+        page.mouse.up()
+
+    drag_program_edge("left", 70)
     saved_left = left_zone.bounding_box()["width"]
     assert saved_left > old_left + 50
     assert center_zone.bounding_box()["width"] < old_center - 50
+    # ... and back the other way, without a maximum panel width.
+    left_when_wide = saved_left
+    drag_program_edge("left", -70)
+    assert left_zone.bounding_box()["width"] < left_when_wide - 50
+    assert abs(left_zone.bounding_box()["width"] - old_left) < 3
+    # The panel keeps following its column (divider drag, not a panel resize).
+    assert program.evaluate("el => el.style.width") == ""
+
+    old_right = right_zone.bounding_box()["width"]
+    drag_program_edge("right", -60)
+    assert right_zone.bounding_box()["width"] > old_right + 40
+    drag_program_edge("right", 60)
+    assert abs(right_zone.bounding_box()["width"] - old_right) < 3
+    saved_left = left_zone.bounding_box()["width"]
 
     # The x hides the ENTIRE unit; the Window menu brings it back.
     page.click('[data-hide-unit="inspector"]')
@@ -752,8 +775,8 @@ def test_units_group_by_drop_and_ungroup(browser_page):
     # is grouped; Project returns to the left zone.
     assert page.locator("[data-dyn-tab]").count() == 5
     assert page.evaluate("JSON.stringify(WS.host)") == (
-        '{"clip":"inspector","text":"inspector","export":"inspector",'
-        '"tl":"timeline","list":"timeline"}')
+        '{"clip":"inspector","text":"inspector","list":"inspector",'
+        '"export":"inspector","tl":"timeline"}')
     assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "left"
     assert not page_errors, page_errors
 
@@ -1192,18 +1215,18 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
           return out;
         }""")
 
-    # Default layout is unchanged: the five are tabs, not loose panels.
-    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
-    assert tabs("botTabs") == ["tl", "list"], tabs("botTabs")
+    # Default layout: List is tabbed in the Inspector, not the Timeline group.
+    assert tabs("inspTabs") == ["clip", "text", "list", "export"], tabs("inspTabs")
+    assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
     assert page.eval_on_selector_all(
         "#inspTabs [role=tab]", "els => els.every(e => e.dataset.dynTab === '1')")
 
-    # 1. Pull List out of the Timeline group, into the left zone.
-    _drag_panel(page, page.locator("#botTabs [data-btab='list']"),
+    # 1. Pull List out of the Inspector group, into the left zone.
+    _drag_panel(page, page.locator("#inspTabs [data-tab='list']"),
                 page.locator("[data-workspace-column='left']"), to_bottom_edge=True)
-    assert tabs("botTabs") == ["tl"], tabs("botTabs")
+    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
     assert zones()["left"] == ["project", "list"], zones()
     assert page.evaluate("WS.host.list") in (None, "")
     # The panel moved intact: its own content came with it.
@@ -1229,8 +1252,8 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
 
     page.evaluate("resetWorkspace()")
     page.wait_for_timeout(400)
-    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
-    assert tabs("botTabs") == ["tl", "list"], tabs("botTabs")
+    assert tabs("inspTabs") == ["clip", "text", "list", "export"], tabs("inspTabs")
+    assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
     assert not page_errors, page_errors

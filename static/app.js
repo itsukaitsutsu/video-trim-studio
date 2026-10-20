@@ -68,13 +68,16 @@ const WORKSPACE_STORAGE_KEY = "video-trim-studio.workspace.v3";
 const WORKSPACE_STORAGE_KEY_V2 = "video-trim-studio.workspace.v2";
 const WORKSPACE_STORAGE_KEY_V1 = "video-trim-studio.workspace.v1";
 const WORKSPACE_ZONES = ["left", "center", "right", "bottom"];
+// Bump when the shipped default arrangement changes; saved layouts older than
+// this are migrated once (see applyWorkspaceLayout).
+const WORKSPACE_LAYOUT_REV = 2;
 // Premiere-style units: project/program are single cards; inspector and the
 // Every panel is a real, movable unit now. These five simply *start life*
 // grouped inside a host, which is what makes them tabs on a fresh workspace;
 // drag one out and it becomes a panel in its own right.
 const DEFAULT_UNIT_HOST = {
-  clip: "inspector", text: "inspector", export: "inspector",
-  tl: "timeline", list: "timeline",
+  clip: "inspector", text: "inspector", list: "inspector", export: "inspector",
+  tl: "timeline",
 };
 // Panels whose header is already a tab strip in the markup. Grouping a panel
 // into one of these just adds a tab; a plain panel (Project, Program Monitor)
@@ -95,9 +98,10 @@ const UNIT_TITLES = {
 // Where a panel lands when it is dragged out of a group, and the order tabs
 // are shown in. Every panel is listed: the five tabbed ones are members of a
 // host until the user pulls them out.
+// Key order is also the tab order inside a group: Clip, Text, List, Export.
 const DEFAULT_UNIT_ZONE = {
   project: "left", program: "center", inspector: "right", timeline: "bottom",
-  clip: "right", text: "right", export: "right", tl: "bottom", list: "bottom",
+  clip: "right", text: "right", list: "bottom", export: "right", tl: "bottom",
 };
 const UNIT_ORDER = Object.keys(DEFAULT_UNIT_ZONE);
 const DEFAULT_WORKSPACE_LAYOUT = {
@@ -112,10 +116,11 @@ const DEFAULT_WORKSPACE_LAYOUT = {
     clip: true, text: true, export: true,
     tl: true, list: true,
   },
-  activeTab: { inspector: "clip", timeline: "tl" },
+  activeTab: { inspector: "list", timeline: "tl" },
   host: { ...DEFAULT_UNIT_HOST },
   zoneSizes: {},
   sizes: {},
+  layoutRev: WORKSPACE_LAYOUT_REV,
 };
 const WINDOW_MENU = [
   ["project", "Project"],
@@ -184,28 +189,48 @@ function applyWorkspacePanelSize(panel, size) {
   }
   const parentWidth = panel.parentElement?.clientWidth || Number(size.width) || 320;
   const minWidth = Math.min(48, parentWidth);
-  let marginLeft = Number(size.marginLeft);
-  if (!Number.isFinite(marginLeft)) marginLeft = 0;
-  marginLeft = clampWorkspaceSize(marginLeft, 0, Math.max(0, parentWidth - minWidth));
-  let width = Number(size.width);
-  if (!Number.isFinite(width)) width = parentWidth - marginLeft;
-  width = clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth - marginLeft));
-
-  const minHeight = 48;
-  const maxHeight = Infinity; // free: user decides, page scrolls
-  let height = Number(size.height);
-  if (!Number.isFinite(height)) height = panel.getBoundingClientRect().height;
-  height = clampWorkspaceSize(height, minHeight, maxHeight);
-  let marginTop = Number(size.marginTop);
-  if (!Number.isFinite(marginTop)) marginTop = 0;
-  marginTop = clampWorkspaceSize(marginTop, 0, maxHeight);
-
-  panel.style.width = `${width}px`;
-  panel.style.height = `${height}px`;
-  panel.style.marginLeft = `${marginLeft}px`;
-  panel.style.marginTop = `${marginTop}px`;
-  panel.style.alignSelf = "flex-start";
-  panel.style.flex = "0 0 auto";
+  // Restore only the axis that was actually resized: a height-only resize must
+  // leave the panel stretched to its column, otherwise its left/right edges
+  // would stop being the free column dividers.
+  const horizontal = Number.isFinite(Number(size.width)) || Number.isFinite(Number(size.marginLeft));
+  const vertical = Number.isFinite(Number(size.height)) || Number.isFinite(Number(size.marginTop));
+  if (!horizontal && !vertical) {
+    clearWorkspacePanelSize(panel);
+    return;
+  }
+  if (horizontal) {
+    let marginLeft = Number(size.marginLeft);
+    if (!Number.isFinite(marginLeft)) marginLeft = 0;
+    marginLeft = clampWorkspaceSize(marginLeft, 0, Math.max(0, parentWidth - minWidth));
+    let width = Number(size.width);
+    if (!Number.isFinite(width)) width = parentWidth - marginLeft;
+    width = clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth - marginLeft));
+    // A wider-than/equal-to-the-column pin is not a real resize (older builds
+    // saved the natural full width). Leave those panels stretched so they keep
+    // following the column and their side edges stay free column dividers.
+    if (marginLeft === 0 && width >= parentWidth - 1) {
+      panel.style.width = "";
+      panel.style.marginLeft = "";
+      panel.style.alignSelf = "";
+    } else {
+      panel.style.width = `${width}px`;
+      panel.style.marginLeft = `${marginLeft}px`;
+      panel.style.alignSelf = "flex-start";
+    }
+  }
+  if (vertical) {
+    const minHeight = 48;
+    const maxHeight = Infinity; // free: user decides, page scrolls
+    let height = Number(size.height);
+    if (!Number.isFinite(height)) height = panel.getBoundingClientRect().height;
+    height = clampWorkspaceSize(height, minHeight, maxHeight);
+    let marginTop = Number(size.marginTop);
+    if (!Number.isFinite(marginTop)) marginTop = 0;
+    marginTop = clampWorkspaceSize(marginTop, 0, maxHeight);
+    panel.style.height = `${height}px`;
+    panel.style.marginTop = `${marginTop}px`;
+    panel.style.flex = "0 0 auto";
+  }
   panel.classList.add("workspace-panel-resized");
 }
 
@@ -220,7 +245,9 @@ function applyTimelinePanelSize(panel, size) {
   const height = Number(size.height);
   const marginTop = Number(size.marginTop);
   if (![width, height, marginTop].some(Number.isFinite)) return;
-  if (Number.isFinite(width)) {
+  // Same rule as the other units: a pin that is the whole row width is not a
+  // real resize, so let the panel stay stretched.
+  if (Number.isFinite(width) && width < parentWidth - 1) {
     panel.style.width = `${clampWorkspaceSize(width, minWidth, Math.max(minWidth, parentWidth))}px`;
   }
   if (Number.isFinite(height)) panel.style.height = `${clampWorkspaceSize(height, minHeight, maxHeight)}px`;
@@ -396,14 +423,41 @@ function setZoneSize(zone, px) {
   el.style.flexBasis = `${clampWorkspaceSize(px, limits[0], limits[1])}px`;
 }
 
+// A vertical edge that sits on a column boundary *is* a column divider, so it
+// drags the split freely (both directions, no maximum width) instead of
+// resizing the panel box inside a column whose width it can never exceed.
+// The center column has a divider on each side: its left edge drives the left
+// column and its right edge drives the right column. Outer edges (the window
+// sides) have no column to give space to, so those resize the panel itself.
+function columnSplitEdge(panel, edge, zone) {
+  if (!panel || !zone || (edge !== "left" && edge !== "right")) return null;
+  const zcol = zone.dataset.workspaceColumn;
+  let split = null;
+  if (zcol === "center") split = edge;
+  else if (zcol === "left" && edge === "right") split = "left";
+  else if (zcol === "right" && edge === "left") split = "right";
+  if (!split) return null;
+  // Only while the panel really reaches that boundary; a panel resized by
+  // hand sits inside its column and then its edges resize the panel again.
+  const pr = panel.getBoundingClientRect();
+  const zr = zone.getBoundingClientRect();
+  const flush = edge === "left"
+    ? pr.left - zr.left <= 2
+    : zr.right - pr.right <= 2;
+  return flush ? split : null;
+}
+
 function refreshWorkspaceResizeHandleTitles(root) {
-  // Edges facing the center resize the whole column; the rest resize the panel.
+  // Edges on a column boundary resize the whole column; the rest resize the panel.
   for (const handle of root.querySelectorAll(".workspace-resize-handle")) {
     const edge = handle.dataset.resizeEdge;
-    const zone = handle.closest("[data-workspace-column]")?.dataset.workspaceColumn;
-    const isColumn = (zone === "left" && edge === "right") || (zone === "right" && edge === "left");
-    handle.title = isColumn
-      ? `Drag to resize the ${zone} column`
+    const panel = handle.closest("[data-workspace-panel]");
+    const zone = panel?.closest("[data-workspace-column]");
+    const split = columnSplitEdge(panel, edge, zone);
+    // Name the divider rather than "this edge": the grip can sit on the right
+    // side of a panel while it widens the column on its left.
+    handle.title = split
+      ? `Drag the divider to resize the ${split} column`
       : `Drag the ${edge} edge to resize this panel`;
   }
 }
@@ -516,6 +570,13 @@ function applyWorkspaceLayout(layout) {
   for (const [m, h] of Object.entries(hostMap)) {
     if (hostMap[h] || Object.values(hostMap).includes(m)) delete hostMap[m];
   }
+  // Workspace rev 2 moved the List panel from the bottom group into the
+  // Inspector group. A rev-1 layout that still has List tabbed under the
+  // Timeline picks that up once; a List the user pulled out on purpose has no
+  // host entry and is left exactly where it is.
+  const oldLayout = (Number(layout?.layoutRev) || 1) < 2;
+  const listWasTimelineTab = oldLayout && hostMap.list === "timeline";
+  if (listWasTimelineTab) hostMap.list = "inspector";
   WS.host = hostMap;
   syncGroupTabs();
 
@@ -531,6 +592,7 @@ function applyWorkspaceLayout(layout) {
       }
     }
   }
+  if (listWasTimelineTab) WS.activeTab.inspector = "list";
   if (layout?.sizes && typeof layout.sizes === "object") WS.sizes = { ...layout.sizes };
 
   teardownGroups();
@@ -689,6 +751,7 @@ function saveWorkspaceLayout() {
       muted: [...(S.audioMuted || [])],
     };
   } else delete WS.lanes;
+  WS.layoutRev = WORKSPACE_LAYOUT_REV;   // this save already has rev-2 defaults
   try { localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(WS)); }
   catch (_) { /* Keep the current arrangement for this page if storage is unavailable. */ }
 }
@@ -817,6 +880,9 @@ function renderGroups() {
   for (const [host, members] of byHost) {
     const hostEl = unitEl(host);
     if (!hostEl) continue;
+    // Canonical tab order (Clip, Text, List, Export / Timeline, List), not the
+    // order the group map happens to be saved in.
+    members.sort((a, b) => UNIT_ORDER.indexOf(a) - UNIT_ORDER.indexOf(b));
     if (!TAB_STRIP_UNITS.includes(host)) ensurePlainGroupStrip(hostEl, host);
     const strip = hostEl.querySelector(":scope > .ws-tabs");
     const body = hostEl.querySelector(":scope > .ws-body");
@@ -857,9 +923,25 @@ function clearWorkspaceDropMarkers(root) {
 
 function addWorkspaceResizeHandles(root) {
   for (const panel of root.querySelectorAll("[data-workspace-panel]")) {
-    if (panel.classList.contains("is-member")) continue;   // grouped: the host sizes
+    const isMember = panel.classList.contains("is-member");   // grouped: the host sizes
     const edges = panel.dataset.workspacePanel === "timeline"
       ? ["right", "top", "bottom"] : ["left", "right", "top", "bottom"];
+    // Drop leftovers first: a handle belongs only as a direct child of a
+    // standalone unit, one per edge. Older layouts (and a panel moved between
+    // zones) can leave a second copy inside the body, which would sit on top
+    // of the real grip and confuse the hit testing.
+    for (const handle of [...panel.querySelectorAll(".workspace-resize-handle")]) {
+      if (isMember || handle.parentElement !== panel || !edges.includes(handle.dataset.resizeEdge)) {
+        handle.remove();
+      }
+    }
+    if (isMember) continue;
+    const seen = new Set();
+    for (const handle of [...panel.children]) {
+      if (!handle.classList || !handle.classList.contains("workspace-resize-handle")) continue;
+      if (seen.has(handle.dataset.resizeEdge)) handle.remove();
+      else seen.add(handle.dataset.resizeEdge);
+    }
     for (const edge of edges) {
       if (panel.querySelector(`:scope > [data-resize-edge="${edge}"]`)) continue;
       const handle = document.createElement("div");
@@ -887,6 +969,7 @@ function bindWorkspaceResize(root) {
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", finish);
     window.removeEventListener("pointercancel", finish);
+    refreshWorkspaceResizeHandleTitles(root);   // titles follow the new geometry
     saveWorkspaceLayout();
     window.dispatchEvent(new Event("resize"));
   };
@@ -894,11 +977,13 @@ function bindWorkspaceResize(root) {
   const move = (event) => {
     if (!active || event.pointerId !== active.pointerId) return;
     if (active.zoneResize) {
-      // the edge facing the center drags the whole column width
-      const r = active.zoneRect;
+      // The edge facing the center drags the whole column width. Track the
+      // pointer delta from where it was grabbed so the column does not jump
+      // by the handle's own offset (the grip is a few pixels wide).
+      const dx = event.clientX - active.zoneStartX;
       const px = active.zoneResize === "left"
-        ? event.clientX - r.left
-        : r.right - event.clientX;
+        ? active.zoneStartPx + dx
+        : active.zoneStartPx - dx;
       setZoneSize(active.zoneResize, px);
       window.dispatchEvent(new Event("resize"));
       return;
@@ -929,23 +1014,24 @@ function bindWorkspaceResize(root) {
       marginTop = clampWorkspaceSize(active.marginTop + active.height - height, 0, maxHeight);
     }
 
-    if (active.panel.dataset.workspacePanel === "timeline") {
-      if (active.edge === "right") {
-        active.panel.style.width = `${width}px`;
-      } else {
-        active.panel.style.height = `${height}px`;
-        active.panel.style.marginTop = `${marginTop}px`;
-      }
-      active.panel.style.alignSelf = "stretch";
-      active.panel.style.flex = "0 0 auto";
-    } else {
+    // Touch only the axis being dragged. A top/bottom drag that also pinned
+    // the width would freeze the panel at today's column width, and its
+    // left/right edges would stop dragging the column dividers.
+    const horizontal = active.edge === "left" || active.edge === "right";
+    const isTimeline = active.panel.dataset.workspacePanel === "timeline";
+    if (horizontal) {
       active.panel.style.width = `${width}px`;
+      if (isTimeline) active.panel.style.alignSelf = "stretch";
+      else {
+        active.panel.style.marginLeft = `${marginLeft}px`;
+        active.panel.style.alignSelf = "flex-start";
+      }
+    } else {
       active.panel.style.height = `${height}px`;
-      active.panel.style.marginLeft = `${marginLeft}px`;
       active.panel.style.marginTop = `${marginTop}px`;
-      active.panel.style.alignSelf = "flex-start";
-      active.panel.style.flex = "0 0 auto";
+      if (!isTimeline) active.panel.style.alignSelf = "stretch";
     }
+    active.panel.style.flex = "0 0 auto";
     active.panel.classList.add("workspace-panel-resized");
     window.dispatchEvent(new Event("resize"));
   };
@@ -969,12 +1055,24 @@ function bindWorkspaceResize(root) {
       bodyCursor: document.body.style.cursor,
       bodyUserSelect: document.body.style.userSelect,
     };
-    // Side columns: the edge facing the center resizes the whole column
-    // (free width), instead of the panel inside it.
-    const zcol = panel.closest("[data-workspace-column]")?.dataset.workspaceColumn;
-    if ((zcol === "left" && edge === "right") || (zcol === "right" && edge === "left")) {
-      const zel = zoneEl(zcol);
-      if (zel) { active.zoneResize = zcol; active.zoneRect = zel.getBoundingClientRect(); }
+    // Vertical edges on a column boundary drag that split free-form, exactly
+    // like the divider handles on the side columns (this includes both edges
+    // of the center column, which sit on the left and right dividers).
+    const split = columnSplitEdge(panel, edge, panel.closest("[data-workspace-column]"));
+    if (split) {
+      const zel = zoneEl(split);
+      if (zel) {
+        active.zoneResize = split;
+        active.zoneRect = zel.getBoundingClientRect();
+        active.zoneStartPx = active.zoneRect.width;
+        active.zoneStartX = event.clientX;
+        // Drop any inline horizontal size left over from an older layout so
+        // the panel keeps following the column it is being dragged against.
+        panel.style.width = "";
+        panel.style.marginLeft = "";
+        panel.style.alignSelf = "";
+        active.width = panel.getBoundingClientRect().width;
+      }
     }
     handle.classList.add("resizing");
     document.body.style.cursor = active.edge === "left" || active.edge === "right" ? "col-resize" : "row-resize";
