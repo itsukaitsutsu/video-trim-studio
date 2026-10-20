@@ -1,6 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+set "PATH=C:\Concat-deps\ffmpeg\bin;%PATH%"
 if not exist ".venv\Scripts\python.exe" (
   echo Virtual environment missing. Run setup.bat first.
   pause
