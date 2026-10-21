@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=44">
+<link rel="stylesheet" href="/static/style.css?v=47">
 </head>
 <body>
 <header id="menubar">
@@ -102,22 +102,12 @@
         </div>
         <div class="card" data-project-card="detect">
           <h3>1 &middot; Detect sections</h3>
-      <label class="chk"><input type="checkbox" id="dSilence" checked> Detect silence (ffmpeg silencedetect)</label>
-      <div class="row"><label>Threshold (dB)</label><input id="dThresh" type="number" value="-45" step="1"></div>
-      <div class="row"><label>Min silence (ms)</label><input id="dMinSilence" type="number" value="800" step="50"></div>
-      <label class="chk"><input type="checkbox" id="dCues" checked> Use captions (.srt / .vtt)</label>
-      <div class="row"><label>Subtitle file</label>
-        <span class="grow"><input id="dSubPath" type="text" placeholder="path to .srt / .vtt (optional)"></span>
-      </div>
-      <div class="row"><label></label>
-        <span class="grow">
-          <label class="ghost filebtn sm">Upload .srt/.vtt<input id="dSubFile" type="file" accept=".srt,.vtt"></label>
-          <span id="subInfo" class="dim"></span>
-        </span>
-      </div>
-      <div class="row"><label>Min section (ms)</label><input id="dMinSection" type="number" value="120" step="10"></div>
+      <div class="dim small detect-lead">Silence and caption settings live in the <b>Sections</b> panel, together with the section list and the clip timeline.</div>
+      <div class="row"><label>Settings</label><span class="grow dim small" id="detectSummary">&mdash;</span></div>
+      <div class="row"><label>Captions</label><span class="grow dim small" id="detectCuesInfo">&mdash;</span></div>
       <button id="detectBtn" class="primary block">Detect sections</button>
       <div id="detectInfo" class="dim small"></div>
+      <button id="openSectionsBtn" class="ghost block small" title="Show the Sections panel where the section list, the clip timeline and the detection settings are">Open Sections panel</button>
         </div>
         <div class="card" data-project-card="caption">
           <h3>2 &middot; Auto-caption</h3>
@@ -273,150 +263,350 @@
         <button type="button" class="ws-hide" data-hide-unit="inspector" aria-label="Hide Inspector panel" title="Hide this panel (show it again from the Window menu)">×</button>
       </div>
       <div class="ws-body">
-        <section class="moveunit" data-workspace-panel="clip" data-default-column="right" data-unit="clip" aria-label="Clip panel">
+        <section class="moveunit" data-workspace-panel="clip" data-default-column="right" data-unit="clip" aria-label="Inspector panel">
           <div class="ws-head">
-            <span class="ws-title">Clip</span>
+            <span class="ws-title">Inspector</span>
             <span class="ws-head-spacer"></span>
-            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Clip panel" title="Drag to move panel">⠿</button>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Inspector panel" title="Drag to move panel">⠿</button>
           </div>
-          <div class="ws-body" id="tab-clip">
-          <div class="card">
-      <div id="toolEmpty" class="dim small">Select a video clip on the timeline to edit it.</div>
-      <div id="toolBody" hidden>
-        <div class="tool-clipline"><b id="toolClipName">clip</b><span id="toolClipMeta" class="dim small"></span></div>
-        <div class="row"><label>Track</label>
-          <span class="grow tool-trackrow">
-            <button id="txTrackDown" class="mini" title="Move the clip down a track">&minus;</button>
-            <b id="txTrack">V1</b>
-            <button id="txTrackUp" class="mini" title="Move the clip up a lane">+</button>
-            <span class="dim small">higher lane overlays the one below</span>
-          </span>
+          <div class="ws-body" id="tab-inspector">
+          <div class="insp-shell">
+      <div class="insp-scope-row">
+        <div class="ins-seg ins-scope" id="inspScope" role="tablist" aria-label="Inspector target: clip or text">
+          <button type="button" role="tab" data-insp-scope="clip" aria-selected="true" class="on">Clip</button>
+          <button type="button" role="tab" data-insp-scope="text" aria-selected="false">Text</button>
         </div>
-        <div class="row"><label>Source</label><span class="grow dim small" id="txSource">&mdash;</span></div>
-        <div class="row"><label>Fit</label><span class="grow">
-          <select id="txFit" title="How the picture fills its box">
-            <option value="fill">fill (stretch to the box)</option>
-            <option value="contain">contain (letterbox, keep shape)</option>
-            <option value="cover">cover (crop to fill the box)</option>
-          </select>
-        </span></div>
-        <div class="row"><label>Frame</label><span class="grow">
-          <button id="txFillFrame" class="mini" title="Scale and position this clip so it exactly covers the frame">fill frame</button>
-          <button id="txCorner" class="mini" title="Scale to 35% and move it to the bottom-right corner - the classic B-roll picture-in-picture">corner PiP</button>
-        </span></div>
-        <details open>
-          <summary>Transform</summary>
-          <div class="tool-grid">
-            <label>X %<input id="txX" type="range" min="-100" max="100" step="1" value="0"><input id="txXn" type="number" step="1" value="0"></label>
-            <label>Y %<input id="txY" type="range" min="-100" max="100" step="1" value="0"><input id="txYn" type="number" step="1" value="0"></label>
-            <label>Scale %<input id="txS" type="range" min="1" max="200" step="1" value="100"><input id="txSn" type="number" min="1" max="400" step="1" value="100"></label>
-            <label>Opacity %<input id="txO" type="range" min="0" max="100" step="1" value="100"><input id="txOn" type="number" min="0" max="100" step="1" value="100"></label>
-          </div>
-          <div class="row"><button id="txReset" class="mini">Reset transform</button></div>
-        </details>
-        <details open>
-          <summary>Crop %</summary>
-          <div class="tool-grid crop">
-            <label>Left<input id="tcL" type="number" min="0" max="45" step="1" value="0"></label>
-            <label>Top<input id="tcT" type="number" min="0" max="45" step="1" value="0"></label>
-            <label>Right<input id="tcR" type="number" min="0" max="45" step="1" value="0"></label>
-            <label>Bottom<input id="tcB" type="number" min="0" max="45" step="1" value="0"></label>
-          </div>
-          <div class="row"><button id="tcReset" class="mini">Reset crop</button></div>
-        </details>
-        <details open>
-          <summary>Audio</summary>
-          <div class="tool-grid">
-            <label>Volume %<input id="taV" type="range" min="0" max="200" step="1" value="100"><input id="taVn" type="number" min="0" max="400" step="1" value="100"></label>
-          </div>
-          <div class="row"><label class="chk"><input type="checkbox" id="taMute"> Mute this clip</label></div>
-          <div class="row"><label>Sound</label><span class="grow">
-            <button id="txUnlinkAudio" class="mini" title="Move this clip's sound onto its own A lane so you can slide it under the picture">Unlink audio</button>
-            <span class="dim small" id="txAudioLane"></span>
-          </span></div>
-          <div class="tool-grid crop">
-            <label>Fade in (s)<input id="taFi" type="number" min="0" step="0.1" value="0"></label>
-            <label>Fade out (s)<input id="taFo" type="number" min="0" step="0.1" value="0"></label>
-          </div>
-          <div class="row"><button id="taReset" class="mini">Reset audio</button></div>
-        </details>
-        <details>
-          <summary>Video fade</summary>
-          <div class="tool-grid crop">
-            <label>Fade in (s)<input id="tvFi" type="number" min="0" step="0.1" value="0"></label>
-            <label>Fade out (s)<input id="tvFo" type="number" min="0" step="0.1" value="0"></label>
-          </div>
-          <div class="row"><button id="tvReset" class="mini">Reset fades</button><span class="dim small">fades to black</span></div>
-        </details>
-        <details open>
-          <summary>Keyframes <span id="tkCount" class="dim small"></span></summary>
-          <div id="tkInfo" class="dim small"></div>
-          <div class="row"><button id="tkAdd" class="mini">◆ Add at playhead</button><button id="tkClear" class="mini">Clear all</button></div>
-          <div id="tkList"></div>
-          <div class="dim small">Keyframes animate position, size and opacity between ◆ marks. Export bakes them into the video.</div>
-        </details>
+        <span class="insp-scope-meta dim small" id="inspScopeMeta"></span>
       </div>
-          </div>
-          </div>
-        </section>
-        <section class="moveunit" data-workspace-panel="text" data-default-column="right" data-unit="text" aria-label="Text panel">
-          <div class="ws-head">
-            <span class="ws-title">Text</span>
-            <span class="ws-head-spacer"></span>
-            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Text panel" title="Drag to move panel">⠿</button>
-          </div>
-          <div class="ws-body" id="tab-text">
-          <div class="card text-style-panel">
-      <details open>
-        <summary>Text</summary>
-        <div class="style-panel-content">
-          <div class="style-row"><select id="capFontFamily" aria-label="Font family">
-            <option>Arial</option><option>Arial Black</option><option>Segoe UI</option><option>Verdana</option><option>Tahoma</option><option>Georgia</option><option>Times New Roman</option><option>Courier New</option><option>Lucida Console</option>
-          </select><select id="capFontStyle" aria-label="Font style"><option value="regular">Regular</option><option value="bold">Bold</option><option value="italic">Italic</option><option value="bold-italic">Bold Italic</option></select></div>
-          <div class="style-row font-actions">
-            <label class="ghost filebtn">Import fonts<input id="fontImport" type="file" accept=".ttf,.otf" multiple></label>
-            <button type="button" id="fontRefresh" class="ghost mini">Refresh installed</button>
-            <button type="button" id="fontDevice" class="ghost mini">Device fonts…</button>
-          </div>
-          <p id="fontInfo" class="dim small" role="status">Loading installed fonts…</p>
-          <div class="style-row style-format-icons">
-            <button class="style-icon" id="capBold" title="Bold"><b>B</b></button><button class="style-icon" id="capItalic" title="Italic"><i>I</i></button><button class="style-icon" id="capUnderline" title="Underline"><u>U</u></button><button class="style-icon" id="capStrike" title="Strikethrough"><s>S</s></button><span class="style-spacer"></span>
-            <label>Size <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="4.5"><output id="capFontSizeValue">48</output></label>
-          </div>
-          <div class="style-row style-align-icons" aria-label="Text alignment">
-            <button class="style-icon capAlign" data-align="left" title="Align left">≡</button><button class="style-icon capAlign" data-align="center" title="Center">☰</button><button class="style-icon capAlign" data-align="right" title="Align right">≡</button><button class="style-icon capAlign" data-align="justify" title="Justify">▤</button>
-          </div>
-          <div class="style-row style-metrics"><label>Tracking <input id="capTracking" type="number" min="-0.2" max="1" step="0.01" value="0"></label><label>Leading <input id="capLineSpacing" type="number" min="0.7" max="3" step="0.05" value="1.25"></label></div>
+
+      <div class="insp-pane" data-insp-pane="clip">
+        <div class="ins-seg ins-modes" id="inspClipMode" role="tablist" aria-label="Clip inspector: video, audio or effect">
+          <button type="button" role="tab" data-insp-mode="video" aria-selected="true" class="on">Video</button>
+          <button type="button" role="tab" data-insp-mode="audio" aria-selected="false">Audio</button>
+          <button type="button" role="tab" data-insp-mode="effect" aria-selected="false">Effect</button>
         </div>
-      </details>
-      <details open>
-        <summary>Align and Transform</summary>
-        <div class="style-panel-content transform-grid">
-          <div class="zone-wrap"><span class="dim small">Zone</span><div class="zone-grid" role="group" aria-label="Caption anchor zone">
-            <button class="capZone" data-x="0.08" data-y="0.08" title="Top left"></button><button class="capZone" data-x="0.5" data-y="0.08" title="Top centre"></button><button class="capZone" data-x="0.92" data-y="0.08" title="Top right"></button>
-            <button class="capZone" data-x="0.08" data-y="0.5" title="Middle left"></button><button class="capZone" data-x="0.5" data-y="0.5" title="Centre"></button><button class="capZone" data-x="0.92" data-y="0.5" title="Middle right"></button>
-            <button class="capZone" data-x="0.08" data-y="0.92" title="Bottom left"></button><button class="capZone" data-x="0.5" data-y="0.92" title="Bottom centre"></button><button class="capZone" data-x="0.92" data-y="0.92" title="Bottom right"></button>
-          </div></div>
-          <label>X <input id="capX" type="number" min="0" max="100" step="1">%</label><label>Y <input id="capY" type="number" min="0" max="100" step="1">%</label>
-          <label>W <input id="capWidth" type="number" min="5" max="100" step="1">%</label><label>H <input id="capHeight" type="number" min="0" max="100" step="1" placeholder="Auto">%</label>
-        </div>
-      </details>
-      <details open>
-        <summary>Appearance <span class="dim small">⚙</span></summary>
-        <div class="style-panel-content appearance-controls">
-          <div class="appearance-row"><b>Fill</b><label class="appearance-color"><input id="capFillEnabled" type="checkbox" checked><input id="capFill" type="color" value="#ffffff"></label><input id="capFillOpacity" type="range" min="0" max="100" value="100"><output id="capFillOpacityValue">100</output></div>
-          <div class="appearance-row"><b>Stroke</b><label class="appearance-color"><input id="capStrokeEnabled" type="checkbox"><input id="capStroke" type="color" value="#000000"></label><input id="capStrokeWidth" type="number" min="0" max="20" step="0.5" value="2"><select id="capStrokePosition"><option value="outer">Outer</option><option value="center">Center</option><option value="inner">Inner</option></select><input id="capStrokeOpacity" type="range" min="0" max="100" value="100"></div>
-          <div class="appearance-row"><b>Background</b><label class="appearance-color"><input id="capBackgroundEnabled" type="checkbox"><input id="capBackground" type="color" value="#000000"></label><input id="capBackgroundOpacity" type="range" min="0" max="100" value="72"><output id="capBackgroundOpacityValue">72</output></div>
-          <div class="appearance-row shadow-row"><b>Shadow</b><label class="appearance-color"><input id="capShadowEnabled" type="checkbox"><input id="capShadow" type="color" value="#000000"></label>
-            <label>Opacity<input id="capShadowOpacity" type="range" min="0" max="100" value="75"><output id="capShadowOpacityValue">75</output></label>
-            <label>Angle<input id="capShadowAngle" type="range" min="0" max="359" value="135"><output id="capShadowAngleValue">135°</output></label>
-            <label>Distance<input id="capShadowDistance" type="range" min="0" max="30" step="0.5" value="3"><output id="capShadowDistanceValue">3</output></label>
-            <label>Size (spread)<input id="capShadowSize" title="Expands the shadow silhouette; does not duplicate or scale the text" type="range" min="0" max="20" step="0.5" value="6"><output id="capShadowSizeValue">6</output></label>
-            <label>Blur<input id="capShadowBlur" type="range" min="0" max="20" step="0.5" value="12"><output id="capShadowBlurValue">12</output></label>
+        <div id="toolEmpty" class="dim small ins-empty">Select a video clip on the timeline to edit it.</div>
+        <div id="toolBody" hidden>
+          <div class="tool-clipline"><b id="toolClipName">clip</b><span id="toolClipMeta" class="dim small"></span></div>
+
+          <div class="insp-tab" data-insp-tab="video">
+            <div class="ins-card">
+              <div class="ins-row"><span class="ins-lab">Track</span>
+                <span class="grow tool-trackrow">
+                  <button id="txTrackDown" class="mini" title="Move the clip down a track">&minus;</button>
+                  <b id="txTrack">V1</b>
+                  <button id="txTrackUp" class="mini" title="Move the clip up a lane">+</button>
+                </span>
+              </div>
+              <div class="ins-row"><span class="ins-lab">Source</span><span class="ins-val dim small" id="txSource">&mdash;</span></div>
+              <div class="ins-row"><span class="ins-lab">Fit</span>
+                <select id="txFit" title="How the picture fills its box">
+                  <option value="fill">fill (stretch to the box)</option>
+                  <option value="contain">contain (letterbox, keep shape)</option>
+                  <option value="cover">cover (crop to fill the box)</option>
+                </select>
+              </div>
+              <div class="ins-row"><span class="ins-lab">Frame</span>
+                <span class="grow ins-btnrow">
+                  <button id="txFillFrame" class="mini" title="Scale and position this clip so it exactly covers the frame">fill frame</button>
+                  <button id="txCorner" class="mini" title="Scale to 35% and move it to the bottom-right corner - the classic B-roll picture-in-picture">corner PiP</button>
+                </span>
+              </div>
+            </div>
+
+            <details open class="insp-sect">
+              <summary>Transform</summary>
+              <div class="ins-body">
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>X</span><span class="dim small">%</span><input id="txXn" type="number" step="1" value="0" aria-label="Horizontal position"></div>
+                  <input id="txX" type="range" min="-100" max="100" step="1" value="0" aria-label="Horizontal position slider">
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Y</span><span class="dim small">%</span><input id="txYn" type="number" step="1" value="0" aria-label="Vertical position"></div>
+                  <input id="txY" type="range" min="-100" max="100" step="1" value="0" aria-label="Vertical position slider">
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Scale</span><span class="dim small">%</span><input id="txSn" type="number" min="1" max="400" step="1" value="100" aria-label="Scale"></div>
+                  <input id="txS" type="range" min="1" max="200" step="1" value="100" aria-label="Scale slider">
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Opacity</span><span class="dim small">%</span><input id="txOn" type="number" min="0" max="100" step="1" value="100" aria-label="Opacity"></div>
+                  <input id="txO" type="range" min="0" max="100" step="1" value="100" aria-label="Opacity slider">
+                </div>
+                <div class="ins-row"><button id="txReset" class="mini">Reset transform</button></div>
+              </div>
+            </details>
+
+            <details class="insp-sect">
+              <summary>Crop</summary>
+              <div class="ins-body">
+                <div class="ins-quad">
+                  <label>Left<input id="tcL" type="number" min="0" max="45" step="1" value="0"></label>
+                  <label>Top<input id="tcT" type="number" min="0" max="45" step="1" value="0"></label>
+                  <label>Right<input id="tcR" type="number" min="0" max="45" step="1" value="0"></label>
+                  <label>Bottom<input id="tcB" type="number" min="0" max="45" step="1" value="0"></label>
+                </div>
+                <div class="ins-row"><button id="tcReset" class="mini">Reset crop</button></div>
+              </div>
+            </details>
+
+            <details class="insp-sect">
+              <summary>Fades</summary>
+              <div class="ins-body">
+                <div class="ins-quad">
+                  <label>In (s)<input id="tvFi" type="number" min="0" step="0.1" value="0"></label>
+                  <label>Out (s)<input id="tvFo" type="number" min="0" step="0.1" value="0"></label>
+                </div>
+                <div class="ins-row"><button id="tvReset" class="mini">Reset fades</button><span class="dim small">fades to black</span></div>
+              </div>
+            </details>
+
+            <details open class="insp-sect">
+              <summary>Keyframes <span id="tkCount" class="dim small"></span></summary>
+              <div class="ins-body">
+                <div id="tkInfo" class="dim small"></div>
+                <div class="ins-row"><button id="tkAdd" class="mini">◆ Add at playhead</button><button id="tkClear" class="mini">Clear all</button></div>
+                <div id="tkList"></div>
+                <p class="ins-note">Keyframes animate position, size and opacity between ◆ marks. Export bakes them into the video.</p>
+              </div>
+            </details>
+          </div>
+
+          <div class="insp-tab" data-insp-tab="audio" hidden>
+            <div class="ins-card">
+              <div class="ins-row"><span class="ins-lab">Sound</span>
+                <span class="grow ins-btnrow">
+                  <button id="txUnlinkAudio" class="mini" title="Move this clip's sound onto its own A lane so you can slide it under the picture">Unlink audio</button>
+                  <span class="dim small" id="txAudioLane"></span>
+                </span>
+              </div>
+            </div>
+            <details open class="insp-sect">
+              <summary>Level</summary>
+              <div class="ins-body">
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Volume</span><span class="dim small">%</span><input id="taVn" type="number" min="0" max="400" step="1" value="100" aria-label="Volume"></div>
+                  <input id="taV" type="range" min="0" max="200" step="1" value="100" aria-label="Volume slider">
+                </div>
+                <label class="chk ins-chk"><input type="checkbox" id="taMute"> Mute this clip</label>
+                <div class="ins-row"><button id="taReset" class="mini">Reset audio</button></div>
+              </div>
+            </details>
+            <details open class="insp-sect">
+              <summary>Fades</summary>
+              <div class="ins-body">
+                <div class="ins-quad">
+                  <label>In (s)<input id="taFi" type="number" min="0" step="0.1" value="0"></label>
+                  <label>Out (s)<input id="taFo" type="number" min="0" step="0.1" value="0"></label>
+                </div>
+                <p class="ins-note">Audio fades are applied before the mixer, so a faded clip keeps its place in the mix.</p>
+              </div>
+            </details>
+          </div>
+
+          <div class="insp-tab" data-insp-tab="effect" hidden>
+            <details open class="insp-sect">
+              <summary>Look</summary>
+              <div class="ins-body">
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Brightness</span><span class="dim small">%</span><input id="lookBn" type="number" min="-100" max="100" step="1" value="0" aria-label="Brightness"></div>
+                  <input id="lookB" type="range" min="-100" max="100" step="1" value="0" aria-label="Brightness slider">
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Contrast</span><span class="dim small">%</span><input id="lookCn" type="number" min="-100" max="100" step="1" value="0" aria-label="Contrast"></div>
+                  <input id="lookC" type="range" min="-100" max="100" step="1" value="0" aria-label="Contrast slider">
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Saturation</span><span class="dim small">%</span><input id="lookSn" type="number" min="-100" max="100" step="1" value="0" aria-label="Saturation"></div>
+                  <input id="lookS" type="range" min="-100" max="100" step="1" value="0" aria-label="Saturation slider">
+                </div>
+                <div class="ins-row"><button id="lookReset" class="mini">Reset look</button><span class="dim small">baked into the export</span></div>
+              </div>
+            </details>
+            <details open class="insp-sect">
+              <summary>Effect chain <span class="dim small" id="effCount"></span></summary>
+              <div class="ins-body">
+                <div id="effChain" class="eff-chain"></div>
+                <p class="ins-note">The chain runs top to bottom: crop, fit, scale, position, opacity, video fade, then the sound stage.</p>
+              </div>
+            </details>
+            <details open class="insp-sect">
+              <summary>Add effect</summary>
+              <div class="ins-body">
+                <div id="effLib" class="eff-lib"></div>
+                <div class="ins-row"><button id="effResetAll" class="mini">Reset all effects</button></div>
+              </div>
+            </details>
           </div>
         </div>
-        <div class="row"><button id="capPosReset" class="mini">Reset style</button><span id="capPosInfo" class="dim small"></span></div>
-      </details>
+      </div>
+
+      <div class="insp-pane" data-insp-pane="text" hidden>
+        <div class="ins-caphead">
+          <b id="insCapName">No caption at the playhead</b>
+          <span id="insCapMeta" class="dim small"></span>
+        </div>
+
+        <details open class="insp-sect">
+          <summary>Content</summary>
+          <div class="ins-body">
+            <textarea id="insCapText" rows="3" placeholder="Type the caption text…" spellcheck="true" aria-label="Caption text"></textarea>
+            <div class="ins-row ins-btnrow">
+              <button id="capAdd" class="mini" title="Add a caption at the playhead on the topmost video track">+ caption</button>
+              <button id="insCapDel" class="mini" title="Delete this caption">Delete</button>
+              <button id="insCapDup" class="mini" title="Duplicate this caption after itself">Duplicate</button>
+            </div>
+            <div id="insContentInfo" class="dim small"></div>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Typography</summary>
+          <div class="ins-body">
+            <div class="ins-font"><select id="capFontFamily" aria-label="Font family">
+              <option>Arial</option><option>Arial Black</option><option>Segoe UI</option><option>Verdana</option><option>Tahoma</option><option>Georgia</option><option>Times New Roman</option><option>Courier New</option><option>Lucida Console</option>
+            </select></div>
+            <div class="ins-row">
+              <select id="capFontStyle" aria-label="Font style"><option value="regular">Regular</option><option value="bold">Bold</option><option value="italic">Italic</option><option value="bold-italic">Bold Italic</option></select>
+            </div>
+            <div class="ins-row font-actions">
+              <label class="ghost filebtn">Import fonts<input id="fontImport" type="file" accept=".ttf,.otf" multiple></label>
+              <button type="button" id="fontRefresh" class="ghost mini">Refresh</button>
+              <button type="button" id="fontDevice" class="ghost mini">Device fonts…</button>
+            </div>
+            <p id="fontInfo" class="ins-note" role="status">Loading installed fonts…</p>
+            <div class="ins-row ins-btnrow">
+              <button class="style-icon" id="capBold" title="Bold"><b>B</b></button><button class="style-icon" id="capItalic" title="Italic"><i>I</i></button><button class="style-icon" id="capUnderline" title="Underline"><u>U</u></button><button class="style-icon" id="capStrike" title="Strikethrough"><s>S</s></button>
+            </div>
+            <div class="ins-slider">
+              <div class="ins-slider-top"><span>Size</span><span class="dim small">px @1080</span><output id="capFontSizeValue">48</output></div>
+              <input id="capFontSize" type="range" min="2" max="14" step="0.5" value="4.5" aria-label="Caption size">
+            </div>
+            <div class="ins-row"><span class="ins-lab">Fill</span>
+              <span class="grow ins-color"><label class="appearance-color"><input id="capFillEnabled" type="checkbox" checked><input id="capFill" type="color" value="#ffffff"></label><input id="capFillOpacity" type="range" min="0" max="100" value="100" aria-label="Fill opacity"><output id="capFillOpacityValue">100</output></span>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Highlight</span>
+              <span class="grow ins-color"><input id="insHighlight" type="color" value="#ffd400" aria-label="Spoken-word highlight colour"><span class="dim small">spoken word</span></span>
+            </div>
+            <label class="chk ins-chk"><input type="checkbox" id="capApplyAll"> Apply style edits to every caption</label>
+            <div class="ins-row"><b class="ins-sub">Drop shadow</b></div>
+            <div class="ins-row"><span class="ins-lab">Shadow</span>
+              <span class="grow ins-color"><label class="appearance-color"><input id="capShadowEnabled" type="checkbox"><input id="capShadow" type="color" value="#000000"></label>
+              <input id="capShadowOpacity" type="range" min="0" max="100" value="75" aria-label="Shadow opacity"><output id="capShadowOpacityValue">75</output></span>
+            </div>
+            <div class="ins-quad">
+              <label>Angle <span id="capShadowAngleValue" class="dim small">135°</span><input id="capShadowAngle" type="range" min="0" max="359" value="135"></label>
+              <label>Distance <span id="capShadowDistanceValue" class="dim small">3</span><input id="capShadowDistance" type="range" min="0" max="30" step="0.5" value="3"></label>
+              <label>Spread <span id="capShadowSizeValue" class="dim small">6</span><input id="capShadowSize" title="Expands the shadow silhouette; does not duplicate or scale the text" type="range" min="0" max="20" step="0.5" value="6"></label>
+              <label>Blur <span id="capShadowBlurValue" class="dim small">12</span><input id="capShadowBlur" type="range" min="0" max="20" step="0.5" value="12"></label>
+            </div>
+            <div class="ins-row"><b class="ins-sub">Background</b></div>
+            <div class="ins-row"><span class="ins-lab">Colour</span>
+              <span class="grow ins-color"><label class="appearance-color"><input id="capBackgroundEnabled" type="checkbox"><input id="capBackground" type="color" value="#000000"></label>
+              <input id="capBackgroundOpacity" type="range" min="0" max="100" value="72" aria-label="Background opacity"><output id="capBackgroundOpacityValue">72</output></span>
+            </div>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Text animation</summary>
+          <div class="ins-body">
+            <div class="ins-row"><span class="ins-lab">In</span>
+              <select id="insAnimIn" aria-label="Caption entrance animation">
+                <option value="none">None</option>
+                <option value="fade">Fade in</option>
+                <option value="pop">Pop in</option>
+                <option value="bounce">Bounce</option>
+                <option value="slide">Slide up</option>
+                <option value="typewriter">Typewriter</option>
+              </select>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Duration</span>
+              <span class="grow ins-numrow"><input id="insAnimMs" type="number" min="0" max="4000" step="50" value="400"><span class="dim small">ms</span></span>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Words</span>
+              <select id="insAnimWords" aria-label="Word animation">
+                <option value="none">Show all at once</option>
+                <option value="reveal">Word reveal</option>
+                <option value="karaoke">Karaoke highlight</option>
+              </select>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Word stagger</span>
+              <span class="grow ins-numrow"><input id="insAnimStagger" type="number" min="0" max="800" step="10" value="120"><span class="dim small">ms</span></span>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Pop scale</span>
+              <span class="grow ins-numrow"><input id="insAnimPop" type="number" min="100" max="220" step="5" value="130"><span class="dim small">%</span></span>
+            </div>
+            <div class="ins-row ins-btnrow">
+              <button id="insAnimTry" class="mini" title="Jump to this caption and play the entrance">▶ Preview</button>
+              <button id="insAnimReset" class="mini">Reset animation</button>
+            </div>
+            <p class="ins-note">Fade, pop, bounce, slide and typewriter also burn into the export; karaoke and word reveal follow each word's own timing.</p>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Filler words <span class="dim small" id="insFillerCount"></span></summary>
+          <div class="ins-body">
+            <div id="insFillerList" class="filler-list"></div>
+            <div class="ins-row ins-btnrow">
+              <button id="insFillerAll" class="mini">Select all</button>
+              <button id="insFillerNone" class="mini">Clear</button>
+              <button id="insFillerRemove" class="mini warn" title="Strip the ticked filler words out of the caption text">Remove from captions</button>
+            </div>
+            <p class="ins-note" id="insFillerNote">Only the caption text is touched. Use the timeline to cut the sound.</p>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Stroke</summary>
+          <div class="ins-body">
+            <div class="ins-row"><span class="ins-lab">Outline</span>
+              <span class="grow ins-color"><label class="appearance-color"><input id="capStrokeEnabled" type="checkbox"><input id="capStroke" type="color" value="#000000"></label>
+              <input id="capStrokeOpacity" type="range" min="0" max="100" value="100" aria-label="Stroke opacity"></span>
+            </div>
+            <div class="ins-row">
+              <label class="ins-quad-half">Width<input id="capStrokeWidth" type="number" min="0" max="20" step="0.5" value="2"></label>
+              <select id="capStrokePosition" aria-label="Stroke position"><option value="outer">Outer</option><option value="center">Center</option><option value="inner">Inner</option></select>
+            </div>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Layout</summary>
+          <div class="ins-body">
+            <div class="ins-row ins-btnrow" aria-label="Text alignment">
+              <button class="style-icon capAlign" data-align="left" title="Align left">≡</button><button class="style-icon capAlign" data-align="center" title="Center">☰</button><button class="style-icon capAlign" data-align="right" title="Align right">≡</button><button class="style-icon capAlign" data-align="justify" title="Justify">▤</button>
+            </div>
+            <div class="ins-quad">
+              <label>Width %<input id="capWidth" type="number" min="5" max="100" step="1"></label>
+              <label>Height %<input id="capHeight" type="number" min="0" max="100" step="1" placeholder="Auto"></label>
+              <label>Line height<input id="capLineSpacing" type="number" min="0.7" max="3" step="0.05" value="1.25"></label>
+              <label>Tracking<input id="capTracking" type="number" min="-0.2" max="1" step="0.01" value="0"></label>
+            </div>
+          </div>
+        </details>
+
+        <details open class="insp-sect">
+          <summary>Position</summary>
+          <div class="ins-body">
+            <div class="zone-wrap"><span class="dim small">Zone</span><div class="zone-grid" role="group" aria-label="Caption anchor zone">
+              <button class="capZone" data-x="0.08" data-y="0.08" title="Top left"></button><button class="capZone" data-x="0.5" data-y="0.08" title="Top centre"></button><button class="capZone" data-x="0.92" data-y="0.08" title="Top right"></button>
+              <button class="capZone" data-x="0.08" data-y="0.5" title="Middle left"></button><button class="capZone" data-x="0.5" data-y="0.5" title="Centre"></button><button class="capZone" data-x="0.92" data-y="0.5" title="Middle right"></button>
+              <button class="capZone" data-x="0.08" data-y="0.92" title="Bottom left"></button><button class="capZone" data-x="0.5" data-y="0.92" title="Bottom centre"></button><button class="capZone" data-x="0.92" data-y="0.92" title="Bottom right"></button>
+            </div></div>
+            <div class="ins-quad">
+              <label>X %<input id="capX" type="number" min="0" max="100" step="1"></label>
+              <label>Y %<input id="capY" type="number" min="0" max="100" step="1"></label>
+            </div>
+          </div>
+        </details>
+
+        <div class="ins-foot">
+          <button id="capPosReset" class="mini">Reset style</button>
+          <span id="capPosInfo" class="dim small"></span>
+        </div>
+      </div>
           </div>
           </div>
         </section>
@@ -570,37 +760,80 @@
 <div id="pvToast" role="status" aria-live="polite"></div>
 </div>
         </section>
-        <section class="moveunit" data-workspace-panel="list" data-default-column="bottom" data-unit="list" aria-label="List panel">
+        <section class="moveunit" data-workspace-panel="list" data-default-column="bottom" data-unit="list" aria-label="Sections panel">
           <div class="ws-head">
-            <span class="ws-title">List</span>
+            <span class="ws-title">Sections</span>
             <span class="ws-head-spacer"></span>
-            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move List panel" title="Drag to move panel">⠿</button>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Sections panel" title="Drag to move panel">⠿</button>
           </div>
           <div class="ws-body" id="tab-list">
-          <div class="list-card">
-      <div class="list-tools">
-        <button class="chip on" data-kind="caption">caption</button>
-        <button class="chip on" data-kind="silence">silence</button>
-        <button class="chip on" data-kind="other">other</button>
-        <label class="mini-label">min section
-          <input id="minDur" type="number" value="0.4" min="0" step="0.1" style="width:64px"> s
-        </label>
-        <input id="searchBox" type="search" placeholder="search caption text&hellip;">
-        <span class="spacer"></span>
-        <button class="mini" id="selVisible">select visible</button>
-        <button class="mini" id="selNone">clear</button>
-        <button class="mini" id="selRemove" title="Remove selected timeline items and close the gaps">remove selected</button>
-        <button class="mini" id="selInvert">invert</button>
-        <button class="mini" id="selAllSilence">all silence</button>
-        <button class="mini" id="selAllCaptions">all captions</button>
+          <div class="list-card sections-panel">
+      <details class="sec-detect" id="secDetectBox" open>
+        <summary>
+          <span class="sec-caret" aria-hidden="true"></span>
+          <span class="sec-detect-name">Detect</span>
+          <span class="sec-detect-sum" id="secDetectSum"></span>
+        </summary>
+        <div class="sec-detect-grid">
+          <label class="chk sec-span-all"><input type="checkbox" id="dSilence" checked> Detect silence (ffmpeg silencedetect)</label>
+          <label class="sec-field">Threshold
+            <span class="sec-num"><input id="dThresh" type="number" value="-45" step="1" aria-label="Silence threshold in dB"><em>dB</em></span>
+          </label>
+          <label class="sec-field">Min silence
+            <span class="sec-num"><input id="dMinSilence" type="number" value="800" step="50" aria-label="Minimum silence in milliseconds"><em>ms</em></span>
+          </label>
+          <label class="sec-field">Min section
+            <span class="sec-num"><input id="dMinSection" type="number" value="120" step="10" aria-label="Minimum section in milliseconds"><em>ms</em></span>
+          </label>
+          <label class="chk sec-span-all"><input type="checkbox" id="dCues" checked> Use captions (.srt / .vtt)</label>
+          <div class="sec-sub-row sec-span-all">
+            <input id="dSubPath" type="text" placeholder="path to .srt / .vtt (optional)" aria-label="Subtitle file path" spellcheck="false">
+            <label class="ghost filebtn sm">Upload .srt/.vtt<input id="dSubFile" type="file" accept=".srt,.vtt"></label>
+            <button id="secDetectBtn" class="primary" type="button" title="Run silence detection and rebuild the sections">Detect sections</button>
+          </div>
+          <div class="sec-span-all sec-detect-info"><span id="subInfo" class="dim small"></span></div>
+          <div class="sec-span-all sec-run"><span id="secRun" class="dim small" aria-live="polite"></span></div>
+        </div>
+      </details>
+
+      <div class="sec-strip-head">
+        <span class="sec-strip-title">Clip timeline</span>
+        <span id="secKept" class="sec-kept"></span>
       </div>
-      <div class="dim small selection-hint">V1 sections and captions (each on its own V track above the video) are listed here. The list follows the playhead and blue edges mark active items. Click a non-text cell to select and seek; tick boxes, Shift-click, or hold-drag to select several; click text to edit it.</div>
+      <div class="sec-strip" id="secStrip" title="Every section and caption on the timeline. Click a block to select or deselect it for removal.">
+        <div class="sec-strip-track" id="secStripTrack"></div>
+        <div class="sec-strip-needle" id="secStripNeedle" hidden></div>
+      </div>
+      <div class="sec-strip-ends"><span id="secStripStart">00:00</span><span id="secStripEnd">00:00</span></div>
+
+      <div class="sec-toolbar">
+        <button class="chip on" data-kind="caption" title="Show or hide caption sections"><i class="dot cap"></i>caption</button>
+        <button class="chip on" data-kind="silence" title="Show or hide silence sections"><i class="dot sil"></i>silence</button>
+        <button class="chip on" data-kind="other" title="Show or hide other-audio sections"><i class="dot oth"></i>other</button>
+        <label class="mini-label sec-min">min section
+          <input id="minDur" type="number" value="0.4" min="0" step="0.1" aria-label="Minimum section length in seconds"> s
+        </label>
+        <input id="searchBox" type="search" placeholder="search caption text&hellip;" aria-label="Search caption text">
+      </div>
+      <div class="sec-actions">
+        <button class="mini" id="selVisible">Select visible</button>
+        <button class="mini" id="selNone">Clear</button>
+        <button class="mini" id="selInvert">Invert</button>
+        <button class="mini" id="selAllSilence">All silence</button>
+        <button class="mini" id="selAllCaptions">All captions</button>
+      </div>
+      <div class="sec-hint">Check the sections you want to remove (silences, bad takes), then press <b>Remove selected</b>. Click a row to jump the playhead; click text to edit it. Blue = at playhead.</div>
       <div class="list-scroll">
         <table id="secTable">
           <thead><tr><th></th><th>track</th><th>start</th><th>end</th><th>dur</th><th>kind</th><th>text</th></tr></thead>
           <tbody></tbody>
         </table>
         <div id="listEmpty" class="empty">No timeline items yet &mdash; open a video or add captions.</div>
+      </div>
+      <div class="sec-footer">
+        <span id="secFooterInfo" class="dim small"></span>
+        <span class="spacer"></span>
+        <button class="mini" id="selRemove" title="Remove selected timeline items and close the gaps">Remove selected</button>
       </div>
           </div>
           </div>
@@ -621,12 +854,13 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=8"></script>
+<script src="/static/timeline-model.js?v=10"></script>
 <script src="/static/media.js?v=1"></script>
-<script src="/static/stage.js?v=2"></script>
-<script src="/static/timeline.js?v=20"></script>
-<script src="/static/clip.js?v=1"></script>
-<script src="/static/app.js?v=47"></script>
+<script src="/static/stage.js?v=4"></script>
+<script src="/static/timeline.js?v=23"></script>
+<script src="/static/clip.js?v=3"></script>
+<script src="/static/app.js?v=50"></script>
+<script src="/static/inspector.js?v=2"></script>
 <script src="/static/font-picker.js?v=1"></script>
 <script src="/static/fonts.js?v=1"></script>
 </body>

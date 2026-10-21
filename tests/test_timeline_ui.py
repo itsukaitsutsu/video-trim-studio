@@ -488,6 +488,75 @@ def test_playback_caption_box_lanes_and_list(browser_page):
     assert not page_errors, page_errors
 
 
+def test_sections_panel_strip_detect_and_remove(browser_page):
+    """The List panel is now the kconcat-style Sections panel."""
+    page, page_errors = browser_page
+    page.set_viewport_size({"width": 1600, "height": 1200})
+    open_demo(page)
+    page.click("#workspaceReset")
+
+    panel = page.locator('[data-workspace-panel="list"]')
+    assert page.locator("#inspTabs [data-wintab='list']").inner_text() == "Sections"
+    assert panel.locator(".ws-title").inner_text() == "Sections"
+    # Detection settings live in the panel, not in a separate card up top.
+    assert panel.locator("#dThresh").count() == 1
+    assert panel.locator("#dSilence").count() == 1
+    assert page.locator('[data-project-card="detect"] #dThresh').count() == 0
+
+    # A collapsible Detect block with a live summary.
+    assert panel.locator("#secDetectBox").evaluate("el => el.open") is True
+    summary = page.locator("#secDetectSum").inner_text()
+    assert "other audio" in summary or "no sections yet" in summary, summary
+
+    # The Project card mirrors the settings and can bring the panel back.
+    assert "dB" in page.locator("#detectSummary").inner_text()
+
+    # Detect: rows, strip blocks and the "keeping" tally all follow the result.
+    page.click("#detectBtn")
+    page.wait_for_function("S.tl.clips.length > 2", timeout=120000)
+    rows = page.locator("#secTable tbody tr").count()
+    spans = page.locator("#secStripTrack .sec-span").count()
+    assert rows == page.evaluate("visibleListItems().length")
+    assert spans == rows
+    assert "Keeping" in page.locator("#secKept").inner_text()
+    kinds = page.eval_on_selector_all("#secStripTrack .sec-span", "els => [...new Set(els.map(e => [...e.classList].find(c => c.startsWith('k-'))))]")
+    assert "k-silence" in kinds and "k-other" in kinds, kinds
+
+    # Clicking a strip block marks that section for removal; the tally drops.
+    kept_before = page.locator("#secKept").inner_text()
+    page.locator("#secStripTrack .sec-span.k-silence").first.click()
+    assert page.evaluate("S.sel.size") == 1
+    assert page.locator("#secStripTrack .sec-span.is-sel").count() == 1
+    assert page.locator("#secTable tbody tr.sel").count() == 1
+    assert page.locator("#secKept").inner_text() != kept_before
+    assert "marked for removal" in page.locator("#secFooterInfo").inner_text()
+    page.locator("#secStripTrack .sec-span.k-silence").first.click()
+    assert page.evaluate("S.sel.size") == 0
+
+    # Tick a row and press the footer button: the section leaves the timeline.
+    clips_before = page.evaluate("S.tl.clips.length")
+    rows_before = page.locator("#secTable tbody tr").count()
+    page.locator("#secTable tbody tr input[type=checkbox]").first.click()
+    assert "1 selected" in page.locator("#secFooterInfo").inner_text()
+    page.click("#selRemove")
+    assert page.evaluate("S.tl.clips.length") == clips_before - 1
+    assert page.locator("#secTable tbody tr").count() == rows_before - 1
+    assert page.locator("#secStripTrack .sec-span").count() == rows_before - 1
+
+    # The playhead needle tracks the preview.
+    page.evaluate("setPlayhead(S.duration / 2)")
+    left = page.locator("#secStripNeedle").evaluate("el => parseFloat(el.style.left)")
+    assert 40 <= left <= 60, left
+
+    # Hidden panel comes back from the Project card's button.
+    page.evaluate("WS.win.list = false; afterWorkspaceVisibility()")
+    assert panel.is_visible() is False
+    page.click("#openSectionsBtn")
+    assert panel.is_visible() is True
+    assert page.locator("#inspTabs [role=tab].active").inner_text() == "Sections"
+    assert not page_errors, page_errors
+
+
 def test_track_labels_stay_pinned_left_during_horizontal_pan(browser_page):
     page, page_errors = browser_page
     open_demo(page)
@@ -549,19 +618,32 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert inspector.evaluate(zone_of) == "right"
     assert timeline.evaluate(zone_of) == "bottom"
 
-    # Tabbed units: inspector (Clip/Text/List/Export) and bottom (Timeline).
-    assert page.locator("#inspTabs [role=tab]").count() == 4
+    # Tabbed units: inspector (Inspector/Sections/Export) and bottom (Timeline).
+    # Clip and Text are no longer tabs of their own - they are the two halves
+    # of the one Inspector panel.
+    assert page.locator("#inspTabs [role=tab]").count() == 3
     assert page.locator("#botTabs [role=tab]").count() == 1
     assert page.locator("#tab-list").is_visible()
-    assert page.locator("#tab-clip").is_visible() is False
-    assert page.locator("#tab-text").is_visible() is False
+    assert page.locator("#tab-inspector").is_visible() is False
     assert page.locator("#tab-tl").is_visible()
-    page.click('#inspTabs [data-tab="text"]')
-    assert page.locator("#tab-text").is_visible()
+    page.click('#inspTabs [data-tab="clip"]')
+    assert page.locator("#tab-inspector").is_visible()
     assert page.locator("#tab-list").is_visible() is False
+    # The Inspector keeps its target across a reload: Clip|Text switch + the
+    # three clip modes are panel state, not tabs.
+    page.click('#inspScope [data-insp-scope="text"]')
+    assert page.locator('[data-insp-pane="text"]').is_visible()
+    assert page.locator('[data-insp-pane="clip"]').is_visible() is False
+    page.click('#inspScope [data-insp-scope="clip"]')
+    page.click('#inspClipMode [data-insp-mode="effect"]')
+    assert page.locator('#inspClipMode [data-insp-mode="effect"]').get_attribute(
+        "aria-selected") == "true"
+    assert page.locator('#inspClipMode [data-insp-mode="video"]').get_attribute(
+        "aria-selected") == "false"
+    page.click('#inspClipMode [data-insp-mode="video"]')
     page.reload()
     page.wait_for_function("S.project && S.project.info")
-    assert page.locator("#tab-text").is_visible()
+    assert page.locator("#tab-inspector").is_visible()
     page.click('#inspTabs [data-tab="list"]')
     assert page.locator("#tab-list").is_visible()
 
@@ -642,16 +724,15 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert inspector.bounding_box() is None
     page.click('[data-menu="window"]')
     assert page.locator('#windowDrop [data-win="clip"] .tick').inner_text() == ""
-    assert page.locator('#windowDrop [data-win="text"] .tick').inner_text() == ""
     assert page.locator('#windowDrop [data-win="export"] .tick').inner_text() == ""
-    page.click('#windowDrop [data-win="text"]')
+    page.click('#windowDrop [data-win="clip"]')
     assert inspector.bounding_box() is not None
-    assert page.locator("#tab-text").is_visible()
-    assert page.locator('#windowDrop [data-win="text"] .tick').inner_text() != ""
+    assert page.locator("#tab-inspector").is_visible()
+    assert page.locator('#windowDrop [data-win="clip"] .tick').inner_text() != ""
     # Single tabs still toggle from the Window menu (unit stays put).
     page.click('#windowDrop [data-win="clip"]')
     assert page.locator('#inspTabs [data-tab="clip"]').is_visible() is False
-    assert page.locator("#tab-text").is_visible()
+    assert page.locator("#tab-list").is_visible()
     assert inspector.bounding_box() is not None
     page.keyboard.press("Escape")
 
@@ -661,7 +742,7 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert abs(left_zone.bounding_box()["width"] - saved_left) < 2
     assert abs(timeline.bounding_box()["height"] - saved_height) < 1
     assert inspector.bounding_box() is not None
-    assert page.locator("#tab-text").is_visible()
+    assert page.locator("#tab-list").is_visible()
     assert page.locator('#inspTabs [data-tab="clip"]').is_visible() is False
     # Plain units hide whole from x and return from the Window menu.
     page.click('[data-hide-unit="project"]')
@@ -688,7 +769,7 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
         "zone => [...zone.children].map(el => el.dataset.workspacePanel)")
     assert bottom_order == ["timeline"]
     assert inspector.bounding_box() is not None
-    assert page.locator("#tab-clip").is_visible()
+    assert page.locator("#tab-inspector").is_visible()
     assert page.locator("#tab-tl").is_visible()
     assert not page_errors, page_errors
 
@@ -771,11 +852,11 @@ def test_units_group_by_drop_and_ungroup(browser_page):
     page.keyboard.press("Escape")
 
     page.click("#workspaceReset")
-    # A reset puts the five tabbed panels back in their hosts and nothing else
+    # A reset puts the tabbed panels back in their hosts and nothing else
     # is grouped; Project returns to the left zone.
-    assert page.locator("[data-dyn-tab]").count() == 5
+    assert page.locator("[data-dyn-tab]").count() == 4
     assert page.evaluate("JSON.stringify(WS.host)") == (
-        '{"clip":"inspector","text":"inspector","list":"inspector",'
+        '{"clip":"inspector","list":"inspector",'
         '"export":"inspector","tl":"timeline"}')
     assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "left"
     assert not page_errors, page_errors
@@ -895,6 +976,8 @@ def test_timeline_view_bottom_handle_adds_empty_space_and_scrolls_tracks(browser
 def test_font_import_shadow_history_and_reload(browser_page):
     page, page_errors = browser_page
     open_demo(page)
+    page.click('#inspTabs [data-tab="clip"]')
+    page.click('#inspScope [data-insp-scope="text"]')
     page.evaluate("setPlayhead(2)")
     page.evaluate("""() => {
         setTL({...S.tl, caps:[{id:'text',lane:0,start:1,end:4,text:'Test caption',style:{...CAPPOS}}]});
@@ -976,6 +1059,8 @@ def test_shadow_preview_uses_one_continuous_silhouette(browser_page):
 def test_font_picker_search_keyboard_cancel_and_history(browser_page):
     page, errors = browser_page
     open_demo(page)
+    page.click('#inspTabs [data-tab="clip"]')
+    page.click('#inspScope [data-insp-scope="text"]')
     page.evaluate('''() => {
         setTL({...S.tl, caps:[{id:'search-font',lane:0,start:0,end:4,text:'Find my font',style:{...CAPPOS,font:'Georgia'}}]});
         setPlayhead(1); S.capSel='search-font'; layoutCapOverlay();
@@ -1035,8 +1120,9 @@ def test_font_picker_search_keyboard_cancel_and_history(browser_page):
 def test_font_picker_popup_in_resized_panel_and_small_viewport(browser_page):
     page, errors = browser_page
     open_demo(page)
-    page.click('#inspTabs [data-tab="text"]')
-    panel = page.locator('#tab-text')
+    page.click('#inspTabs [data-tab="clip"]')
+    page.click('#inspScope [data-insp-scope="text"]')
+    panel = page.locator('#tab-inspector')
     panel.evaluate("el => { el.style.height='190px'; el.classList.add('workspace-panel-resized'); }")
     page.set_viewport_size({'width':390,'height':720})
     search = page.locator('#capFontSearch')
@@ -1216,7 +1302,7 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
         }""")
 
     # Default layout: List is tabbed in the Inspector, not the Timeline group.
-    assert tabs("inspTabs") == ["clip", "text", "list", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["clip", "list", "export"], tabs("inspTabs")
     assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
@@ -1226,7 +1312,7 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     # 1. Pull List out of the Inspector group, into the left zone.
     _drag_panel(page, page.locator("#inspTabs [data-tab='list']"),
                 page.locator("[data-workspace-column='left']"), to_bottom_edge=True)
-    assert tabs("inspTabs") == ["clip", "text", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["clip", "export"], tabs("inspTabs")
     assert zones()["left"] == ["project", "list"], zones()
     assert page.evaluate("WS.host.list") in (None, "")
     # The panel moved intact: its own content came with it.
@@ -1235,7 +1321,7 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     # 2. Pull Clip out of the Inspector and group it into the Program Monitor.
     _drag_panel(page, page.locator("#inspTabs [data-tab='clip']"),
                 page.locator("[data-workspace-panel='program']"))
-    assert tabs("inspTabs") == ["text", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["export"], tabs("inspTabs")
     assert page.evaluate("WS.host.clip") == "program"
     assert page.evaluate("JSON.stringify(UNIT_TABS.program)") == '["program","clip"]'
     assert page.locator("[data-workspace-panel='program'] [data-wintab='clip']").count() == 1
@@ -1248,12 +1334,88 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     page.wait_for_timeout(500)
     assert page.evaluate("WS.host.clip") == "program"
     assert page.evaluate("WS.host.list") in (None, "")
-    assert tabs("inspTabs") == ["text", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["export"], tabs("inspTabs")
 
     page.evaluate("resetWorkspace()")
     page.wait_for_timeout(400)
-    assert tabs("inspTabs") == ["clip", "text", "list", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["clip", "list", "export"], tabs("inspTabs")
     assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
+    assert not page_errors, page_errors
+
+
+def test_inspector_panel_holds_clip_and_text_together(browser_page):
+    """One Inspector panel: Clip (Video/Audio/Effect) + Text sections."""
+    page, page_errors = browser_page
+    page.set_viewport_size({"width": 1500, "height": 1100})
+    open_demo(page)
+    page.click("#workspaceReset")
+    page.click('#inspTabs [data-tab="clip"]')
+
+    assert page.locator("#inspTabs [role=tab]").all_inner_texts() == [
+        "Inspector", "Sections", "Export"]
+    assert page.locator('[data-workspace-panel="clip"] .ws-title').inner_text() == "Inspector"
+    assert page.locator("#inspScope [data-insp-scope='clip']").get_attribute(
+        "aria-selected") == "true"
+
+    # A selected clip opens the Video side.
+    page.evaluate("S.sel = new Set([S.tl.clips[0].id]); refresh(true)")
+    assert page.locator("#toolBody").is_visible()
+    assert page.locator("#txX").is_visible()
+    assert page.locator('[data-insp-tab="video"]').is_visible()
+
+    # Audio mode edits the clip's sound.
+    page.click('#inspClipMode [data-insp-mode="audio"]')
+    assert page.locator('[data-insp-tab="audio"]').is_visible()
+    page.fill("#taVn", "55")
+    page.locator("#taVn").press("Enter")
+    assert page.evaluate("S.tl.clips[0].fx.volume") == 55
+    page.click("#taReset")
+    assert page.evaluate("S.tl.clips[0].fx.volume") == 100
+
+    # Effect mode: a library that writes real fx values and a derived chain.
+    page.click('#inspClipMode [data-insp-mode="effect"]')
+    assert page.locator("#effLib .eff-card").count() >= 8
+    page.locator("#effLib .eff-card", has_text="Corner PiP").click()
+    assert page.evaluate("S.tl.clips[0].fx.scale") == 35
+    chain = page.locator("#effChain").inner_text()
+    assert "Scale" in chain and "Position" in chain and "Fit" in chain
+    page.click("#effResetAll")
+    assert page.evaluate("TLM.fxIsDefault(S.tl.clips[0].fx)")
+    # Look sliders are real export settings, mirrored by the preview filter.
+    page.locator("#lookB").fill("40")
+    page.locator("#lookB").dispatch_event("change")
+    assert page.evaluate("S.tl.clips[0].fx.brightness") == 40
+    page.click("#lookReset")
+    assert page.evaluate("S.tl.clips[0].fx.brightness") == 0
+
+    # Text side: add a caption, then strip fillers out of it.
+    page.evaluate("setPlayhead(1.0)")
+    page.click('#inspScope [data-insp-scope="text"]')
+    page.click("#capAdd")
+    page.wait_for_function("S.tl.caps.length === 1")
+    page.evaluate("""() => {
+      const cap = S.tl.caps[0];
+      const text = "jadi gitu ya terus kita mulai";
+      const toks = text.split(" ");
+      cap.text = text;
+      cap.end = cap.start + 3;
+      cap.words = toks.map((w, i) => ({
+        w, s: cap.start + i * 0.3, e: cap.start + (i + 1) * 0.3 }));
+      cap.word_source = "edited";
+      setTL(S.tl);
+    }""")
+    page.wait_for_function(
+        "document.querySelectorAll('#insFillerList input[data-filler]').length >= 2")
+    page.locator('#insFillerList input[data-filler="gitu"]').check()
+    page.click("#insFillerRemove")
+    assert page.evaluate("S.tl.caps[0].text") == "jadi ya terus kita mulai"
+
+    # Text animation is stored on the caption style (and burned on export).
+    page.select_option("#insAnimIn", "pop")
+    page.select_option("#insAnimWords", "karaoke")
+    assert page.evaluate("S.tl.caps[0].style.anim_in") == "pop"
+    assert page.evaluate("S.tl.caps[0].style.anim_words") == "karaoke"
+    assert page.evaluate("S.tl.caps[0].style.anim_ms") > 0
     assert not page_errors, page_errors

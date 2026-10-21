@@ -221,6 +221,8 @@ function refresh(forcePreview = false) {
   updateTimecode();
   if (typeof layoutCapOverlay === "function") layoutCapOverlay();
   if (typeof ClipRefresh === "function") ClipRefresh();
+  if (typeof InspectorOnRefresh === "function") InspectorOnRefresh();
+  else if (typeof inspAutoScope === "function") inspAutoScope();
   syncPreview(forcePreview);
 }
 function setTL(next) {
@@ -1600,11 +1602,13 @@ function renderList() {
     const { item, type, track, kind, id } = entry;
     const classes = [S.sel.has(id) ? "sel" : "", activeIds.has(id) ? "at-playhead" : ""].filter(Boolean).join(" ");
     const title = type === "caption" ? "Edit this caption cue's text." : "Edit section text. Matching timeline captions are updated too.";
+    const dot = kind === "caption" ? "cap" : kind === "silence" ? "sil" : "oth";
     return `<tr data-id="${escapeHtml(id)}" data-type="${type}" class="${classes}">` +
       `<td class="check-cell"><input type="checkbox" ${S.sel.has(id) ? "checked" : ""}></td>` +
       `<td class="track">${escapeHtml(track)}</td>` +
       `<td>${fmtTime(item.start, false)}</td><td>${fmtTime(item.end, false)}</td>` +
-      `<td>${fmtTime(item.end - item.start, false)}</td><td>${escapeHtml(kind)}</td>` +
+      `<td>${fmtTime(item.end - item.start, false)}</td>` +
+      `<td class="kind"><span class="kind-cell" title="${escapeHtml(kind)}"><i class="dot ${dot}"></i><em class="kind-name">${escapeHtml(kind)}</em></span></td>` +
       `<td class="txt txt-edit" contenteditable="true" spellcheck="false" title="${escapeHtml(title)}">${escapeHtml(item.text || "")}</td></tr>`;
   }).join("");
   const empty = document.getElementById("listEmpty");
@@ -1613,6 +1617,115 @@ function renderList() {
     empty.hidden = rows.length > 0;
     empty.textContent = hasTimelineItems ? "No timeline items match these filters." : "No timeline items yet — open a video or add captions first.";
   }
+  renderSectionStrip();
+  renderSectionsChrome();
+}
+
+/* ---------- Sections panel: clip timeline strip + chrome ----------
+ * The visual strip is the kconcat idea: every section and caption as a block
+ * on one bar, colored by kind and dimmed when it is marked for removal.
+ * Clicking a block toggles that row; the needle follows the playhead. */
+function sectionStripSpan(entry, end) {
+  const { item, id, kind, type } = entry;
+  const left = clamp01(item.start / end) * 100;
+  const width = Math.max(0.4, clamp01((item.end - item.start) / end) * 100);
+  const cls = ["sec-span", `k-${kind}`, type === "caption" ? "cue" : "", S.sel.has(id) ? "is-sel" : ""]
+    .filter(Boolean).join(" ");
+  const label = `${kind} · ${fmtTime(item.start, false)}–${fmtTime(item.end, false)}` +
+    (item.text ? ` · ${item.text.slice(0, 60)}` : "") +
+    (S.sel.has(id) ? " (marked for removal)" : "");
+  return `<button type="button" class="${cls}" data-strip-id="${escapeHtml(id)}" ` +
+    `style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%" ` +
+    `title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}"></button>`;
+}
+function renderSectionStrip() {
+  const track = document.getElementById("secStripTrack");
+  if (!track) return;
+  const rows = visibleListItems();
+  const end = Math.max(timelineEnd(), 1e-3);
+  // Caps first so the thin caption bars sit over the sections they belong to.
+  const ordered = [...rows].sort((a, b) => (a.type === "caption" ? 0 : 1) - (b.type === "caption" ? 0 : 1));
+  track.innerHTML = ordered.map((entry) => sectionStripSpan(entry, end)).join("");
+  const kept = document.getElementById("secKept");
+  if (kept) {
+    const total = S.tl.clips.reduce((a, c) => a + (c.end - c.start), 0);
+    const left = S.tl.clips.reduce((a, c) => a + (S.sel.has(c.id) ? 0 : c.end - c.start), 0);
+    kept.textContent = total > 0 ? `Keeping ${fmtTime(left, false)} / ${fmtTime(total, false)}` : "";
+  }
+  const startEl = document.getElementById("secStripStart");
+  const endEl = document.getElementById("secStripEnd");
+  if (startEl) startEl.textContent = fmtTime(0, false);
+  if (endEl) endEl.textContent = fmtTime(end, false);
+  updateStripNeedle();
+}
+function updateStripNeedle() {
+  const needle = document.getElementById("secStripNeedle");
+  if (!needle) return;
+  const end = Math.max(timelineEnd(), 1e-3);
+  const any = S.tl.clips.length > 0 || S.tl.caps.length > 0;
+  needle.hidden = !any;
+  if (!any) return;
+  needle.style.left = `${(clamp01(playheadTime() / end) * 100).toFixed(3)}%`;
+}
+function plural(n, one, many) { return `${n} ${n === 1 ? one : many}`; }
+function kindLabelText(kind, n = 2) {
+  if (kind === "silence") return plural(n, "silence", "silences");
+  if (kind === "caption") return plural(n, "caption section", "caption sections");
+  return plural(n, "other audio", "other audio");
+}
+function renderSectionsChrome() {
+  const counts = { caption: 0, silence: 0, other: 0 };
+  for (const clip of S.tl.clips) {
+    const k = clip.kind === "silence" ? "silence" : clip.kind === "caption" ? "caption" : "other";
+    counts[k] += 1;
+  }
+  // Collapsible Detect summary: what the last run left on the timeline.
+  const sum = document.getElementById("secDetectSum");
+  if (sum) {
+    const parts = [];
+    if (counts.silence) parts.push(kindLabelText("silence", counts.silence));
+    if (counts.other) parts.push(kindLabelText("other", counts.other));
+    if (counts.caption) parts.push(kindLabelText("caption", counts.caption));
+    if (S.tl.caps.length) parts.push(plural(S.tl.caps.length, "caption", "captions"));
+    sum.textContent = parts.length ? parts.join(" · ") : "no sections yet";
+    sum.title = sum.textContent;   // never lose the count to the ellipsis
+  }
+  // Detection settings, mirrored where they are set.
+  const $id = (id) => document.getElementById(id);
+  const summary = $id("detectSummary");
+  if (summary) {
+    const sil = $id("dSilence");
+    const thresh = $id("dThresh");
+    const minSil = $id("dMinSilence");
+    const minSec = $id("dMinSection");
+    const cues = $id("dCues");
+    const bits = [];
+    bits.push(sil && sil.checked ? `silence ≤ ${thresh ? thresh.value : "–"} dB` : "silence off");
+    bits.push(`min silence ${minSil ? minSil.value : "–"} ms`);
+    bits.push(`min section ${minSec ? minSec.value : "–"} ms`);
+    bits.push(cues && cues.checked ? "captions on" : "captions off");
+    summary.textContent = bits.join(" · ");
+  }
+  const cuesInfo = $id("detectCuesInfo");
+  const sub = $id("subInfo");
+  if (cuesInfo) {
+    const path = $id("dSubPath");
+    cuesInfo.textContent = (sub && sub.textContent) || (path && path.value ? path.value : "no subtitle loaded");
+  }
+  // Footer tally for the current selection.
+  const info = $id("secFooterInfo");
+  if (info) {
+    if (!S.sel.size) {
+      info.textContent = "Nothing selected — tick rows or click blocks on the strip.";
+    } else {
+      let secs = 0;
+      for (const id of S.sel) {
+        const entry = listItemById(id);
+        if (entry) secs += Math.max(0, entry.item.end - entry.item.start);
+      }
+      info.textContent = `${S.sel.size} selected · ${fmtTime(secs, false)} marked for removal`;
+    }
+  }
 }
 let lastListId = null;
 let activeListRows = new Map();
@@ -1620,6 +1733,7 @@ let lastActiveListIds = new Set();
 let checklistDrag = null;
 let suppressChecklistClick = false;
 function syncListPlayhead() {
+  updateStripNeedle();
   const tb = document.querySelector("#secTable tbody");
   if (!tb) return;
   const nextIds = listActiveIdsAt(playheadTime());
@@ -1637,13 +1751,16 @@ function syncListPlayhead() {
 }
 function syncListSelection() {
   const tb = document.querySelector("#secTable tbody");
-  if (!tb) return;
-  for (const row of tb.querySelectorAll("tr[data-id]")) {
-    const selected = S.sel.has(row.dataset.id);
-    row.classList.toggle("sel", selected);
-    const checkbox = row.querySelector("input[type=checkbox]");
-    if (checkbox) checkbox.checked = selected;
+  if (tb) {
+    for (const row of tb.querySelectorAll("tr[data-id]")) {
+      const selected = S.sel.has(row.dataset.id);
+      row.classList.toggle("sel", selected);
+      const checkbox = row.querySelector("input[type=checkbox]");
+      if (checkbox) checkbox.checked = selected;
+    }
   }
+  renderSectionStrip();
+  renderSectionsChrome();
 }
 function applyListSelection(ids, selected) {
   let changed = false;
@@ -1766,6 +1883,71 @@ function bindList() {
   bindIf("selAllSilence", () => { S.sel = new Set(S.tl.clips.filter((c) => c.kind === "silence").map((c) => c.id)); syncCapSel(); refresh(); });
   bindIf("selAllCaptions", () => { S.sel = new Set([...S.tl.clips.filter((c) => c.kind === "caption").map((c) => c.id), ...S.tl.caps.map((c) => c.id)]); syncCapSel(); refresh(); });
   bindIf("selRemove", () => deleteSel(true));
+  bindSectionsPanel();
+}
+
+// Wiring for the Sections panel: strip clicks, the detect-settings mirror in
+// the Project card, and the "Open Sections panel" button.
+function bindSectionsPanel() {
+  const strip = document.getElementById("secStrip");
+  if (strip && !strip.dataset.bound) {
+    strip.dataset.bound = "1";
+    strip.addEventListener("click", (ev) => {
+      const span = ev.target.closest ? ev.target.closest("[data-strip-id]") : null;
+      if (!span) return;
+      const id = span.dataset.stripId;
+      if (!id) return;
+      applyListSelection([id], !S.sel.has(id));
+      lastListId = id;
+      syncListScroll(true);
+    });
+  }
+  // Editing a detect setting in the Sections panel updates the Project card.
+  for (const id of ["dSilence", "dThresh", "dMinSilence", "dMinSection", "dCues", "dSubPath"]) {
+    const el = document.getElementById(id);
+    if (!el || el.dataset.chromeBound) continue;
+    el.dataset.chromeBound = "1";
+    el.addEventListener("input", () => renderSectionsChrome());
+    el.addEventListener("change", () => renderSectionsChrome());
+  }
+  // Text that other code writes (subtitle upload, auto-caption, detection run)
+  // is mirrored into the compact Project card and the panel status line.
+  const mirror = (srcId, dstId, prefix = "") => {
+    const src = document.getElementById(srcId);
+    const dst = document.getElementById(dstId);
+    if (!src || !dst || src.dataset.mirrorBound) return;
+    src.dataset.mirrorBound = "1";
+    const paint = () => {
+      const text = src.textContent.trim();
+      dst.textContent = text ? prefix + text : "";
+      renderSectionsChrome();
+    };
+    new MutationObserver(paint).observe(src, { childList: true, characterData: true, subtree: true });
+    paint();
+  };
+  mirror("subInfo", "detectCuesInfo");
+  mirror("detectInfo", "secRun", "Last run: ");
+  const opener = document.getElementById("openSectionsBtn");
+  if (opener && !opener.dataset.bound) {
+    opener.dataset.bound = "1";
+    opener.onclick = () => openSectionsPanel();
+  }
+  renderSectionsChrome();
+}
+
+// Reveal the Sections panel: un-hide it, bring its tab forward and flash it.
+function openSectionsPanel() {
+  if (typeof WS === "undefined" || !WS) return;
+  WS.win.list = true;
+  if (WS.host && WS.host.list === "inspector") WS.win.inspector = true;
+  if (typeof afterWorkspaceVisibility === "function") afterWorkspaceVisibility();
+  const host = (WS.host && WS.host.list) || "list";
+  if (typeof activateTab === "function") activateTab(host, "list", false);
+  const el = document.querySelector('[data-workspace-panel="list"]');
+  if (el) {
+    el.classList.add("panel-flash");
+    setTimeout(() => el.classList.remove("panel-flash"), 1000);
+  }
 }
 
 /* ---------- sidebar tally etc (keep old) ---------- */
@@ -2116,8 +2298,10 @@ function bindUI() {
       updateCaptionExportInfo();
     } catch (err) { alert(err.message); }
   };
-  const detectBtn = document.getElementById("detectBtn");
-  if (detectBtn) detectBtn.onclick = runDetect;
+  for (const id of ["detectBtn", "secDetectBtn"]) {
+    const btn = document.getElementById(id);
+    if (btn) btn.onclick = runDetect;
+  }
   const capBtn = document.getElementById("capBtn");
   if (capBtn) capBtn.onclick = startCaption;
   const capCancel = document.getElementById("capCancel");

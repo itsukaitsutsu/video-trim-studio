@@ -158,7 +158,10 @@ DEFAULT_STYLE = {"x": 0.5, "y": 0.92, "size_pct": 4.5,
                  "stroke_position": "outer", "background": "#000000", "background_opacity": 0,
                  "shadow": "#000000", "shadow_opacity": 100,
                  "shadow_angle": 135, "shadow_distance": 3, "shadow_size": 6,
-                 "shadow_blur": 12, "box_h": 0}
+                 "shadow_blur": 12, "box_h": 0,
+                 # Text animation (Inspector > Text animation).
+                 "anim_in": "none", "anim_ms": 400, "anim_words": "none",
+                 "anim_stagger": 120, "anim_pop": 130, "highlight": "#ffd400"}
 
 
 def _cue_events(cue: dict, st: dict, width: int, height: int,
@@ -230,8 +233,59 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
     if st.get("shadow_enabled") is False:
         shadow_alpha_value = 0
 
-    def emit_line(text: str, an: int, px: float, py: float) -> list[str]:
+    # ---- text animation (Inspector > Text animation) --------------------
+    # Entry animations ride on tags the ASS renderer already supports; karaoke
+    # uses ASS's own \k clock, word reveal emits progressive prefixes and
+    # typewriter reveals one character at a time. "none" (the default) leaves
+    # every Dialogue exactly as it was before this feature existed.
+    anim_in = str(st.get("anim_in") or "none")
+    anim_words = str(st.get("anim_words") or "none")
+    try:
+        anim_ms = max(0, min(4000, int(float(st.get("anim_ms") or 0))))
+    except (TypeError, ValueError):
+        anim_ms = 400
+    try:
+        pop_pct = max(100.0, min(220.0, float(st.get("anim_pop") or 130)))
+    except (TypeError, ValueError):
+        pop_pct = 130.0
+    try:
+        stagger = max(0.0, min(4.0, float(st.get("anim_stagger") or 0))) / 1000.0
+    except (TypeError, ValueError):
+        stagger = 0.12
+    highlight = _ass_colour(st.get("highlight") or "#ffd400")
+    cue_start = float(cue["start"])
+    cue_end = float(cue["end"])
+    start, end = ass_time(cue_start), ass_time(cue_end)
+
+    def pos_tag(an: int, px: float, py: float) -> str:
+        if anim_in == "slide" and anim_ms > 0:
+            lift = height * 0.06
+            return (f"\\an{an}\\move({round(px)},{round(py + lift)},"
+                    f"{round(px)},{round(py)},0,{anim_ms})")
+        return f"\\an{an}\\pos({round(px)},{round(py)})"
+
+    def entry_tags(an: int, px: float, py: float) -> str:
+        tags = ""
+        if anim_ms > 0:
+            if anim_in == "fade":
+                tags += f"\\fad({anim_ms},0)"
+            elif anim_in in ("pop", "bounce"):
+                tags += f"\\fscx{pop_pct:.1f}\\fscy{pop_pct:.1f}"
+                if anim_in == "bounce":
+                    mid = max(1, int(anim_ms * 0.62))
+                    over = min(220.0, pop_pct * 1.08)
+                    tags += (f"\\t(0,{mid},\\fscx{over:.1f}\\fscy{over:.1f})"
+                             f"\\t({mid},{anim_ms},\\fscx100\\fscy100)")
+                else:
+                    tags += f"\\t(0,{anim_ms},\\fscx100\\fscy100)"
+        return tags + pos_tag(an, px, py)
+
+    def emit_line(text: str, an: int, px: float, py: float,
+                  t0: str | None = None, t1: str | None = None,
+                  extra: str = "") -> list[str]:
         out: list[str] = []
+        a = start if t0 is None else t0
+        b = end if t1 is None else t1
         if shadow_alpha_value > 0:
             # A single filled/outlined glyph silhouette: size grows its contour.
             # Same fill/outline colour and alpha, one offset, no ring of copies.
@@ -240,16 +294,121 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
                            f"\\1c{shadow_colour}\\3c{shadow_colour}"
                            f"\\1a{alpha}\\3a{alpha}\\4a&HFF&\\shad0"
                            f"\\bord{shadow_size:.2f}\\blur{shadow_blur:.2f}"
-                           f"\\an{an}\\pos({round(px + shadow_x)},{round(py + shadow_y)})")
-            out.append(f"Dialogue: 0,{start},{end},{shadow_name},,0,0,0,,{{{shadow_tags}}}{text}")
-        main_tags = f"{common_tags}\\shad0\\blur0\\an{an}\\pos({round(px)},{round(py)})"
-        out.append(f"Dialogue: 1,{start},{end},{style_name},,0,0,0,,{{{main_tags}}}{text}")
+                           f"{pos_tag(an, px + shadow_x, py + shadow_y)}")
+            out.append(f"Dialogue: 0,{a},{b},{shadow_name},,0,0,0,,{{{shadow_tags}}}{text}")
+        main_tags = f"{common_tags}\\shad0\\blur0{entry_tags(an, px, py)}{extra}"
+        out.append(f"Dialogue: 1,{a},{b},{style_name},,0,0,0,,{{{main_tags}}}{text}")
         return out
 
-    events: list[str] = []
+    # Where each wrapped line sits. Shared by every animation mode so a
+    # half-revealed caption never jumps between lines.
+    placed = []
     for i, line in enumerate(lines):
         ly = top + i * line_h
-        if align == "justify" and box_px and i < n - 1 and len(line.split()) > 1:
+        if align == "left" and box_px:
+            placed.append((line, 4, left_x, ly))
+        elif align == "right" and box_px:
+            placed.append((line, 6, right_x, ly))
+        elif align == "justify" and box_px:
+            placed.append((line, 4, left_x, ly))
+        else:  # centre
+            placed.append((line, 5, cx, ly))
+
+    tokens = text.split()
+    # Per-word timings: the cue's own word data when it lines up with the text,
+    # otherwise an even spread across the cue (same estimate the preview uses).
+    times: list[tuple[float, float]] = []
+    raw_words = cue.get("words") or []
+    if isinstance(raw_words, list) and len(raw_words) == len(tokens) and tokens:
+        for w in raw_words:
+            try:
+                times.append((float(w.get("s", cue_start)), float(w.get("e", cue_end))))
+            except (AttributeError, TypeError, ValueError):
+                times = []
+                break
+    if not times and tokens:
+        slot = max(0.001, (cue_end - cue_start) / max(1, len(tokens)))
+        times = [(cue_start + i * slot, cue_start + (i + 1) * slot)
+                 for i in range(len(tokens))]
+    if stagger and tokens and not raw_words:
+        times = [(cue_start + i * stagger, cue_start + (i + 1) * stagger)
+                 for i in range(len(tokens))]
+
+    events: list[str] = []
+
+    if anim_words == "reveal" and tokens:
+        # One Dialogue per new word: the caption grows the way it does in the
+        # preview, then holds the full line until the cue ends.
+        for k in range(len(tokens)):
+            t0 = times[k][0]
+            t1 = times[k + 1][0] if k + 1 < len(times) else cue_end
+            if t1 <= t0:
+                t1 = min(cue_end, t0 + 0.02)
+            if t1 <= t0:
+                continue
+            shown = tokens[:k + 1]
+            # Re-wrap the same slots: line j shows the words that fit it.
+            pos = 0
+            for line, an, px, py in placed:
+                count = len(line.split())
+                part = shown[pos:pos + count]
+                pos += count
+                if not part:
+                    continue
+                events.extend(emit_line(" ".join(part), an, px, py,
+                                        ass_time(t0), ass_time(t1)))
+        return events
+
+    if anim_in == "typewriter" and anim_ms > 0 and any(len(l) for l in lines):
+        total = sum(len(line) for line in lines)
+        steps = max(1, min(70, total))
+        for k in range(1, steps + 1):
+            remain = round(total * k / steps)
+            t0 = cue_start + (anim_ms / 1000.0) * (k - 1) / steps
+            t1 = cue_end if k == steps else cue_start + (anim_ms / 1000.0) * k / steps
+            if t1 <= t0:
+                continue
+            for line, an, px, py in placed:
+                part = line[:max(0, min(len(line), remain))]
+                remain -= len(line)
+                if not part:
+                    continue
+                events.extend(emit_line(part, an, px, py, ass_time(t0), ass_time(t1)))
+        return events
+
+    if anim_words == "karaoke" and tokens:
+        # ASS's \k clock: each word switches from the secondary colour (not yet
+        # spoken) to the primary one (spoken). The highlight colour rides on
+        # \1c, the caption fill on \2c.
+        idx = 0
+        for line, an, px, py in placed:
+            parts = line.split()
+            if not parts:
+                continue
+            body = ""
+            cursor = cue_start
+            for word in parts:
+                if idx >= len(times):
+                    break
+                ws, we = times[idx]
+                idx += 1
+                gap = max(0, int(round((ws - cursor) * 100)))
+                dur = max(1, int(round((we - ws) * 100)))
+                if gap:
+                    body += f"{{\\k{gap}}}"
+                body += f"{{\\k{dur}}}{word} "
+                cursor = we
+            if not body:
+                continue
+            extra = f"\\1c{highlight}\\2c{fill}"
+            events.extend(emit_line(body.rstrip(), an, px, py, extra=extra))
+        if events:
+            return events
+        # nothing could be timed (no tokens) - fall through to the static path
+
+    # ---- static layout (the default) ------------------------------------
+    for li, (line, an, px, py) in enumerate(placed):
+        if align == "justify" and box_px and li < len(placed) - 1 and len(line.split()) > 1:
             # True justify: both edges flush with the box. ASS cannot justify,
             # so each word gets its own \pos - first word on the left edge,
             # last word ending on the right edge, remainder distributed.
@@ -259,17 +418,10 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
             gap = (box_px - sum(widths)) / max(1, len(words) - 1)
             xc = left_x
             for word, wd in zip(words, widths):
-                events.extend(emit_line(word, 4, xc, ly))
+                events.extend(emit_line(word, 4, xc, py))
                 xc += wd + gap
             continue
-        if align == "left" and box_px:
-            events.extend(emit_line(line, 4, left_x, ly))
-        elif align == "right" and box_px:
-            events.extend(emit_line(line, 6, right_x, ly))
-        elif align == "justify" and box_px:
-            events.extend(emit_line(line, 4, left_x, ly))
-        else:  # center
-            events.extend(emit_line(line, 5, cx, ly))
+        events.extend(emit_line(line, an, px, py))
     return events
 
 

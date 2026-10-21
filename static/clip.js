@@ -76,6 +76,8 @@ function clipSetPair(rangeId, numId, value) {
 
 function ClipRefresh() {
   if (!CLIP_BOUND) return;
+  // The Inspector owns the panel chrome, the effect chain and the text side.
+  if (typeof InspectorRefreshClip === "function") InspectorRefreshClip();
   const clip = clipSelectedClip();
   const empty = $("toolEmpty"), body = $("toolBody");
   if (!empty || !body) return;

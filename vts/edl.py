@@ -141,6 +141,17 @@ def _layer_chain(inp: Input, src_in: float, d: float, start: float, end: float,
     crop_txt, cw, ch = fx_mod.crop_filter(eff, w, h)
     if crop_txt:
         chain.append(crop_txt)
+    # Look (Inspector > Effect > Look). Applied before the alpha format
+    # conversion so eq always sees a plain YUV frame; still images are skipped
+    # because their alpha is the cut-out.
+    if inp.kind != "image":
+        b = float(eff.get("brightness") or 0.0)
+        c = float(eff.get("contrast") or 0.0)
+        sat = float(eff.get("saturation") or 0.0)
+        if abs(b) > 1e-9 or abs(c) > 1e-9 or abs(sat) > 1e-9:
+            chain.append(f"eq=brightness={b / 100.0:.4f}:"
+                         f"contrast={1 + c / 100.0:.4f}:"
+                         f"saturation={max(0.0, 1 + sat / 100.0):.4f}")
 
     fi = min(eff["vfade_in"], d / 2.0) if eff["vfade_in"] else 0.0
     fo = min(eff["vfade_out"], d / 2.0) if eff["vfade_out"] else 0.0

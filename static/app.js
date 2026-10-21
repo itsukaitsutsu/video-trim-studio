@@ -70,13 +70,13 @@ const WORKSPACE_STORAGE_KEY_V1 = "video-trim-studio.workspace.v1";
 const WORKSPACE_ZONES = ["left", "center", "right", "bottom"];
 // Bump when the shipped default arrangement changes; saved layouts older than
 // this are migrated once (see applyWorkspaceLayout).
-const WORKSPACE_LAYOUT_REV = 2;
+const WORKSPACE_LAYOUT_REV = 3;
 // Premiere-style units: project/program are single cards; inspector and the
 // Every panel is a real, movable unit now. These five simply *start life*
 // grouped inside a host, which is what makes them tabs on a fresh workspace;
 // drag one out and it becomes a panel in its own right.
 const DEFAULT_UNIT_HOST = {
-  clip: "inspector", text: "inspector", list: "inspector", export: "inspector",
+  clip: "inspector", list: "inspector", export: "inspector",
   tl: "timeline",
 };
 // Panels whose header is already a tab strip in the markup. Grouping a panel
@@ -87,13 +87,13 @@ const TAB_STRIP_UNITS = ["inspector", "timeline"];
 let UNIT_TABS = {};
 let TAB_UNIT = {};
 const TAB_TITLES = {
-  clip: "Clip", text: "Text", export: "Export", tl: "Timeline", list: "List",
+  clip: "Inspector", export: "Export", tl: "Timeline", list: "Sections",
 };
 const UNIT_TITLES = {
   project: "Project", program: "Program Monitor",
   inspector: "Inspector", timeline: "Timeline",
-  clip: "Clip", text: "Text", export: "Export",
-  tl: "Timeline 01", list: "List",
+  clip: "Inspector", export: "Export",
+  tl: "Timeline 01", list: "Sections",
 };
 // Where a panel lands when it is dragged out of a group, and the order tabs
 // are shown in. Every panel is listed: the five tabbed ones are members of a
@@ -101,7 +101,7 @@ const UNIT_TITLES = {
 // Key order is also the tab order inside a group: Clip, Text, List, Export.
 const DEFAULT_UNIT_ZONE = {
   project: "left", program: "center", inspector: "right", timeline: "bottom",
-  clip: "right", text: "right", list: "bottom", export: "right", tl: "bottom",
+  clip: "right", list: "bottom", export: "right", tl: "bottom",
 };
 const UNIT_ORDER = Object.keys(DEFAULT_UNIT_ZONE);
 const DEFAULT_WORKSPACE_LAYOUT = {
@@ -113,7 +113,7 @@ const DEFAULT_WORKSPACE_LAYOUT = {
   },
   win: {
     project: true, program: true, inspector: true, timeline: true,
-    clip: true, text: true, export: true,
+    clip: true, export: true,
     tl: true, list: true,
   },
   activeTab: { inspector: "list", timeline: "tl" },
@@ -126,12 +126,11 @@ const WINDOW_MENU = [
   ["project", "Project"],
   ["program", "Program Monitor"],
   "sep",
-  ["clip", "Clip"],
-  ["text", "Text"],
+  ["clip", "Inspector"],
   ["export", "Export"],
   "sep",
   ["tl", "Timeline"],
-  ["list", "List"],
+  ["list", "Sections"],
   "sep",
 ];
 // Live workspace state; zones/sizes refresh from the DOM on save.
@@ -2035,6 +2034,8 @@ function syncCaptionShadow(box, text, st, frame) {
   shadow.removeAttribute("data-raw");
   shadow.className = "cap-shadow";
   shadow.setAttribute("aria-hidden", "true");
+  // Word animation colours the spans; the silhouette must stay one colour.
+  shadow.querySelectorAll(".cap-word").forEach((w) => { w.style.color = "inherit"; });
   // Stroke is centred on the glyph edge: 2 * spread grows the silhouette by
   // exactly spread pixels. Identical opaque fill/stroke make ONE solid mask.
   // Blur the merged mask, then apply opacity once to the entire layer.
@@ -2100,10 +2101,14 @@ function layoutCapOverlay() {
   if (active) $("capBoxText").dataset.raw = active.text || "";
   const fontPx = Math.max(10, r.h * st.size_pct / 100);
   const maxChars = Math.floor((st.box_w * r.w) / Math.max(1, fontPx * (CHAR_FACTOR + (Number(st.tracking) || 0))));
-  renderCaptionLines(
-    wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars),
-    st.align);
+  const rich = active ? capRenderAnimated(active, st, t, maxChars) : false;
+  if (!rich) {
+    renderCaptionLines(
+      wrapText($("capBoxText").dataset.raw || "Caption preview", maxChars),
+      st.align);
+  }
   syncCaptionShadow(box, $("capBoxText"), st, r);
+  capApplyEntryAnim(box, active, st, t, r);
   $("capPosInfo").textContent =
     `x ${Math.round(st.x * 100)}% \u00b7 y ${Math.round(st.y * 100)}%` +
     ` \u00b7 w ${Math.round(st.box_w * 100)}% \u00b7 ${st.align}` +
@@ -2130,6 +2135,9 @@ function layoutCapOverlay() {
     capShadowSize: st.shadow_size ?? 6, capShadowBlur: st.shadow_blur ?? 12,
     capX: Math.round((st.x ?? .5) * 100), capY: Math.round((st.y ?? .92) * 100),
     capWidth: Math.round((st.box_w ?? .88) * 100), capHeight: Math.round((st.box_h ?? 0) * 100),
+    insAnimIn: st.anim_in || "none", insAnimMs: st.anim_ms ?? 400,
+    insAnimWords: st.anim_words || "none", insAnimStagger: st.anim_stagger ?? 120,
+    insAnimPop: st.anim_pop ?? 130, insHighlight: st.highlight || "#ffd400",
   };
   for (const [id, value] of Object.entries(styleControlValues)) {
     const input = $(id);
@@ -2152,6 +2160,127 @@ function layoutCapOverlay() {
   const fs = st.bold !== false && st.italic ? "bold-italic" : st.bold !== false ? "bold" : st.italic ? "italic" : "regular";
   if ($("capFontStyle") && document.activeElement !== $("capFontStyle")) $("capFontStyle").value = fs;
   syncAlignButtons();
+  if (typeof InspectorRefreshText === "function") InspectorRefreshText();
+}
+
+/* ------------------------------------------------- caption animation (preview)
+ *
+ * The same four entrance animations and two word effects the ASS burn writes.
+ * Everything is computed from the playhead, so scrubbing shows the exact frame
+ * playback does and nothing has to be timed by hand.
+ */
+
+function capAnimProgress(cue, st, t) {
+  const ms = Math.max(0, Number(st.anim_ms) || 0);
+  if (!cue) return 1;
+  if (!ms) return 1;
+  return Math.min(1, Math.max(0, ((t - cue.start) * 1000) / ms));
+}
+
+function capEaseOut(p) { return 1 - Math.pow(1 - p, 3); }
+function capEaseOutBack(p) {
+  const c1 = 1.70158, c3 = c1 + 1, q = p - 1;
+  return 1 + c3 * q * q * q + c1 * q * q;
+}
+
+// Word timings for the preview. Captions without words fall back to an even
+// spread across the cue, matching what the burn does.
+function capPreviewWords(cue) {
+  const raw = Array.isArray(cue.words) ? cue.words : [];
+  if (raw.length) {
+    return raw.map((w) => ({ w: String(w.w ?? ""), s: Number(w.s) || cue.start,
+      e: Number(w.e) || cue.end }));
+  }
+  const toks = String(cue.text || "").split(/\s+/).filter(Boolean);
+  const slot = Math.max(0.001, (cue.end - cue.start) / Math.max(1, toks.length));
+  return toks.map((w, i) => ({ w, s: cue.start + i * slot, e: cue.start + (i + 1) * slot }));
+}
+
+function wrapTokenLines(tokens, maxChars) {
+  const lines = [];
+  let cur = [];
+  let len = 0;
+  for (const tok of tokens) {
+    const add = (len ? 1 : 0) + tok.w.length;
+    if (cur.length && len + add > maxChars) { lines.push(cur); cur = []; len = 0; }
+    cur.push(tok);
+    len += (len ? 1 : 0) + tok.w.length;
+  }
+  if (cur.length) lines.push(cur);
+  return lines;
+}
+
+// Returns true when it drew an animated caption; false lets the caller fall
+// back to the plain line renderer.
+function capRenderAnimated(cue, st, t, maxChars) {
+  const animWords = st.anim_words || "none";
+  const animIn = st.anim_in || "none";
+  const container = $("capBoxText");
+  if (!container) return false;
+  if (!cue) return false;
+  if (animWords === "none" && animIn !== "typewriter") return false;
+  const words = capPreviewWords(cue);
+  container.replaceChildren();
+  container.style.setProperty("--cap-hl", st.highlight || "#ffd400");
+  const lineFor = (text) => {
+    const row = document.createElement("div");
+    row.className = "cap-line";
+    row.style.textAlign = st.align === "justify" ? "left" : st.align;
+    return row;
+  };
+  if (animIn === "typewriter" && animWords === "none") {
+    const full = words.map((w) => w.w).join(" ") || String(cue.text || "");
+    const p = capAnimProgress(cue, st, t);
+    const shown = full.slice(0, Math.ceil(full.length * p));
+    for (const line of wrapText(shown, maxChars)) {
+      const row = lineFor(line);
+      const label = document.createElement("span");
+      label.className = "cap-line-label";
+      label.textContent = line;
+      row.appendChild(label);
+      container.appendChild(row);
+    }
+    return true;
+  }
+  const stagger = Math.max(0, Number(st.anim_stagger) || 0) / 1000;
+  const visible = animWords === "reveal"
+    ? words.filter((w, i) => t >= (w.s ?? (cue.start + i * stagger)) - 1e-6)
+    : words;
+  if (animWords === "reveal" && !visible.length) return true;   // nothing yet
+  for (const line of wrapTokenLines(visible, Math.max(4, maxChars))) {
+    const row = lineFor("");
+    for (const w of line) {
+      const span = document.createElement("span");
+      span.className = "cap-word";
+      span.textContent = w.w + " ";
+      if (animWords === "karaoke") {
+        if (t >= w.s) span.classList.add("hl");
+        if (t >= w.s && t < w.e) span.classList.add("now");
+      }
+      row.appendChild(span);
+    }
+    container.appendChild(row);
+  }
+  return true;
+}
+
+function capApplyEntryAnim(box, cue, st, t, frame) {
+  if (!box) return;
+  const animIn = cue ? (st.anim_in || "none") : "none";
+  let opacity = 1, scale = 1, dy = 0;
+  const p = capAnimProgress(cue, st, t);
+  const pop = Math.max(1, (Number(st.anim_pop) || 130) / 100);
+  if (animIn === "fade") opacity = p;
+  else if (animIn === "pop") scale = 1 + (pop - 1) * (1 - capEaseOut(p));
+  else if (animIn === "bounce") scale = 1 + (pop - 1) * (1 - capEaseOutBack(p));
+  else if (animIn === "slide") {
+    dy = (1 - capEaseOut(p)) * frame.h * 0.06;
+    opacity = Math.min(1, p * 1.35);
+  }
+  box.style.opacity = opacity >= 0.999 ? "" : opacity.toFixed(3);
+  box.style.transform = (Math.abs(scale - 1) > 0.002 || dy > 0.05)
+    ? `translateY(${dy.toFixed(1)}px) scale(${scale.toFixed(3)})`
+    : "";
 }
 
 function renderCaptionLines(lines, align) {
@@ -2328,6 +2457,9 @@ function bindCaptionOverlay() {
     capShadowDistance: ["shadow_distance", "number"], capShadowSize: ["shadow_size", "number"],
     capShadowBlur: ["shadow_blur", "number"], capX: ["x", "percent"], capY: ["y", "percent"],
     capWidth: ["box_w", "percent"], capHeight: ["box_h", "percent"],
+    insAnimIn: ["anim_in", "text"], insAnimMs: ["anim_ms", "number"],
+    insAnimWords: ["anim_words", "text"], insAnimStagger: ["anim_stagger", "number"],
+    insAnimPop: ["anim_pop", "number"], insHighlight: ["highlight", "text"],
   };
   for (const [id, [key, type]] of Object.entries(styleInputs)) {
     const input = $(id); if (!input) continue;
@@ -2428,7 +2560,11 @@ const CAPPOS_DEFAULT = { x: 0.5, y: 0.92, size_pct: 4.5, align: "center", box_w:
   stroke: "#000000", stroke_width: 1, stroke_opacity: 0, stroke_position: "outer",
   background: "#000000", background_opacity: 0,
   shadow: "#000000", shadow_opacity: 100, shadow_angle: 135,
-  shadow_distance: 3, shadow_size: 6, shadow_blur: 12, box_h: 0 };
+  shadow_distance: 3, shadow_size: 6, shadow_blur: 12, box_h: 0,
+  // Text animation (Inspector > Text animation). "none" everywhere keeps the
+  // burn byte-identical for projects that never touch these controls.
+  anim_in: "none", anim_ms: 400, anim_words: "none",
+  anim_stagger: 120, anim_pop: 130, highlight: "#ffd400" };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
 // it, which is what keeps the preview and the burn in sync.
 const CHAR_FACTOR = 0.55;

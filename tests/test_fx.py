@@ -324,3 +324,23 @@ def test_burn_graph_still_terminates_at_outv():
     g = graph(clips, burn="caps.ass")
     assert "subtitles=" in g
     assert g.rstrip().endswith("[outv]")
+
+
+def test_look_becomes_an_eq_filter_before_the_alpha_stage():
+    g = graph([{"start": 0, "end": 4, "in": 0, "track": 0,
+                "fx": fx_mod.clean_fx({"brightness": 20, "contrast": -30,
+                                       "saturation": 50}), "kf": []}])
+    assert "eq=brightness=0.2000:contrast=0.7000:saturation=1.5000" in g
+    plain = graph([{"start": 0, "end": 4, "in": 0, "track": 0,
+                    "fx": fx_mod.clean_fx(None), "kf": []}])
+    assert "eq=" not in plain
+
+
+def test_look_clamps_and_round_trips():
+    fx = fx_mod.clean_fx({"brightness": 999, "contrast": -999, "saturation": 12.5})
+    assert fx["brightness"] == 100.0
+    assert fx["contrast"] == -100.0
+    assert fx["saturation"] == 12.5
+    assert fx_mod.clean_fx(fx) == fx
+    assert fx_mod.fx_is_default(fx_mod.clean_fx({"brightness": 0}))
+    assert not fx_mod.fx_is_default(fx_mod.clean_fx({"brightness": 1}))

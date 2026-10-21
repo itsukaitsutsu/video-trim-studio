@@ -15,7 +15,7 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 - **Text fonts:** discover installed TTF/OTF fonts, import fonts into the app, or grant browser-device font access. Imported fonts are available for both preview and FFmpeg burn-in.
 - **Shadows:** independent enable toggle, opacity, angle, distance, continuous glyph-outline spread and blur with consistent 1080p design-pixel scaling in preview/export.
 - Local web UI with a video preview, a multi-row timeline (stacked video lanes plus stacked caption lanes) with a separate pinned V1/T1/T2 track-label rail, filmstrip, waveform, and a searchable timeline list for sections and caption cues across all lanes.
-- **Menu bar + Premiere-style units:** File / Edit / Clip / Timeline / Captions / Export / Window / Help across the top; below it nine movable panels — **Project** (Source + Detect + Auto-caption cards) on the left, **Program** monitor in the center, **Clip**, **Text**, **List** and **Export** on the right (tabbed together in the Inspector by default, with **List** active), and **Timeline 01** along the bottom. **Reset workspace** restores this arrangement, tab order included. Every one of them is a real panel you can drag anywhere; see **Workspace** below.
+- **Menu bar + Premiere-style units:** File / Edit / Clip / Timeline / Captions / Export / Window / Help across the top; below it the movable panels — **Project** (Source + Detect + Auto-caption cards) on the left, **Program** monitor in the center, **Inspector** (which holds the clip side *and* the text side), **Sections** and **Export** on the right (Inspector / Sections / Export are tabbed together by default, with **Sections** active), and **Timeline 01** along the bottom. **Reset workspace** restores this arrangement, tab order included. Every one of them is a real panel you can drag anywhere; see **Workspace** below.
 - Rearrange any unit by dragging its ⠿ grip handle into another zone, resize zones with the divider grips, and resize individual units by their edges (other units have four handles, Timeline has right/top/bottom). A vertical edge that sits on a column boundary — the Program monitor's left and right edges, the Project panel's right edge, the Inspector's left edge — drags that column split free-form in both directions, exactly like a divider grip; the remaining edges resize the unit inside its own column.
 - **Group panels into tabs:** drop a panel onto the middle of another and it becomes one of that panel's tabs (Premiere-style panel groups); drop it near a panel's top or bottom edge to place it beside that panel instead. Drag a group's tab out to a zone or to another panel to split it off again. A group's header × hides the whole group, and the Window menu brings back any hidden panel or tab. Grouped panels keep their own content, so a grouped Timeline is shown as a tab inside its host (it is narrower there than in its own zone). Every unit header also has a **× button** that hides the whole unit; anything hidden comes back from the **Window** menu, which shows or hides units and individual tabs with checkmarks (picking a tab re-shows its unit). The Program monitor's centered inner bottom grip resizes only its viewing window; the Timeline's centered bottom grip changes only the visible timeline area, adding/removing blank space without scaling V1/T rows. If track content exceeds the view, it scrolls; Alt+wheel scrolls through tracks, while Ctrl+wheel does so when tracks overflow and zooms time when they fit. Zones, visibility, active tabs, sizes and viewport heights are saved in this browser; **Reset workspace** restores the defaults.
 - **Lane lock / eye:** every V/T label has a lock (blocks timeline move/trim/razor/split/delete/cut/mute on that lane — the Clip panel and text edits still work) and an eye (hides the lane's blocks on the timeline to declutter; preview and export are unaffected).
@@ -30,7 +30,8 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 - **Media bin:** import video, audio and still images from disk (referenced in place, never copied) or upload them into the project folder. Anything a browser cannot decode gets its own H.264/AAC proxy for playback, while export always reads the original.
 - **Multi-track picture:** clips live on tracks V1..Vn. Dropping a clip on an occupied track **overlays** it instead of pushing it aside, so B-roll sits on top of the shot below. The program monitor composites every visible track live, and the export is built from the same layout.
 - **Audio lanes A1..An:** a clip's sound starts linked to its picture (V1→A1) and can be **unlinked** onto its own lane and moved anywhere. Music, voice-over and narration dropped from the bin live on their own lanes, and lanes **mix** — overlapping sounds play together.
-- **Clip panel (per-clip effects):** select a video clip or an audio item to edit Transform (position X/Y, scale, opacity, **Fit**), Crop % per edge, Audio (volume, mute, fade in/out, **Unlink audio**) and Video fade in/out. Everything previews live (position/size/crop/opacity/volume/fades) and exports through the same ffmpeg graph.
+- **Inspector panel — Clip side (Video / Audio / Effect):** select a video clip or an audio item and pick a mode. **Video** = Transform (position X/Y, scale, opacity, **Fit**), Crop % per edge, Video fade in/out and ◆ keyframes; **Audio** = volume, mute, fade in/out and **Unlink audio**; **Effect** = Look sliders (brightness / contrast / saturation, baked into the export), a live effect *chain* listing everything the clip actually carries (crop, fit, scale, position, opacity, look, fades, volume, mute, keyframes — each row removable with ×), and a 10-card library (Corner PiP, Zoom punch, Letterbox, Fill the box, Fade from/to black, Half opacity, Mute, Duck, Boost). Everything previews live and exports through the same ffmpeg graph.
+- **Inspector panel — Text side:** the caption editor, laid out like kconcat's text panel: **Content** (the caption at the playhead: text, + caption, Delete, Duplicate, word count), **Typography** (font with search/import/device fonts, weight, italic, size, fill + opacity, spoken-word highlight colour, drop shadow, background), **Text animation** (None / Fade In / Pop In / Bounce / Slide Up / Typewriter / Karaoke / Word reveal + duration, word stagger and pop scale, with Preview and Reset), **Filler words** (scans every caption for strong fillers — eee, anu, ehm, um … — and weak ones — kayak, gitu, terus, apa ya — tick the ones you want and **Remove from captions** strips just those words), **Stroke**, **Layout** (align, width/height, line height, tracking) and **Position** (3×3 zone, X/Y, reset). Picking a caption flips the panel to Text automatically; picking a clip flips it back to Clip.
 - **Keyframes:** animate position, size and opacity with ◆ keyframes (diamonds on the clip). **◆ Add at playhead** captures the current look; export bakes the motion into short spans. Audio/video fades also preview live during playback.
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
@@ -312,23 +313,50 @@ Notes:
 - The `.srt` refers to the **source** timeline. After a trim, cue times no longer
   match the exported file unless you regenerate captions for it.
 
+## Sections panel
+
+The **Sections** panel (right side of the Inspector by default) is the whole
+trim loop in one place, laid out like the kconcat sections sheet:
+
+- **Detect** — collapsible block with the silence switch, threshold (dB),
+  minimum silence, minimum section and the `.srt` / `.vtt` path + upload, a
+  **Detect sections** button, and a one-line summary of what is on the
+  timeline right now. The same settings are mirrored (read-only) in the
+  Project panel's *1 · Detect sections* card, which also has an **Open
+  Sections panel** button that un-hides the panel, brings its tab forward and
+  flashes it.
+- **Clip timeline** — every section and caption drawn as a colour-coded block
+  on one bar (caption pink, silence orange, other audio grey; captions as thin
+  bars over the sections they belong to). Click a block to mark it for
+  removal; marked blocks dim. A needle follows the playhead and the header
+  shows **Keeping mm:ss / mm:ss** for the current marks.
+- **Filters** — caption / silence / other chips (with colour dots), minimum
+  section length, caption-text search. Filters drive both the table and the
+  strip.
+- **Table** — track, start, end, duration, kind (with a colour dot) and the
+  caption text; tick the checkbox to mark a row for removal, click a row to
+  jump the playhead, edit caption text inline, Shift-click or drag down the
+  checkboxes to paint a multi-selection.
+- **Footer** — how many items and how much time are marked, and the red
+  **Remove selected** button that cuts them out and closes the gaps (undoable).
+
 ## Workspace
 
-Every panel is a first-class unit — **Project**, **Program Monitor**, **Clip**,
-**Text**, **Export**, **Timeline 01** and **List** — and any of them can go
-anywhere.
+Every panel is a first-class unit — **Project**, **Program Monitor**, **Inspector**,
+**Export**, **Timeline 01** and **Sections** — and any of them can go anywhere.
+The Inspector is one panel holding both halves: the **Clip** scope with its
+Video / Audio / Effect modes and the **Text** scope with the caption sections.
 
 - **Rearrange:** drag a panel's ⠿ grip into another zone, or onto the top/bottom
   edge of another panel to sit beside it.
 - **Group:** drag a panel (or its tab) onto the *middle* of another panel and it
-  becomes a tab there. Clip / Text / Export start tabbed in the Inspector and
-  Timeline 01 / List start tabbed together at the bottom purely because that is
-  the default layout — pull any of them out and they become panels in their own
+  becomes a tab there. Inspector / Sections / Export start tabbed in the
+  Inspector purely because that is the default layout — pull any of them out and they become panels in their own
   right.
 - **Ungroup:** drag a tab out to a zone, or onto another panel. Nothing is
   welded: there are no hard-coded tabs.
 - **Merge a whole group:** dropping the Timeline shell onto another panel hands
-  Timeline 01 and List over to it, so groups stay one level deep instead of
+  Timeline 01 (and any tabs it holds) over to it, so groups stay one level deep instead of
   nesting tab strips. An emptied shell disappears rather than lingering as a
   blank panel.
 - **Hide:** the × on a panel header hides the whole panel; individual tabs are
@@ -509,7 +537,9 @@ static/app.js              menu bar, workspace zones/panel grouping, source
                            panel, caption card, caption box, export options
 static/stage.js            program monitor compositor: one <video> layer per track
 static/media.js            media bin: import, upload, proxies, waveforms, thumbnails
-static/clip.js             Clip panel: transform, fit, crop, audio, fades, keyframes
+static/clip.js             Inspector, clip side: transform, fit, crop, audio, fades, keyframes
+static/inspector.js        Inspector shell: Clip|Text scope, Video|Audio|Effect modes,
+                           effect chain + library, caption content, filler scan
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)
 demo/                      18-second sample video + captions, and a short spoken clip
 setup.bat, run.bat         Windows install/run helpers

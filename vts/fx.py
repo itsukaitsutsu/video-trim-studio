@@ -45,6 +45,11 @@ DEFAULT_FX: dict = {
     "fade_out": 0.0,
     "vfade_in": 0.0,
     "vfade_out": 0.0,
+    # Look (0 = untouched). Mirrored by static/stage.js as a CSS filter and by
+    # ffmpeg's eq filter in the export graph.
+    "brightness": 0.0,
+    "contrast": 0.0,
+    "saturation": 0.0,
     "fit": "fill",
 }
 
@@ -95,6 +100,8 @@ def clean_fx(raw) -> dict:
     fx["mute"] = bool(src.get("mute", False))
     for key in ("fade_in", "fade_out", "vfade_in", "vfade_out"):
         fx[key] = round(max(0.0, _f(src.get(key), 0.0)), 3)
+    for key in ("brightness", "contrast", "saturation"):
+        fx[key] = round(_clamp(_f(src.get(key), 0.0), -100.0, 100.0), 3)
     # How the (cropped) picture fills its box: fill stretches to the box,
     # contain letterboxes inside it, cover crops to fill it.
     fit = str(src.get("fit") or "fill").strip().lower()

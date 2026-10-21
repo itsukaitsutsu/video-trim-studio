@@ -425,3 +425,55 @@ test("editing caption text keeps the timings of a same-length rewrite", () => {
   assert.deepEqual(longer.caps[0].words, []);        // no timings to guess from
   assert.equal(longer.caps[0].word_source, null);
 });
+
+/* ---------------------------------------------------------------- Inspector */
+
+test("look keys default to zero and clamp to -100..100", () => {
+  const d = TLM.defaultFx();
+  assert.equal(d.brightness, 0);
+  assert.equal(d.contrast, 0);
+  assert.equal(d.saturation, 0);
+  const fx = TLM.cleanFx({ brightness: 999, contrast: -250, saturation: 40 });
+  assert.equal(fx.brightness, 100);
+  assert.equal(fx.contrast, -100);
+  assert.equal(fx.saturation, 40);
+  const back = TLM.cleanFx(fx);
+  assert.equal(back.brightness, 100);
+});
+
+test("filler words are dropped from captions and the text is rebuilt", () => {
+  const tl = {
+    clips: [], auds: [],
+    caps: [
+      { id: "c1", lane: 0, start: 0, end: 3, text: "jadi gitu ya terus kita",
+        words: [
+          { w: "jadi", s: 0, e: 0.4 }, { w: "gitu", s: 0.4, e: 0.8 },
+          { w: "ya", s: 0.8, e: 1.0 }, { w: "terus", s: 1.0, e: 1.4 },
+          { w: "kita", s: 1.4, e: 1.8 },
+        ], word_source: "edited" },
+      { id: "c2", lane: 0, start: 4, end: 6, text: "apa ya anu" },
+      { id: "c3", lane: 0, start: 7, end: 8, text: "bersih" },
+    ],
+  };
+  const r = TLM.removeCaptionFillers(tl, ["gitu", "terus", "apa ya", "anu"]);
+  assert.equal(r.removed, 4);
+  const texts = r.tl.caps.map((c) => c.text);
+  assert.deepEqual(texts, ["jadi ya kita", "bersih"]);
+  const c1 = r.tl.caps[0];
+  assert.deepEqual(c1.words.map((w) => w.w), ["jadi", "ya", "kita"]);
+  assert.equal(c1.word_source, "edited");
+  // timings of the words that stayed are untouched
+  near(c1.words[0].s, 0);
+  near(c1.words[2].s, 1.4);
+});
+
+test("removing the only word drops the empty caption", () => {
+  const tl = { clips: [], auds: [], caps: [
+    { id: "c1", lane: 0, start: 0, end: 1, text: "anu",
+      words: [{ w: "anu", s: 0, e: 0.5 }], word_source: "edited" },
+    { id: "c2", lane: 1, start: 2, end: 3, text: "keep" },
+  ] };
+  const r = TLM.removeCaptionFillers(tl, ["anu"]);
+  assert.equal(r.removed, 1);
+  assert.deepEqual(r.tl.caps.map((c) => c.text), ["keep"]);
+});

@@ -19,6 +19,7 @@ entries are fine for players and for our ASS burn), and it cannot carry word
 timings - that is what the .json sidecar and the project state are for.
 """
 
+import re
 import uuid
 
 from .captionmap import DEFAULT_STYLE
@@ -44,6 +45,29 @@ def clean_style(st: dict | None) -> dict:
         pass
     align = str(st.get("align", out["align"]))
     out["align"] = align if align in ("left", "center", "right", "justify") else "center"
+    # Text animation: the same keys static/app.js writes and
+    # vts/captionmap.py burns. Anything unknown falls back to "no animation",
+    # which is what keeps older projects byte-identical.
+    anim_in = str(st.get("anim_in", out["anim_in"]))
+    out["anim_in"] = anim_in if anim_in in (
+        "none", "fade", "pop", "bounce", "slide", "typewriter") else "none"
+    anim_words = str(st.get("anim_words", out["anim_words"]))
+    out["anim_words"] = anim_words if anim_words in ("none", "reveal", "karaoke") else "none"
+    try:
+        out["anim_ms"] = min(4000, max(0, int(float(st.get("anim_ms", out["anim_ms"])))))
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["anim_stagger"] = min(800, max(0, int(float(
+            st.get("anim_stagger", out["anim_stagger"])))))
+    except (TypeError, ValueError):
+        pass
+    try:
+        out["anim_pop"] = min(220.0, max(100.0, float(st.get("anim_pop", out["anim_pop"]))))
+    except (TypeError, ValueError):
+        pass
+    hl = str(st.get("highlight", out["highlight"]) or "")
+    out["highlight"] = hl if re.fullmatch(r"#[0-9a-fA-F]{6}", hl) else "#ffd400"
     return out
 
 

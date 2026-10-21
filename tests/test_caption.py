@@ -1163,32 +1163,34 @@ def test_caption_overlay_is_wired_between_html_and_js():
     tl_unit = html.index('data-workspace-panel="timeline"')
     # Zone order: Project | Program | Inspector | Timeline.
     assert project_unit < program_unit < insp_unit < tl_unit
-    clip_tab = html.index('data-tab="clip"')
-    text_tab = html.index('data-tab="text"')
-    export_tab = html.index('data-tab="export"')
-    tab_clip_page = html.index('id="tab-clip"')
-    tab_text_page = html.index('id="tab-text"')
+
+    # One Inspector panel replaces the old Clip + Text tabs: a Clip|Text
+    # switch, three clip modes, and one section per kconcat text section.
+    tab_inspector_page = html.index('id="tab-inspector"')
     tab_export_page = html.index('id="tab-export"')
+    assert insp_unit < tab_inspector_page < tab_export_page
+    for scope in ("clip", "text"):
+        assert f'data-insp-scope="{scope}"' in html
+    for mode in ("video", "audio", "effect"):
+        assert f'data-insp-mode="{mode}"' in html
+    sections = ["Content", "Typography", "Text animation", "Filler words",
+                "Stroke", "Layout", "Position"]
+    marks = []
+    for name in sections:
+        marks.append(html.index(f"<summary>{name}"))
+    assert marks == sorted(marks), "text sections are out of order"
+    assert tab_inspector_page < marks[0]
+    assert marks[-1] < tab_export_page
+    # The font controls and the two controls the old Text panel promised live
+    # in the Text pane, not in the Export tab.
+    assert marks[0] < html.index('id="capFontSize"') < marks[2]
+    assert marks[0] < html.index('id="capApplyAll"') < marks[2]
+    assert tab_inspector_page < html.index('id="capAdd"') < tab_export_page
     settings_card = html.index('data-export-card="settings"')
     export_card = html.index('data-export-card="export"')
     style_row_pos = html.index('id="capStyleRow"')
-    # Inspector tabs precede their pages; Text owns the font controls and the
-    # Export tab holds the settings card (with the style row) + Export card.
-    assert insp_unit < clip_tab < text_tab < export_tab
-    assert export_tab < tab_clip_page < tab_text_page < tab_export_page
-    assert tab_text_page < html.index('id="capFontSize"') < tab_export_page
     assert tab_export_page < settings_card < style_row_pos < export_card
-    for wintab in ("clip", "text", "export", "tl", "list"):
-        assert f'data-wintab="{wintab}"' in html
-    tl_tab = html.index('data-btab="tl"')
-    list_tab = html.index('data-btab="list"')
-    tab_tl_page = html.index('id="tab-tl"')
-    tab_list_page = html.index('id="tab-list"')
-    apply_all_pos = html.index('id="capApplyAll"')
-    cap_add_pos = html.index('id="capAdd"')  # exact id: capAddCue sorts earlier
-    # Bottom tabs precede their pages; the timeline toolbar is in Timeline 01.
-    assert tl_unit < tl_tab < list_tab < tab_tl_page
-    assert tab_tl_page < apply_all_pos < cap_add_pos < tab_list_page
+    assert tab_inspector_page < html.index('id="capPosInfo"') < tab_export_page
     assert "capApplyAllHint" not in html and "capApplyAllHint" not in js
     assert "app.js?v=" in html and "style.css?v=" in html
 
@@ -1385,3 +1387,77 @@ def test_captions_update_stacks_two_cues_and_rewrites_srt(client, tmp_path):
     done = _wait_job(client, res.json()["id"])
     assert done["state"] == "done", done.get("error")
     assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
+# Text animation (Inspector > Text animation)
+# ---------------------------------------------------------------------------
+
+def _ass_for(cues):
+    import tempfile
+    from vts.captionmap import write_ass
+    path = tempfile.mktemp(suffix=".ass")
+    write_ass(cues, path, 1920, 1080)
+    with open(path, encoding="utf-8") as f:
+        body = f.read()
+    os.unlink(path)
+    return [line for line in body.splitlines() if line.startswith("Dialogue")]
+
+
+def test_entry_animations_burn_tags():
+    from vts.captionmap import DEFAULT_STYLE
+    fade = _ass_for([{"start": 1, "end": 3, "text": "hello",
+                      "style": dict(DEFAULT_STYLE, anim_in="fade", anim_ms=500)}])
+    assert any("\\fad(500,0)" in e for e in fade)
+    pop = _ass_for([{"start": 1, "end": 3, "text": "hello",
+                     "style": dict(DEFAULT_STYLE, anim_in="pop", anim_ms=600,
+                                   anim_pop=140)}])
+    assert any("\\fscx140.0\\fscy140.0" in e and "\\t(0,600" in e for e in pop)
+    slide = _ass_for([{"start": 1, "end": 3, "text": "hello",
+                       "style": dict(DEFAULT_STYLE, anim_in="slide", anim_ms=400)}])
+    assert any("\\move(" in e and ",0,400)" in e for e in slide)
+    assert not any("\\fad(" in e or "\\move(" in e for e in
+                   _ass_for([{"start": 1, "end": 3, "text": "plain"}]))
+
+
+def test_typewriter_reveals_characters():
+    from vts.captionmap import DEFAULT_STYLE
+    events = _ass_for([{"start": 0, "end": 2, "text": "abc",
+                        "style": dict(DEFAULT_STYLE, anim_in="typewriter",
+                                      anim_ms=600, shadow_opacity=0)}])
+    texts = [e.split("}", 1)[1] for e in events]
+    assert texts == ["a", "ab", "abc"]
+
+
+def test_karaoke_and_word_reveal_use_word_timings():
+    from vts.captionmap import DEFAULT_STYLE
+    words = [{"w": "one", "s": 0.0, "e": 0.4},
+             {"w": "two", "s": 0.4, "e": 0.8},
+             {"w": "three", "s": 0.8, "e": 1.2}]
+    kara = _ass_for([{"start": 0, "end": 1.2, "text": "one two three",
+                      "words": words,
+                      "style": dict(DEFAULT_STYLE, anim_words="karaoke",
+                                    highlight="#ffd400", shadow_opacity=0)}])
+    body = kara[0].split("}", 1)[1]
+    assert body.count("\\k") >= 3            # one \k clock entry per word
+    assert "\\1c&H00d4ff&" in kara[0]        # #ffd400 as ASS BGR
+    reveal = _ass_for([{"start": 0, "end": 1.2, "text": "one two three",
+                        "words": words,
+                        "style": dict(DEFAULT_STYLE, anim_words="reveal",
+                                      shadow_opacity=0)}])
+    assert [e.split("}", 1)[1] for e in reveal] == ["one", "one two", "one two three"]
+
+
+def test_animation_keys_survive_the_caption_style_cleaner():
+    from vts.captions import clean_style
+    st = clean_style({"anim_in": "bounce", "anim_ms": 99999, "anim_words": "karaoke",
+                      "anim_stagger": -5, "anim_pop": 900, "highlight": "red"})
+    assert st["anim_in"] == "bounce"
+    assert st["anim_ms"] == 4000
+    assert st["anim_words"] == "karaoke"
+    assert st["anim_stagger"] == 0
+    assert st["anim_pop"] == 220.0
+    assert st["highlight"] == "#ffd400"     # invalid colour falls back
+    junk = clean_style({"anim_in": "spin", "anim_words": "teleport"})
+    assert junk["anim_in"] == "none"
+    assert junk["anim_words"] == "none"

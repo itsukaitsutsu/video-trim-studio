@@ -46,6 +46,7 @@
     crop_l: 0, crop_t: 0, crop_r: 0, crop_b: 0,
     volume: 100, mute: false,
     fade_in: 0, fade_out: 0, vfade_in: 0, vfade_out: 0,
+    brightness: 0, contrast: 0, saturation: 0,
     fit: "fill",
   };
   const FIT_MODES = ["fill", "contain", "cover"];
@@ -203,6 +204,11 @@
     fx.mute = !!s.mute;
     for (const k of ["fade_in", "fade_out", "vfade_in", "vfade_out"]) {
       fx[k] = r3(Math.max(0, num(s[k], 0)));
+    }
+    // Look: mirrored by ffmpeg's eq filter on export and by a CSS filter in
+    // the program monitor (0 = untouched, -100..100).
+    for (const k of ["brightness", "contrast", "saturation"]) {
+      fx[k] = r3(clamp(num(s[k], 0), -100, 100));
     }
     // fill = stretch to the box, contain = letterbox inside it, cover = crop.
     const fit = String(s.fit || "fill").toLowerCase();
@@ -1050,6 +1056,58 @@
     return out;
   }
 
+  // Filler-word pass: drop the given words (lower-case, punctuation-free,
+  // "apa ya" style phrases included) from every caption and rebuild its text.
+  // Used by the Inspector's Filler words section, which edits text only.
+  function removeCaptionFillers(tl, words) {
+    const drop = new Set((words || []).map((w) => String(w).toLowerCase().replace(/[^\p{L}\p{N} ]+/gu, "").trim()));
+    const out = normalise(tl);
+    let removed = 0;
+    for (const cap of out.caps || []) {
+      const ws = capWords(cap);
+      if (!ws.length) {
+        const toks = String(cap.text || "").split(/\s+/).filter(Boolean);
+        const clean = (t) => String(t).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+        const kept = [];
+        let skipNext = false;
+        for (let i = 0; i < toks.length; i += 1) {
+          if (skipNext) { skipNext = false; continue; }
+          const one = clean(toks[i]);
+          let hit = drop.has(one);
+          if (!hit && i + 1 < toks.length && drop.has(`${one} ${clean(toks[i + 1])}`)) {
+            hit = true; skipNext = true;
+          }
+          if (hit) { removed += 1; continue; }
+          kept.push(toks[i]);
+        }
+        if (kept.length !== toks.length) cap.text = kept.join(" ");
+        continue;
+      }
+      const kept = [];
+      let skipNext = false;
+      for (let i = 0; i < ws.length; i += 1) {
+        const w = ws[i];
+        const one = String(w.w || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+        if (skipNext) { skipNext = false; continue; }
+        let hit = drop.has(one);
+        if (!hit && i + 1 < ws.length) {
+          const two = one + " " + String(ws[i + 1].w || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+          if (drop.has(two)) { hit = true; skipNext = true; }
+        }
+        if (hit) { removed += 1; continue; }
+        kept.push({ w: w.w, s: w.s, e: w.e });
+      }
+      if (kept.length !== ws.length) {
+        cap.words = kept;
+        cap.text = kept.map((w) => w.w).join(" ");
+        cap.word_source = "edited";
+      }
+    }
+    // A caption whose last word was a filler has nothing left to show.
+    out.caps = (out.caps || []).filter((c) => String(c.text || "").trim().length > 0);
+    return { tl: normalise(out), removed };
+  }
+
   function timelineEnd(tl) {
     return (tl.clips || []).reduce((m, c) => Math.max(m, c.end), 0);
   }
@@ -1159,6 +1217,7 @@
     copyItems, pasteItems, duplicateItems, addCaption, addCaptionOnTrack, setClipText, setCaptionText,
     timelineEnd, contentEnd, clipAt, clipStackAt, audioStackAt, flattenClips,
     placeClip, placeAudio, placeCap, capTrackOf, makeClip, makeAudioItem, addMedia,
+    removeCaptionFillers,
     firstFreeTrack, unlinkClipAudio, relinkClipAudio, linkedAudioOf,
     mergeRanges, validate,
     cleanWords, shiftWords, sliceWords, capWords, rewordForText,

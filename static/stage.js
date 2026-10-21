@@ -209,6 +209,14 @@ function stageSync(t, playing, force) {
         Math.max(0, Math.min(1, (Number(fx.opacity) || 0) / 100 * env.video)).toFixed(4));
       rec.layer.style.transform =
         `translate(${(Number(fx.x) || 0).toFixed(3)}%, ${(Number(fx.y) || 0).toFixed(3)}%)`;
+      // Look: the same brightness/contrast/saturation the export's eq filter
+      // applies (0 = untouched). CSS filter keeps the preview honest.
+      const gt = (v) => 1 + (Number(v) || 0) / 100;
+      const look = [Number(fx.brightness), Number(fx.contrast), Number(fx.saturation)];
+      rec.layer.style.filter = look.some((v) => Math.abs(v) > 0.001)
+        ? `brightness(${gt(fx.brightness).toFixed(3)}) ` +
+          `contrast(${gt(fx.contrast).toFixed(3)}) saturate(${gt(fx.saturation).toFixed(3)})`
+        : "";
       rec.layer.style.display = "";
 
       const want = Math.max(0, (Number(clip.in) || 0) + (t - clip.start));

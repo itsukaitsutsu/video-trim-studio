@@ -1,79 +1,125 @@
-Video Trim Studio - workspace resize + default layout fix
-=========================================================
+Video Trim Studio - Inspector panel + Sections panel + workspace fixes
+=====================================================================
 
-Replace these files in your project folder (keep the same paths):
+Replace these files in your project folder (same paths):
 
-    static/app.js            <- the only runtime file that changed
-    README.md                <- docs only (optional)
-    tests/test_timeline_ui.py<- test updates (optional)
+    static/index.html         <- Inspector markup (Clip|Text, Video|Audio|Effect)
+    static/inspector.js       <- NEW FILE: Inspector shell, effect chain,
+                                 filler scan, caption content editor
+    static/style.css          <- Inspector layout, cards, sliders, scrolling
+    static/app.js             <- workspace units, Clip/Sections wiring
+    static/timeline.js        <- refresh hook, section strip, chrome
+    static/clip.js            <- clip fields now render inside the Inspector
+    static/timeline-model.js  <- look, filler removal, caption rules
+    static/stage.js           <- look filter in the program monitor
+    static/font-picker.js     <- unchanged API, new call sites
+    vts/fx.py                 <- look (brightness/contrast/saturation) + clamps
+    vts/edl.py                <- eq stage in the export graph
+    vts/captionmap.py         <- text animations in the ASS burn
+    vts/captions.py           <- style defaults for the new keys
+    README.md                 <- docs
+    tests/…, tests/js/…       <- tests (optional)
+    WHATS-CHANGED.txt         <- this file
 
-Then reload http://127.0.0.1:8765/ with Ctrl+F5 (or Ctrl+Shift+R) so the
-browser drops the cached app.js. No restart of server.py is needed, no
-`pip install` is needed, and nothing else in the project is touched.
-
-
-1) Column resize no longer "sticks"
------------------------------------
-Every vertical grip that sits ON a column boundary now drags that split
-free-form, both directions, with no maximum width - exactly like the divider
-grip you liked:
-
-    Program monitor, left edge   -> left column
-    Program monitor, right edge  -> right column
-    Project panel, right edge    -> left column
-    Inspector panel, left edge   -> right column
-
-The outer window edges still resize the panel inside its column (they have no
-column to give space to). Handles on a divider say
-"Drag the divider to resize the left/right column" and their hover cursor
-follows the divider too.
-
-Two follow-on bugs fixed in the same code path:
-
-  * Dragging a panel's TOP or BOTTOM edge used to write an inline width, which
-    froze the panel at that moment's column width. From then on its side edges
-    could never reach the divider again ("stuck"). Vertical drags now only
-    touch height.
-  * Saved layouts written by the old build often stored `width` equal to the
-    column width (that frozen state). Those pins are ignored on load, so an
-    existing workspace is repaired instead of staying stuck.
-
-Divider drags are also delta-based now: grabbing a grip no longer snaps the
-column by the width of the grip itself.
-
-Handle bookkeeping was hardened as well: exactly one grip per edge per
-standalone panel, and stale grips left inside a panel body (an older layout
-could keep a duplicate, which then sat on top of the real one) are removed.
-The idle cursor of each grip is also derived from the live geometry.
+Then reload http://127.0.0.1:8765/ with Ctrl+F5. The ?v= numbers were bumped,
+so a plain reload should already pick the new files up. No server restart and
+no `pip install` are needed.
 
 
-2) Default workspace: List belongs to the Inspector group
+1) One Inspector panel instead of the old Clip and Text panels
+--------------------------------------------------------------
+The right side is now a single panel named **Inspector** (tabs: Inspector |
+Sections | Export). Inside it a **Clip / Text** switch picks the target, and
+the panel follows your selection: click a caption and it flips to Text, click
+a clip and it flips back to Clip.
+
+  CLIP side - three modes
+    Video    Track, Source, Fit (fill / contain / cover, plus the
+             "fill frame" and "corner PiP" shortcuts), Transform (X %, Y %,
+             Scale %, Opacity %) with one Reset, Crop per edge, video fades,
+             and the keyframe list (◆ Add at playhead, Clear all).
+    Audio    Unlink audio + lane, Level (volume, mute), Fades in/out,
+             Reset audio.
+    Effect   Look: brightness / contrast / saturation sliders, baked into
+             the export (ffmpeg `eq`) and mirrored by the preview.
+             Effect chain: every effect the clip actually carries, top to
+             bottom in export order (crop, fit, scale, position, opacity,
+             look, video fade, volume, mute, audio fade, keyframes). The ×
+             on a row resets just that effect; "Reset all effects" clears
+             the picture/sound effects but leaves keyframes alone.
+             Add effect: 10 one-click presets - Corner PiP, Zoom punch,
+             Letterbox, Fill the box, Fade from black, Fade to black,
+             Half opacity, Mute sound, Duck audio, Boost audio.
+
+  TEXT side - the kconcat text panel, section for section
+    Content        The caption at the playhead: its text in a textarea,
+                   + caption / Delete / Duplicate, word count and style
+                   source.
+    Typography     Font (searchable picker, Import fonts, Refresh,
+                   Device fonts…), weight, italic, size, Fill + opacity,
+                   spoken-word Highlight colour, Apply to every caption,
+                   Drop shadow (toggle, colour, opacity, angle, distance,
+                   spread, blur) and Background (toggle, colour, opacity).
+    Text animation In (None / Fade In / Pop In / Bounce / Slide Up /
+                   Typewriter / Karaoke / Word reveal), Duration, Words
+                   (all at once / word by word), Word stagger, Pop scale,
+                   ▶ Preview, Reset animation. All of it is written into
+                   the ASS burn, so the export matches the preview.
+    Filler words   Scans every caption for fillers and lists them with
+                   count and first time - strong (eee, ee, ehm, eh, emm,
+                   um, uh, erm, hmm, uhm, mmm) and weak (anu, ano, kayak,
+                   gitu, terus, apa ya, including the two-word "apa ya").
+                   Tick words -> Remove from captions strips only those
+                   words out of the caption text, undoably. Select all /
+                   Clear for the list.
+    Stroke         Toggle, colour, opacity, width, Outside/Inside.
+    Layout         Align left/centre/right, Width %, Height %, Line
+                   height, Tracking.
+    Position       3x3 zone picker, X %, Y %, Reset style.
+
+  Anything that is not available for the current selection says so in
+  place ("Select a video clip…", "No caption at the playhead") instead of
+  showing dead controls.
+
+
+2) Sections panel (carried over from the previous round)
 --------------------------------------------------------
-A fresh workspace (and "Reset workspace") now opens as:
+The old List panel is the kconcat-style Sections panel: collapsible Detect
+block (threshold, min silence, min section, .srt/.vtt upload, Detect
+sections, one-line summary), the clip timeline strip with click-to-mark
+removal, caption/silence/other filter chips + min length + text search,
+the table (inline caption editing, Shift-click and paint-drag selection),
+and a footer with "N selected · mm:ss marked" and **Remove selected**.
+The Project panel's Detect card mirrors the settings read-only and has an
+**Open Sections panel** button.
 
-    left   : Project
-    center : Program monitor
-    right  : Inspector  -> tabs: Clip | Text | List | Export   (List active)
-    bottom : Timeline 01
 
-Layouts saved by the previous build are migrated once:
-
-  * a List that was still tabbed under the Timeline moves into the Inspector
-    group, and becomes the visible tab if it was the visible one before;
-  * a List you had deliberately pulled out of a group stays exactly where it
-    is (no host entry = your choice);
-  * your zones, column widths, panel heights and hidden panels are kept.
-
-Tab order inside a group is now canonical (Clip, Text, List, Export) instead
-of following the order the group map happened to be saved in.
+3) Workspace fixes (carried over)
+---------------------------------
+- Column dividers slide freely in both directions, no maximum width:
+  Program's left/right edges, Project's right edge, Inspector's left edge.
+- Vertical (top/bottom) panel drags no longer freeze the width, and old
+  saved layouts that stored "width == column width" are repaired on load.
+- One grip per edge per panel; stale duplicate grips are removed.
+- Default workspace: Project | Program | Inspector (Inspector, Sections,
+  Export tabs - Sections active) and Timeline 01 alone in the bottom zone.
+  Reset workspace restores exactly that.
+- The Inspector body scrolls inside the panel when it is resized short, so
+  its controls can never spill out over the timeline.
 
 
 Notes
 -----
-* vts/static/app.js and vts/static/style.css are an older copy of the front
-  end bundled in the repo. They are NOT served by server.py at the project
-  root, so they were left untouched. If you ever run vts/server.py instead,
-  say so and the same fix can be mirrored there.
-* Verified in Chromium at 1280x720 and 1400x1000: all four dividers drag
-  freely both ways and return exactly; no page-wide horizontal overflow at
-  extreme widths; layout and tab choice survive a reload.
+* Export graph unchanged except for the new Look (`eq`) stage: it runs after
+  crop/scale/position and before the alpha and fade stages, and is skipped
+  for still images (same as before for images).
+* Caption timing, detection and the timeline model are untouched; the
+  Inspector is presentation plus the new Look/animation/filler settings,
+  which are saved with the project like every other clip/caption value.
+* vts/static/* is an older bundled copy of this front end and is not served
+  by server.py at the project root; it was left untouched.
+* Verified in Chromium at 1280x720, 1400x1000, 1536x960, 1600x1200 and
+  390x720, with the Inspector tabbed in place, resized small, and pulled out
+  into its own zone: every mode, the effect chain and its × buttons, all ten
+  presets, the look sliders, every text section, the filler scan and removal,
+  and the animation settings through to the burned ASS.
