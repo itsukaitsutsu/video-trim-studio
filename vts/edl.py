@@ -155,8 +155,11 @@ def _layer_chain(inp: Input, src_in: float, d: float, start: float, end: float,
 
     fi = min(eff["vfade_in"], d / 2.0) if eff["vfade_in"] else 0.0
     fo = min(eff["vfade_out"], d / 2.0) if eff["vfade_out"] else 0.0
+    rot_txt, cos_a, sin_a = fx_mod.rotate_filter(eff)
+    mask_txt = fx_mod.mask_filter(eff)
     needs_alpha = (eff["opacity"] < 100.0 - 1e-9 or fi > 0.001 or fo > 0.001
-                   or eff.get("fit") == "contain")
+                   or eff.get("fit") == "contain"
+                   or bool(rot_txt) or bool(mask_txt))
     if needs_alpha:
         # Before the pad: `contain` writes transparent letterbox bars, and an
         # alpha fade must reveal the track below instead of going to black.
@@ -165,10 +168,21 @@ def _layer_chain(inp: Input, src_in: float, d: float, start: float, end: float,
     scale_filters, bw, bh = fx_mod.fit_filter(eff, cw, ch, w, h)
     chain.extend(scale_filters)
 
+    # Rotate around the centre; the bounding box grows, the centre does not
+    # move, so the overlay placement below keeps the picture where it was.
+    if rot_txt:
+        chain.append(rot_txt)
+        bw, bh = fx_mod.rotated_size(bw, bh, cos_a, sin_a)
+    # Mask after rotate: the shape is defined in the picture the viewer sees.
+    if mask_txt:
+        chain.append(mask_txt)
+
     dx = w * eff["x"] / 100.0
     dy = h * eff["y"] / 100.0
-    px = int(_clamp_pos(round((w - bw) / 2.0 + dx), 0, max(0, w - bw)))
-    py = int(_clamp_pos(round((h - bh) / 2.0 + dy), 0, max(0, h - bh)))
+    # The monitor lets you drag a picture past the frame edge, so the export
+    # lets it hang over too (Premiere does the same); only absurd values clamp.
+    px = int(_clamp_pos(round((w - bw) / 2.0 + dx), -bw, w))
+    py = int(_clamp_pos(round((h - bh) / 2.0 + dy), -bh, h))
 
     chain.append(f"fps={fps:.6f}")
     chain.append("setsar=1")

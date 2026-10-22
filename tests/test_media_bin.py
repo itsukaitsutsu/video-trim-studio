@@ -261,3 +261,115 @@ def test_image_asset_gets_a_default_duration(tmp_path, monkeypatch):
         assert asset['kind'] == 'image'
         assert asset['duration'] == pytest.approx(5.0, abs=.01)
         assert asset['width'] == 80 and asset['height'] == 45
+
+
+def test_png_is_served_as_an_image_not_a_proxy(tmp_path, monkeypatch):
+    """A still must reach the <img> as image/png - no transcode, no octet-stream."""
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    main, png = tmp_path / 'main.mp4', tmp_path / 'still.png'
+    make_clip(main, 'red', 3, True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'color=green:s=64x36:d=1', '-frames:v', '1', str(png)],
+                   check=True, capture_output=True)
+    with TestClient(server.app) as client:
+        assert client.post('/api/open', json={'path': str(main)}).status_code == 200
+        asset = client.post('/api/bin/import', json={'paths': [str(png)]}).json()['assets'][-1]
+        assert asset['kind'] == 'image'
+        # Direct: the browser paints the file itself, so no proxy is started.
+        assert asset['preview'] == {'state': 'none', 'ready': False, 'progress': 0}
+        served = client.get(f"/api/bin/{asset['id']}/stream")
+        assert served.status_code == 200
+        assert served.headers['content-type'].split(';')[0] == 'image/png'
+        assert served.content[:8] == b'\x89PNG\r\n\x1a\n'
+        # No proxy file was written for it either.
+        assert not list(tmp_path.rglob('*.proxy.mp4'))
+
+
+def test_convert_only_image_gets_a_png_preview_copy(tmp_path, monkeypatch):
+    """TIFF: kept as the source of truth, previewed through a PNG sidecar."""
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    main, tif = tmp_path / 'main.mp4', tmp_path / 'scan.tiff'
+    make_clip(main, 'blue', 3, True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'color=yellow:s=48x32:d=1', '-frames:v', '1', str(tif)],
+                   check=True, capture_output=True)
+    with TestClient(server.app) as client:
+        assert client.post('/api/open', json={'path': str(main)}).status_code == 200
+        asset = client.post('/api/bin/import', json={'paths': [str(tif)]}).json()['assets'][-1]
+        assert asset['kind'] == 'image'
+        assert asset['preview']['state'] == 'none'
+        served = client.get(f"/api/bin/{asset['id']}/stream")
+        assert served.headers['content-type'].split(';')[0] == 'image/png'
+        assert served.content[:4] == b'\x89PNG'
+        # Removing the asset removes the sidecar as well.
+        assert client.delete(f"/api/bin/{asset['id']}").status_code == 200
+        assert not list((tmp_path / 'binstills').glob('*.png'))
+
+
+def test_still_cannot_be_opened_as_the_project_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    png = tmp_path / 'lonely.png'
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'color=white:s=40x24:d=1', '-frames:v', '1', str(png)],
+                   check=True, capture_output=True)
+    with TestClient(server.app) as client:
+        res = client.post('/api/open', json={'path': str(png)})
+        assert res.status_code == 400
+        assert 'still image' in res.json()['detail']
+        assert 'Media bin' in res.json()['detail']
+
+
+def test_svg_becomes_a_still_through_the_png_copy(tmp_path, monkeypatch):
+    """SVG is a still, not a video: rasterised once, served as image/png."""
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    main, svg = tmp_path / 'main.mp4', tmp_path / 'logo.svg'
+    make_clip(main, 'red', 3, True)
+    svg.write_text('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="36">'
+                   '<rect width="64" height="36" fill="#0af"/></svg>')
+    with TestClient(server.app) as client:
+        assert client.post('/api/open', json={'path': str(main)}).status_code == 200
+        res = client.post('/api/bin/import', json={'paths': [str(svg)]})
+        assert res.status_code == 200, res.text
+        asset = res.json()['assets'][-1]
+        assert asset['kind'] == 'image'
+        assert asset['preview']['state'] == 'none'
+        served = client.get(f"/api/bin/{asset['id']}/stream")
+        assert served.headers['content-type'].split(';')[0] == 'image/png'
+
+
+def test_unreadable_image_is_refused_with_a_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    main, bad = tmp_path / 'main.mp4', tmp_path / 'broken.tiff'
+    make_clip(main, 'red', 3, True)
+    bad.write_bytes(b'not actually a tiff')
+    with TestClient(server.app) as client:
+        assert client.post('/api/open', json={'path': str(main)}).status_code == 200
+        res = client.post('/api/bin/import', json={'paths': [str(bad)]})
+        assert res.status_code == 400
+        assert 'broken.tiff' in res.json()['detail']
+
+
+def test_audio_only_files_are_not_transcoded(tmp_path, monkeypatch):
+    """MP3/WAV play in an <audio> tag, so the bin must not build a proxy."""
+    monkeypatch.setattr(server, 'WORK_DIR', tmp_path)
+    monkeypatch.setattr(server, 'LAST_PROJECT_FILE', tmp_path / 'last.txt')
+    main, mp3, wav = tmp_path / 'main.mp4', tmp_path / 'tone.mp3', tmp_path / 'tone.wav'
+    make_clip(main, 'red', 2, True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'sine=frequency=440:duration=1', str(mp3)], check=True, capture_output=True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                    'sine=frequency=660:duration=1', str(wav)], check=True, capture_output=True)
+    with TestClient(server.app) as client:
+        assert client.post('/api/open', json={'path': str(main)}).status_code == 200
+        assets = client.post('/api/bin/import',
+                             json={'paths': [str(mp3), str(wav)]}).json()['assets']
+        for asset in [a for a in assets if a['name'].startswith('tone')]:
+            assert asset['kind'] == 'audio'
+            assert asset['preview']['state'] == 'none', asset['name']
+            served = client.get(f"/api/bin/{asset['id']}/stream")
+            assert served.headers['content-type'].startswith('audio/'), asset['name']

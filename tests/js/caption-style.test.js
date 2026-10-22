@@ -74,3 +74,19 @@ test("Apply to all with no cue at the playhead uses the default layout for every
   for (const cue of cues) assert.deepEqual(plain(cue.style), expected);
   assert.deepEqual(plain(ctx.CAPPOS), expected);
 });
+
+test("Apply to all reaches every caption lane, not just the one being edited", () => {
+  const cues = [
+    { id: "lane0", lane: 0, style: { x: 0.5, y: 0.5, size_pct: 4, box_w: 0.6, align: "center" } },
+    { id: "lane1", lane: 1, style: { x: 0.5, y: 0.5, size_pct: 4, box_w: 0.6, align: "center" } },
+    { id: "lane2", lane: 2, style: { x: 0.5, y: 0.5, size_pct: 4, box_w: 0.6, align: "center" } },
+  ];
+  const ctx = loadHelpers(cues, { applyAll: true, activeCue: cues[0] });
+
+  ctx.applyCaptionStylePatch({ size_pct: 7 }, cues[0]);
+
+  for (const cue of cues) assert.equal(cue.style.size_pct, 7, `${cue.id} was left behind`);
+  // And a second edit from a different lane keeps every lane in step.
+  ctx.applyCaptionStylePatch({ size_pct: 9 }, cues[2]);
+  for (const cue of cues) assert.equal(cue.style.size_pct, 9, `${cue.id} was left behind`);
+});

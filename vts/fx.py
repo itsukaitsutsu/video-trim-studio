@@ -51,13 +51,18 @@ DEFAULT_FX: dict = {
     "contrast": 0.0,
     "saturation": 0.0,
     "fit": "fill",
+    # Rotation in degrees around the picture centre (Premiere-style transform).
+    "rot": 0.0,
+    # Shape mask: the picture is only visible inside it. See default_mask().
+    "mask": None,
 }
 
 # How a clip's (cropped) picture fills its box on the frame.
 FIT_MODES = ("fill", "contain", "cover")
+MASK_SHAPES = ("rect", "ellipse")
 
 # Keyframe-animatable transform keys.
-KF_KEYS = ("x", "y", "scale", "opacity")
+KF_KEYS = ("x", "y", "scale", "opacity", "rot")
 
 MAX_KEYFRAMES = 64
 MAX_VTRACKS = 64   # video lanes grow on demand, like caption lanes
@@ -75,6 +80,27 @@ def _f(value, default: float) -> float:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return hi if value > hi else lo if value < lo else value
+
+
+def default_mask(raw) -> dict:
+    """Coerce a mask dict to safe values.
+
+    ``x``/``y`` are the shape centre and ``w``/``h`` its size, all in % of the
+    clip's own picture; ``feather`` is the soft edge in % of the shape's
+    half-size. Mirrored by defaultMask() in static/timeline-model.js.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    shape = str(src.get("shape") or "rect").strip().lower()
+    return {
+        "on": bool(src.get("on", False)),
+        "shape": shape if shape in MASK_SHAPES else "rect",
+        "x": round(_clamp(_f(src.get("x"), 50.0), 0.0, 100.0), 3),
+        "y": round(_clamp(_f(src.get("y"), 50.0), 0.0, 100.0), 3),
+        "w": round(_clamp(_f(src.get("w"), 70.0), 1.0, 100.0), 3),
+        "h": round(_clamp(_f(src.get("h"), 70.0), 1.0, 100.0), 3),
+        "feather": round(_clamp(_f(src.get("feather"), 8.0), 0.0, 100.0), 3),
+        "invert": bool(src.get("invert", False)),
+    }
 
 
 def clean_fx(raw) -> dict:
@@ -102,6 +128,11 @@ def clean_fx(raw) -> dict:
         fx[key] = round(max(0.0, _f(src.get(key), 0.0)), 3)
     for key in ("brightness", "contrast", "saturation"):
         fx[key] = round(_clamp(_f(src.get(key), 0.0), -100.0, 100.0), 3)
+    fx["rot"] = round(_clamp(_f(src.get("rot"), 0.0), -180.0, 180.0), 3)
+    # A mask switched off keeps its geometry (so the UI can toggle it back on)
+    # but mask_filter() emits nothing while on is False.
+    mask = src.get("mask")
+    fx["mask"] = default_mask(mask) if isinstance(mask, dict) else None
     # How the (cropped) picture fills its box: fill stretches to the box,
     # contain letterboxes inside it, cover crops to fill it.
     fit = str(src.get("fit") or "fill").strip().lower()
@@ -131,8 +162,13 @@ def clean_keyframes(raw, clip_len: float) -> list[dict]:
             continue
         kf = {"t": t}
         for key in KF_KEYS:
+            # Keyframes written before rotation became animatable have no
+            # "rot": they keep the clip's own rotation rather than 0.
+            if key == "rot" and item.get("rot") is None:
+                continue
             lo, hi = (-100.0, 100.0) if key in ("x", "y") else (
-                (1.0, 400.0) if key == "scale" else (0.0, 100.0))
+                (1.0, 400.0) if key == "scale" else
+                (-180.0, 180.0) if key == "rot" else (0.0, 100.0))
             default = DEFAULT_FX[key]
             kf[key] = round(_clamp(_f(item.get(key), default), lo, hi), 3)
         out.append(kf)
@@ -247,6 +283,58 @@ def crop_filter(fx: dict, w: int, h: int) -> tuple[str, int, int]:
         return "", w, h
     x, y, cw, ch = crop_box(fx, w, h)
     return f"crop={cw}:{ch}:{x}:{y}", cw, ch
+
+
+def rotate_filter(fx: dict) -> tuple[str, float, float]:
+    """Rotation filter plus the cos/sin of the angle (0, 1, 0 when unused)."""
+    deg = float(fx.get("rot") or 0.0)
+    if abs(deg) < 1e-6:
+        return "", 1.0, 0.0
+    import math
+    rad = math.radians(deg)
+    return (f"format=rgba,rotate=a={rad:.6f}:ow=rotw(iw):oh=roth(ih):c=none",
+            abs(math.cos(rad)), abs(math.sin(rad)))
+
+
+def rotated_size(bw: int, bh: int, cos_a: float, sin_a: float) -> tuple[int, int]:
+    """Bounding box of a bw x bh picture rotated by the given cos/sin."""
+    if abs(sin_a) < 1e-9:
+        return bw, bh
+    return (max(2, _even(bw * cos_a + bh * sin_a, 2)),
+            max(2, _even(bw * sin_a + bh * cos_a, 2)))
+
+
+def mask_filter(fx: dict) -> str:
+    """ffmpeg alpha mask for ``fx['mask']`` (rect or ellipse, feathered).
+
+    Written with geq so the shape scales with whatever size the layer is at
+    that point in the graph; percentages match the CSS preview.
+    """
+    raw = (fx or {}).get("mask") if isinstance(fx, dict) else None
+    if not isinstance(raw, dict) or not raw.get("on"):
+        return ""
+    m = default_mask(raw)
+    cx, cy = m["x"] / 100.0, m["y"] / 100.0
+    hw, hh = m["w"] / 200.0, m["h"] / 200.0
+    if m["shape"] == "ellipse":
+        # Feather as a fraction of the radius (1 = the whole shape).
+        ft = max(0.002, m["feather"] / 100.0)
+        expr = (f"clip((1-sqrt(pow((X/W-{cx:.6f})/{hw:.6f},2)"
+                f"+pow((Y/H-{cy:.6f})/{hh:.6f},2)))/{ft:.6f},0,1)")
+    else:
+        # Feather in pixels: % of the shape's smaller half-size.
+        fpx = max(1.0, m["feather"] / 100.0 * min(hw, hh))
+        x0 = f"(({cx:.6f}-{hw:.6f})*W)"
+        x1 = f"(({cx:.6f}+{hw:.6f})*W)"
+        y0 = f"(({cy:.6f}-{hh:.6f})*H)"
+        y1 = f"(({cy:.6f}+{hh:.6f})*H)"
+        # ffmpeg's min() takes exactly two arguments.
+        expr = (f"clip(min(min((X-{x0})/{fpx:.6f},({x1}-X)/{fpx:.6f}),"
+                f"min((Y-{y0})/{fpx:.6f},({y1}-Y)/{fpx:.6f})),0,1)")
+    if m.get("invert"):
+        expr = f"(1-{expr})"
+    return (f"format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
+            f"a='alpha(X,Y)*{expr}'")
 
 
 def scale_filter(fx: dict, cw: int, ch: int) -> tuple[str, int, int]:

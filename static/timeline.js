@@ -701,6 +701,7 @@ function renderLanes() {
     strip.appendChild(b);
   });
   ruler.appendChild(strip);
+  if (typeof monRenderRulerMarks === "function") monRenderRulerMarks(ruler);
   L.appendChild(ruler);
 
   // rows + clips, grouped Premiere-style (video on top, audio bottom)
@@ -781,7 +782,12 @@ function clipEl(c, key, idx, kindHint) {
   const hidden = laneHidden(key);
   const isMutedLane = S.audioMuted && S.audioMuted.has(key);
   const sel = S.sel.has(c.id);
-  const kind = c.kind ? c.kind : (c.src && c.src !== TLM.MAIN_SRC ? "image" : "video");
+  // Bin clips carry no section kind, so ask the bin what the asset is: an
+  // imported video must not be drawn with the still-image styling.
+  const srcAsset = c.src && c.src !== TLM.MAIN_SRC && typeof mediaGet === "function"
+    ? mediaGet(c.src) : null;
+  const kind = c.kind ? c.kind
+    : (c.src && c.src !== TLM.MAIN_SRC ? (srcAsset && srcAsset.kind) || "image" : "video");
   // Determine actual kind for styling: caption handled separately, so this is video/image/other/silence
   let styleKind = "video";
   if (kind === "silence") styleKind = "video"; // silence uses video style? In legend, silence is separate color but we treat as video with different mark?
@@ -810,6 +816,23 @@ function clipEl(c, key, idx, kindHint) {
   d.title = `${label} — ${laneName(key)} ${fmt(c.start)}–${fmt(c.end)}`;
   // trim handles detection via edge
   d.addEventListener("mousedown", (ev) => { ev.stopPropagation(); clipPress(ev, c, key, idx); });
+  // Keyframe diamonds along the foot of the block, Premiere/CapCut style, so
+  // an animated clip is visible without opening the Inspector.
+  const kfs = TLM.cleanKf(c.kf, c.end - c.start);
+  if (kfs.length) {
+    const span = Math.max(0.02, c.end - c.start);
+    const wpx = Math.max(3, t2x(c.end) - t2x(c.start));
+    const strip = document.createElement("div");
+    strip.className = "kfstrip";
+    kfs.forEach((k) => {
+      const dot = document.createElement("i");
+      dot.className = "kfdot";
+      dot.style.left = `${(k.t / span) * wpx}px`;
+      dot.title = `keyframe ${k.t.toFixed(2)}s`;
+      strip.appendChild(dot);
+    });
+    d.appendChild(strip);
+  }
   // add trim hit areas
   const edge = document.createElement("div");
   edge.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:6px;cursor:ew-resize";
@@ -1384,6 +1407,7 @@ function bindZoomPan() {
 
 /* ---------- playback helpers (kept for compat) ---------- */
 function updateTimecode() {
+  if (typeof monPaintTC === "function") { monPaintTC(); return; }
   const el = document.getElementById("timecode");
   if (el) el.textContent = `${fmtTime(playheadTime(), false)} / ${fmtTime(timelineEnd(), false)}`;
 }
@@ -1405,12 +1429,21 @@ function setPlayhead(t, sync = true) {
   if (typeof syncListPlayhead === "function") syncListPlayhead();
   if (typeof syncListScroll === "function") syncListScroll(true);
   draw(); updateTimecode();
+  if (typeof monSeek === "function") monSeek();
   if (typeof layoutCapOverlay === "function") layoutCapOverlay();
   if (typeof ClipRefresh === "function") ClipRefresh();
 }
 function syncPreview(force) {
   if (!S.project) return;
-  if (typeof stageSync === "function") stageSync(playheadTime(), PV.playing, !!force);
+  if (typeof STAGE === "object" && typeof MON !== "undefined" && Number.isFinite(MON.rate))
+    STAGE.rate = MON.rate > 0 ? MON.rate : 1;
+  if (typeof stageSync === "function") {
+    // Media elements only run forward, and only up to 4x; reversing and the
+    // 8x shuttle are driven by seeking the playhead instead.
+    const mediaPlaying = PV.playing &&
+      (typeof MON === "undefined" || (MON.rate > 0 && MON.rate <= 4));
+    stageSync(playheadTime(), mediaPlaying, !!force);
+  }
   const shade = document.getElementById("gapShade");
   if (shade) {
     const stack = TLM.clipStackAt(S.tl, playheadTime());
@@ -1422,27 +1455,51 @@ function startPlayback() {
   if (!S.project || PV.playing) return;
   if (!(S.tl.clips || []).length) return status("The timeline is empty.");
   if (playheadTime() >= timelineEnd() - 0.01) setPlayhead(0, false);
+  if (typeof MON !== "undefined" && MON.rate === 0) MON.rate = 1;
   PV.playing = true; PV.last = performance.now();
-  const btn = document.getElementById("playBtn"); if (btn) btn.textContent = "❚❚ pause";
+  if (typeof monPlayState === "function") monPlayState(true);
   syncPreview(true); PV.raf = requestAnimationFrame(pvTick);
 }
 function pausePlayback() {
   if (PV.playing) { PV.playing = false; cancelAnimationFrame(PV.raf); }
-  const btn = document.getElementById("playBtn"); if (btn) btn.textContent = "▶ play";
+  if (typeof monPlayState === "function") monPlayState(false);
   if (S.project) { syncPreview(true); if (typeof syncListPlayhead === "function") syncListPlayhead(); draw(); updateTimecode(); if (typeof layoutCapOverlay === "function") layoutCapOverlay(); }
 }
 function pvTick(now) {
   if (!PV.playing) return;
   const dt = Math.min(0.25, Math.max(0, (now - PV.last) / 1000));
   PV.last = now;
-  let t = playheadTime() + dt;
-  const ref = typeof stageClockReference === "function" ? stageClockReference(t) : null;
-  if (ref !== null && Number.isFinite(ref) && Math.abs(ref - t) < 0.35) t = ref;
-  const end = Math.max(timelineEnd(), 0.001);
-  if (t >= end) { S.T = end; pausePlayback(); return; }
-  S.T = t; syncPreview(false); followPlayhead();
+  const rate = (typeof MON !== "undefined" && Number.isFinite(MON.rate) && MON.rate !== 0)
+    ? MON.rate : 1;
+  let t = playheadTime() + dt * rate;
+  // The media element's own clock is only trustworthy at 1x (it cannot run
+  // backwards, and at 2x it drifts against our wall clock on seek).
+  if (Math.abs(rate - 1) < 1e-3) {
+    const ref = typeof stageClockReference === "function" ? stageClockReference(t) : null;
+    if (ref !== null && Number.isFinite(ref) && Math.abs(ref - t) < 0.35) t = ref;
+  }
+  // In/Out points and loop: the monitor decides whether we stop or wrap.
+  const gate = typeof monPlaybackGate === "function" ? monPlaybackGate(t)
+    : { action: t >= Math.max(timelineEnd(), 0.001) ? "stop" : "go", t };
+  if (gate.action === "stop") {
+    S.T = Math.max(0, gate.t);
+    syncPreview(true); draw(); updateTimecode();
+    if (typeof monSeek === "function") monSeek();
+    pausePlayback();
+    return;
+  }
+  if (gate.action === "loop") {
+    S.T = Math.max(0, gate.t);
+    syncPreview(true); draw(); updateTimecode();
+    if (typeof monSeek === "function") monSeek();
+    if (typeof monTick === "function") monTick(dt);
+    PV.raf = requestAnimationFrame(pvTick);
+    return;
+  }
+  S.T = Math.max(0, t); syncPreview(false); followPlayhead();
   if (typeof syncListPlayhead === "function") syncListPlayhead();
   draw(); updateTimecode();
+  if (typeof monTick === "function") monTick(dt);
   if (typeof layoutCapOverlay === "function") layoutCapOverlay();
   if (typeof ClipTick === "function") ClipTick();
   PV.raf = requestAnimationFrame(pvTick);
@@ -1470,7 +1527,9 @@ function bindKeys() {
     const key = ev.key;
     if (key === " " || ev.code === "Space") {
       if (el && (el.matches?.("input[type=checkbox], input[type=radio]") || el.closest?.("button, [role=button]"))) return;
-      ev.preventDefault(); if (!ev.repeat) togglePlay(); return;
+      ev.preventDefault();
+      if (ev.shiftKey) { if (typeof monPlayInOut === "function") monPlayInOut(); return; }
+      if (!ev.repeat) togglePlay(); return;
     }
     if (ev.ctrlKey || ev.metaKey) {
       const k = key.toLowerCase();
@@ -1492,12 +1551,11 @@ function bindKeys() {
     }
     if (key === "Escape") { if (curTool !== "razor") setTool("select"); clearSel(); return; }
     if (key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-      const toolByKey = { v: "select", r: "razor" };
       if (key.toLowerCase() === "t") { ev.preventDefault(); addCaptionAtPlayhead(); return; }
       if (key.toLowerCase() === "v") { ev.preventDefault(); setTool("select"); return; }
       if (key.toLowerCase() === "r") { ev.preventDefault(); setTool(curTool === "razor" ? "select" : "razor"); return; }
       if (key.toLowerCase() === "h") { ev.preventDefault(); S.pan = !S.pan; renderTray(); status(S.pan ? "pan: drag to scroll" : "select / move"); return; }
-      if (key.toLowerCase() === "m") {
+      if (key.toLowerCase() === "m" && ev.shiftKey) {
         ev.preventDefault();
         // M: mute on A lanes, output toggle on V lanes (selected clip's lane else first lane)
         let targetKey = null;
@@ -1514,18 +1572,17 @@ function bindKeys() {
           if (S.audioMuted.has(targetKey)) S.audioMuted.delete(targetKey);
           else S.audioMuted.add(targetKey);
           render();
-          status(`lane ${laneName(targetKey)} ${S.audioMuted.has(targetKey) ? "muted" : "unmuted"} (M)`);
+          status(`lane ${laneName(targetKey)} ${S.audioMuted.has(targetKey) ? "muted" : "unmuted"} (Shift+M)`);
         } else {
           laneSets();
           if (S.laneHidden.has(targetKey)) S.laneHidden.delete(targetKey);
           else S.laneHidden.add(targetKey);
           saveWorkspaceLayout();
           render();
-          status(`lane ${laneName(targetKey)} ${S.laneHidden.has(targetKey) ? "hidden" : "shown"} (M)`);
+          status(`lane ${laneName(targetKey)} ${S.laneHidden.has(targetKey) ? "hidden" : "shown"} (Shift+M)`);
         }
         return;
       }
-      if (tool) { ev.preventDefault(); setTool(tool); return; }
     }
     if (key === "ArrowLeft" || key === "ArrowRight") {
       ev.preventDefault();
@@ -2220,10 +2277,7 @@ function bindTimeline() {
   bindKeys();
   bindPlayer();
   bindList();
-  // transport buttons (old tool rail is gone; these live by the preview)
-  document.getElementById("playBtn")?.addEventListener("click", togglePlay);
-  document.getElementById("frameBack")?.addEventListener("click", () => stepFrame(-1));
-  document.getElementById("frameFwd")?.addEventListener("click", () => stepFrame(1));
+  // transport buttons live in the monitor bar and are bound by monitor.js
   // ruler sync: headers ride along on scroll
   const sc = document.getElementById("scroll");
   if (sc) {

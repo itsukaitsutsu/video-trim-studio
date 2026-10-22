@@ -29,10 +29,11 @@ from .media import waveform_peaks
 #: Id of the asset that is the project's main video.
 MAIN_ID = "src"
 
-IMAGE_EXTS = {
-    ".png", ".jpg", ".jpeg", ".jpe", ".bmp", ".gif", ".webp",
-    ".tif", ".tiff", ".svg", ".avif", ".ppm", ".pgm",
-}
+# Formats the bin accepts as stills: the web-safe ones are served as they are,
+# the rest get a PNG copy for the preview (see preview.image_support). SVG is
+# deliberately absent - ffmpeg cannot rasterise it without librsvg, so it used
+# to fail after being offered in the file picker.
+IMAGE_EXTS = preview_mod.WEB_IMAGE_EXTS | preview_mod.CONVERTIBLE_IMAGE_EXTS
 AUDIO_EXTS = {
     ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga", ".opus",
     ".aiff", ".aif", ".wma", ".ac3", ".dts", ".mka", ".amr", ".caf",
@@ -87,6 +88,7 @@ class MediaLibrary:
         self.assets: dict[str, dict] = {}
         self.order: list[str] = []
         self.thumbs_dir = os.path.join(self.work_dir, "binthumbs")
+        self.stills_dir = os.path.join(self.work_dir, "binstills")
         self.upload_dir = os.path.join(self.work_dir, "bin")
         self._proxies: dict[str, preview_mod.PreviewProxy] = {}
         self._peaks: dict[str, list[int]] = {}
@@ -156,7 +158,8 @@ class MediaLibrary:
         if kind == "unknown":
             raise MediaError(f"{os.path.basename(full)} has no video or audio stream.")
         if kind == "image" and not info.get("video"):
-            # ffprobe reports PNG/JPG as a video stream; SVG does not decode.
+            # ffprobe reports PNG/JPG as a video stream; undecodable files do
+            # not get this far.
             raise MediaError(f"{os.path.basename(full)} could not be decoded as an image.")
 
         vinfo = info.get("video") or {}
@@ -164,7 +167,12 @@ class MediaLibrary:
         duration = float(info.get("duration") or 0.0)
         if kind == "image":
             duration = IMAGE_DEFAULT_DURATION
-        mode, reason = preview_mod.browser_support(info)
+        if kind == "image":
+            mode, reason = preview_mod.image_support(os.path.splitext(full)[1])
+            if mode == "unsupported":
+                raise MediaError(f"{os.path.basename(full)}: {reason}")
+        else:
+            mode, reason = preview_mod.browser_support(info)
 
         asset = {
             "id": asset_id or f"a{uuid.uuid4().hex[:10]}",
@@ -187,16 +195,20 @@ class MediaLibrary:
             "info": info,
             "preview_mode": mode,
             "preview_reason": reason,
+            "still": "",          # PNG copy, only for convert-only image formats
         }
         with self._lock:
             self.assets[asset["id"]] = asset
             if asset["id"] not in self.order:
                 self.order.append(asset["id"])
+        if kind == "image" and mode == "convert":
+            asset["still"] = self._make_still(asset)
         self._make_thumb(asset)
+        # A still is painted by an <img>, so it is never transcoded to video.
         # The main video's preview proxy is owned by the Project (see
         # server.Project.start_preview); building a second one here would make
         # the two transcodes race over the same output file.
-        if mode == "proxy" and not main:
+        if mode == "proxy" and not main and kind != "image":
             self.proxy(asset["id"]).start(reason)
         return asset
 
@@ -232,11 +244,12 @@ class MediaLibrary:
             self._peaks.pop(asset_id, None)
         if not asset:
             raise MediaError("That asset is not in the bin.")
-        if asset.get("uploaded"):
-            try:
-                os.remove(asset["path"])
-            except OSError:
-                pass
+        for extra in (asset.get("still"), asset.get("uploaded") and asset.get("path")):
+            if extra:
+                try:
+                    os.remove(extra)
+                except OSError:
+                    pass
 
     # -------------------------------------------------------------- serving
 
@@ -264,7 +277,15 @@ class MediaLibrary:
                                               "progress": 0.0}
 
     def serve_path(self, asset_id: str) -> str:
-        """The file to hand to a <video>/<audio> tag: proxy when there is one."""
+        """The file to hand to an <img>/<video>/<audio> tag.
+
+        Order: the PNG copy of an image the browser cannot read, then a preview
+        proxy for video, then the original file.
+        """
+        asset = self.assets.get(asset_id) or {}
+        still = asset.get("still")
+        if still and os.path.isfile(still):
+            return still
         proxy = self._proxies.get(asset_id)
         served = proxy.serve_path() if proxy else None
         return served or self.path_of(asset_id)
@@ -278,12 +299,29 @@ class MediaLibrary:
         path = os.path.join(self.thumbs_dir, f"{asset['id']}.jpg")
         return path if os.path.isfile(path) else None
 
+    def _make_still(self, asset: dict) -> str:
+        """Write a PNG copy of an image the browser cannot paint (TIFF, PPM...).
+
+        The export keeps reading the original file; only the preview and the
+        bin thumbnail use this copy.
+        """
+        os.makedirs(self.stills_dir, exist_ok=True)
+        dest = os.path.join(self.stills_dir, f"{asset['id']}.png")
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-i", asset["path"], "-frames:v", "1", dest]
+        try:
+            run(cmd, timeout=60)
+        except Exception as exc:
+            raise MediaError(
+                f"{asset['name']} could not be converted for the preview: {exc}")
+        return dest if os.path.isfile(dest) else ""
+
     def _make_thumb(self, asset: dict) -> None:
         if asset["kind"] == "audio":
             return
         os.makedirs(self.thumbs_dir, exist_ok=True)
         dest = os.path.join(self.thumbs_dir, f"{asset['id']}.jpg")
-        src = asset["path"]
+        src = asset.get("still") or asset["path"]
         if asset["kind"] == "image":
             cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                    "-i", src, "-vf", "scale=320:-2", "-frames:v", "1",

@@ -28,19 +28,50 @@ function clipEnsureFx(clip) {
   return clip;
 }
 
-// Live-apply while dragging (no history spam); commit once on release.
-function clipBindPair(rangeId, numId, get, set, fmt) {
+/* Write one property, through the keyframes when the clip is animated.
+ *
+ * A clip with a ◆ track reads x/y/scale/opacity/rot from its keyframes, so a
+ * plain write to clip.fx would change nothing on screen - which is exactly why
+ * moving the object after adding a keyframe used to "not work". Here any
+ * animatable property is recorded at the playhead (Premiere's auto-keyframe /
+ * CapCut's "add keyframe at playhead"), while crop, mask, fit and audio stay
+ * clip-wide. */
+function clipWriteProp(clip, key, value) {
+  clipEnsureFx(clip);
+  const animatable = typeof TLM.KF_KEYS === "object" && TLM.KF_KEYS.indexOf(key) >= 0;
+  if (animatable && TLM.cleanKf(clip.kf, clip.end - clip.start).length) {
+    const patch = {};
+    patch[key] = value;
+    if (TLM.kfWrite(clip, playheadTime(), patch)) return;
+  }
+  clip.fx[key] = value;
+  clip.fx = TLM.cleanFx(clip.fx);
+}
+
+/* Bind a range/number pair to one effect property.
+ *
+ *  Third argument is either the property name (animatable ones are written
+ *  through the keyframe track, see clipWriteProp) or a custom setter
+ *  `(fx, value) => …` for nested values such as fx.mask.x.
+ */
+function clipBindPair(rangeId, numId, key, fmt) {
   const r = $(rangeId), n = $(numId);
   if (!r && !n) return;
+  const custom = typeof key === "function" ? key : null;
+  const kfKey = custom ? null : key;
   const show = (v) => (fmt ? fmt(v) : v);
   const apply = (raw, commit) => {
     const clip = clipSelectedClip();
     if (!clip) return;
     const v = Number(raw);
     if (!Number.isFinite(v)) return;
-    clipEnsureFx(clip);
-    set(clip.fx, v);
-    clip.fx = TLM.cleanFx(clip.fx);
+    if (custom) {
+      clipEnsureFx(clip);
+      custom(clip.fx, v);
+      clip.fx = TLM.cleanFx(clip.fx);
+    } else {
+      clipWriteProp(clip, kfKey, v);
+    }
     if (commit) { commitTL(); refresh(); }
     else { draw(); syncPreview(false); }
   };
@@ -65,6 +96,23 @@ function clipBindCheck(id, get, set) {
     clip.fx = TLM.cleanFx(clip.fx);
     commitTL();
     refresh();
+  });
+}
+
+// The mask is a nested object; every editor forces it on so the picture
+// visibly changes the moment a value is touched.
+function clipMaskOf(clip) {
+  clipEnsureFx(clip);
+  if (!clip.fx.mask || typeof clip.fx.mask !== "object") clip.fx.mask = TLM.defaultMask();
+  return clip.fx.mask;
+}
+
+function clipBindMask(key) {
+  // tmX / tmY / tmW / tmH - the mask's own percentage fields.
+  clipBindPair(null, "tm" + key.toUpperCase(), (fx, v) => {
+    if (!fx.mask || typeof fx.mask !== "object") fx.mask = TLM.defaultMask();
+    fx.mask.on = true;
+    fx.mask[key] = v;
   });
 }
 
@@ -146,14 +194,33 @@ function ClipRefresh() {
       lane.textContent = "";
     }
   }
-  clipSetPair("txX", "txXn", fx.x);
-  clipSetPair("txY", "txYn", fx.y);
-  clipSetPair("txS", "txSn", fx.scale);
-  clipSetPair("txO", "txOn", fx.opacity);
+  // With keyframes present the sliders show the value at the playhead (and the
+  // hidden keyframe rows keep their own values); without them they show the
+  // clip-wide value. `shown` is what the monitor is drawing right now.
+  const shown = TLM.evalFxAt(clip, playheadTime());
+  const kfOn = TLM.cleanKf(clip.kf, clip.end - clip.start).length > 0;
+  const live = kfOn ? shown : fx;
+  clipSetPair("txX", "txXn", live.x);
+  clipSetPair("txY", "txYn", live.y);
+  clipSetPair("txS", "txSn", live.scale);
+  clipSetPair("txO", "txOn", live.opacity);
+  clipSetPair("txR", "txRn", live.rot || 0);
   clipSetPair(null, "tcL", fx.crop_l);
   clipSetPair(null, "tcT", fx.crop_t);
   clipSetPair(null, "tcR", fx.crop_r);
   clipSetPair(null, "tcB", fx.crop_b);
+  // Mask: the four percentages plus the shape / on / invert / feather chrome.
+  // Shown even while the mask is off, so the box stays put when it is toggled
+  // back on (the model keeps the geometry either way).
+  const mk = (fx.mask && typeof fx.mask === "object") ? fx.mask : TLM.defaultMask({ on: false });
+  clipSetPair(null, "tmX", mk.x);
+  clipSetPair(null, "tmY", mk.y);
+  clipSetPair(null, "tmW", mk.w);
+  clipSetPair(null, "tmH", mk.h);
+  clipSetPair("tmF", "tmFn", mk.feather);
+  if ($("tmOn") && document.activeElement !== $("tmOn")) $("tmOn").checked = !!mk.on;
+  if ($("tmInv") && document.activeElement !== $("tmInv")) $("tmInv").checked = !!mk.invert;
+  if ($("tmShape") && document.activeElement !== $("tmShape")) $("tmShape").value = mk.shape || "rect";
   clipSetPair("taV", "taVn", fx.volume);
   if ($("taMute") && document.activeElement !== $("taMute")) $("taMute").checked = !!fx.mute;
   clipSetPair(null, "taFi", fx.fade_in);
@@ -170,19 +237,23 @@ function clipRenderKf(clip) {
   const kfs = TLM.cleanKf(clip.kf, clip.end - clip.start);
   if (count) count.textContent = kfs.length ? `(${kfs.length})` : "";
   if (!kfs.length) {
-    list.innerHTML = `<div class="dim small">No keyframes — the Transform values above apply to the whole clip.</div>`;
+    list.innerHTML = `<div class="dim small">No keyframes — the Transform values above apply to the whole clip. ` +
+      `Add one and every move, resize or rotate from then on is recorded at the playhead.</div>`;
     return;
   }
-  list.innerHTML = kfs.map((k, i) =>
-    `<div class="kf-row" data-i="${i}">` +
-    `<button class="mini kf-goto" data-i="${i}" title="Move the playhead here">◆ ${k.t.toFixed(2)}s</button>` +
-    `<label title="X %">x<input data-k="x" data-i="${i}" type="number" step="1" value="${k.x}"></label>` +
-    `<label title="Y %">y<input data-k="y" data-i="${i}" type="number" step="1" value="${k.y}"></label>` +
-    `<label title="Scale %">s<input data-k="scale" data-i="${i}" type="number" step="1" value="${k.scale}"></label>` +
-    `<label title="Opacity %">o<input data-k="opacity" data-i="${i}" type="number" step="1" value="${k.opacity}"></label>` +
-    `<button class="mini kf-del" data-i="${i}" title="Delete this keyframe">×</button>` +
-    `</div>`
-  ).join("");
+  list.innerHTML = `<div class="kf-auto dim small">◆ Animation on: moving, scaling or rotating the picture ` +
+    `writes a keyframe at the playhead (within ${(TLM.KF_SNAP * 1000).toFixed(0)} ms of an existing ◆ it updates that one).</div>` +
+    kfs.map((k, i) =>
+      `<div class="kf-row" data-i="${i}">` +
+      `<button class="mini kf-goto" data-i="${i}" title="Move the playhead here">◆ ${k.t.toFixed(2)}s</button>` +
+      `<label title="X %">x<input data-k="x" data-i="${i}" type="number" step="1" value="${k.x}"></label>` +
+      `<label title="Y %">y<input data-k="y" data-i="${i}" type="number" step="1" value="${k.y}"></label>` +
+      `<label title="Scale %">s<input data-k="scale" data-i="${i}" type="number" step="1" value="${k.scale}"></label>` +
+      `<label title="Opacity %">o<input data-k="opacity" data-i="${i}" type="number" step="1" value="${k.opacity}"></label>` +
+      `<label title="Rotation °">r<input data-k="rot" data-i="${i}" type="number" step="1" value="${k.rot || 0}"></label>` +
+      `<button class="mini kf-del" data-i="${i}" title="Delete this keyframe">×</button>` +
+      `</div>`
+    ).join("");
 }
 
 function clipAddKeyframe() {
@@ -198,11 +269,13 @@ function clipAddKeyframe() {
   const t = Math.max(0, Math.min(len, rel));
   const cur = TLM.evalFxAt(clip, playheadTime());
   const kfs = TLM.cleanKf(clip.kf, len).filter((k) => Math.abs(k.t - t) > 0.001);
-  kfs.push({ t, x: cur.x, y: cur.y, scale: cur.scale, opacity: cur.opacity });
+  kfs.push({ t, x: cur.x, y: cur.y, scale: cur.scale, opacity: cur.opacity, rot: cur.rot || 0 });
   clip.kf = TLM.cleanKf(kfs, len);
   commitTL();
   refresh();
-  status(`Keyframe ◆ at ${t.toFixed(2)}s in the clip.`);
+  status(kfs.length === 1
+    ? `Animation on: first ◆ at ${t.toFixed(2)}s. Move the playhead, then drag the picture — that records the next keyframe.`
+    : `Keyframe ◆ at ${t.toFixed(2)}s in the clip.`);
 }
 
 function ClipTick() {
@@ -232,20 +305,76 @@ function clipResetGroup(keys) {
 function ClipInit() {
   if (CLIP_BOUND || !$("toolBody")) return;
   CLIP_BOUND = true;
-  clipBindPair("txX", "txXn", null, (fx, v) => { fx.x = v; });
-  clipBindPair("txY", "txYn", null, (fx, v) => { fx.y = v; });
-  clipBindPair("txS", "txSn", null, (fx, v) => { fx.scale = v; });
-  clipBindPair("txO", "txOn", null, (fx, v) => { fx.opacity = v; });
-  clipBindPair(null, "tcL", null, (fx, v) => { fx.crop_l = v; });
-  clipBindPair(null, "tcT", null, (fx, v) => { fx.crop_t = v; });
-  clipBindPair(null, "tcR", null, (fx, v) => { fx.crop_r = v; });
-  clipBindPair(null, "tcB", null, (fx, v) => { fx.crop_b = v; });
-  clipBindPair("taV", "taVn", null, (fx, v) => { fx.volume = v; });
+  clipBindPair("txX", "txXn", "x");
+  clipBindPair("txY", "txYn", "y");
+  clipBindPair("txS", "txSn", "scale");
+  clipBindPair("txO", "txOn", "opacity");
+  clipBindPair("txR", "txRn", "rot");
+  clipBindPair(null, "tcL", "crop_l");
+  clipBindPair(null, "tcT", "crop_t");
+  clipBindPair(null, "tcR", "crop_r");
+  clipBindPair(null, "tcB", "crop_b");
+  clipBindPair("taV", "taVn", "volume");
   clipBindCheck("taMute", null, (fx, v) => { fx.mute = v; });
-  clipBindPair(null, "taFi", null, (fx, v) => { fx.fade_in = v; });
-  clipBindPair(null, "taFo", null, (fx, v) => { fx.fade_out = v; });
-  clipBindPair(null, "tvFi", null, (fx, v) => { fx.vfade_in = v; });
-  clipBindPair(null, "tvFo", null, (fx, v) => { fx.vfade_out = v; });
+  clipBindPair(null, "taFi", "fade_in");
+  clipBindPair(null, "taFo", "fade_out");
+  clipBindPair(null, "tvFi", "vfade_in");
+  clipBindPair(null, "tvFo", "vfade_out");
+
+  // Mask: nested object, so it gets its own binding helpers.
+  clipBindMask("x"); clipBindMask("y"); clipBindMask("w"); clipBindMask("h");
+  clipBindPair("tmF", "tmFn", (fx, v) => {
+    if (!fx.mask || typeof fx.mask !== "object") fx.mask = TLM.defaultMask();
+    fx.mask.on = true;
+    fx.mask.feather = v;
+  });
+  clipBindCheck("tmOn", null, (fx, v) => {
+    if (!fx.mask || typeof fx.mask !== "object") fx.mask = TLM.defaultMask({ on: v });
+    fx.mask.on = v;
+  });
+  clipBindCheck("tmInv", null, (fx, v) => {
+    if (!fx.mask || typeof fx.mask !== "object") fx.mask = TLM.defaultMask({ on: true });
+    fx.mask.invert = v;
+  });
+  if ($("tmShape")) {
+    $("tmShape").addEventListener("change", () => {
+      const clip = clipSelectedClip();
+      if (!clip) return;
+      const m = clipMaskOf(clip);
+      m.shape = $("tmShape").value;
+      m.on = true;
+      clip.fx = TLM.cleanFx(clip.fx);
+      commitTL();
+      refresh();
+    });
+  }
+  if ($("tmFit")) {
+    $("tmFit").onclick = () => {
+      const clip = clipSelectedClip();
+      if (!clip) return;
+      const m = clipMaskOf(clip);
+      Object.assign(m, { on: true, x: 50, y: 50, w: 100, h: 100 });
+      clip.fx = TLM.cleanFx(clip.fx);
+      commitTL();
+      refresh();
+    };
+  }
+  if ($("tmReset")) {
+    $("tmReset").onclick = () => {
+      const clip = clipSelectedClip();
+      if (!clip) return;
+      clipEnsureFx(clip);
+      clip.fx.mask = null;
+      clip.fx = TLM.cleanFx(clip.fx);
+      commitTL();
+      refresh();
+    };
+  }
+  if ($("tmEdit")) {
+    $("tmEdit").onclick = () => {
+      if (typeof gizSelect === "function") gizSelect(clipSelectedClip(), "mask");
+    };
+  }
 
   $("txTrackDown").onclick = () => {
     const clip = clipSelectedClip();
@@ -307,7 +436,7 @@ function ClipInit() {
       }
     };
   }
-  $("txReset").onclick = () => clipResetGroup(["x", "y", "scale", "opacity"]);
+  $("txReset").onclick = () => clipResetGroup(["x", "y", "scale", "opacity", "rot"]);
   $("tcReset").onclick = () => clipResetGroup(["crop_l", "crop_t", "crop_r", "crop_b"]);
   $("taReset").onclick = () => clipResetGroup(["volume", "mute", "fade_in", "fade_out"]);
   $("tvReset").onclick = () => clipResetGroup(["vfade_in", "vfade_out"]);

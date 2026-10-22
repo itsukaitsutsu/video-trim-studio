@@ -344,3 +344,70 @@ def test_look_clamps_and_round_trips():
     assert fx_mod.clean_fx(fx) == fx
     assert fx_mod.fx_is_default(fx_mod.clean_fx({"brightness": 0}))
     assert not fx_mod.fx_is_default(fx_mod.clean_fx({"brightness": 1}))
+
+
+# ---------------------------------------------------------------------------
+# Rotation + shape mask (Program Monitor direct manipulation)
+# ---------------------------------------------------------------------------
+
+def _clip(**fx):
+    return {"id": "c1", "src": "overlay.mp4", "track": 0, "start": 0.0, "end": 2.0,
+            "in": 0.0, "fx": fx_mod.clean_fx(fx), "kf": [], "audio": True}
+
+
+def test_clean_fx_keeps_rotation_and_mask():
+    fx = fx_mod.clean_fx({"rot": 400, "mask": {"on": True, "shape": "ellipse",
+                                               "x": 130, "y": -5, "w": 0, "h": 400,
+                                               "feather": 150, "invert": True}})
+    assert fx["rot"] == 180.0                    # clamped, not dropped
+    assert fx["mask"]["shape"] == "ellipse"
+    assert fx["mask"]["x"] == 100.0 and fx["mask"]["y"] == 0.0
+    assert fx["mask"]["w"] == 1.0 and fx["mask"]["h"] == 100.0
+    assert fx["mask"]["feather"] == 100.0
+    assert fx["mask"]["invert"] is True
+    # Unknown shapes fall back to a rectangle; junk becomes "no mask".
+    assert fx_mod.clean_fx({"mask": {"shape": "star"}})["mask"]["shape"] == "rect"
+    assert fx_mod.clean_fx({"mask": "nope"})["mask"] is None
+    assert fx_mod.clean_fx({"mask": {"on": False}})["mask"]["on"] is False
+
+
+def test_rotation_rotates_about_the_centre_and_grows_the_box():
+    plain = graph([_clip()])
+    turned = graph([_clip(rot=30)])
+    assert "rotate=a=0.523599" in turned
+    assert "rotate=" not in plain
+    # A rotated layer keeps its centre: overlay x/y is still the centred spot.
+    assert "overlay=" in turned
+    # 1280x720 turned 30 degrees -> 1468x1263, rounded up to even pixels.
+    assert fx_mod.rotated_size(1280, 720, 0.866, 0.5) == (1468, 1264)
+
+
+def test_mask_becomes_an_alpha_geq_after_the_rotate():
+    f = graph([_clip(rot=10, mask={"on": True, "shape": "rect", "x": 50, "y": 50,
+                                   "w": 40, "h": 40, "feather": 0})])
+    assert "geq=" in f and "alpha(X,Y)" in f
+    assert "format=yuva420p" in f                    # alpha path enabled
+    # Order matters: rotate is applied, then the mask is punched into alpha.
+    assert f.index("rotate=") < f.index("geq=")
+    # feather 0 => a hard edge (clip() still bounds it, no blur term)
+    assert fx_mod.mask_filter({"mask": {"on": True, "w": 40, "h": 40, "feather": 0}})
+
+
+def test_mask_off_and_default_fx_keep_the_fast_path():
+    f = graph([_clip(mask={"on": False})])
+    assert "geq=" not in f and "rotate=" not in f
+    assert fx_mod.fx_is_default(fx_mod.clean_fx({}))
+
+
+def test_mask_filter_shapes():
+    rect = fx_mod.mask_filter({"mask": {"on": True, "shape": "rect", "x": 25,
+                                        "y": 75, "w": 50, "h": 20, "feather": 0}})
+    ell = fx_mod.mask_filter({"mask": {"on": True, "shape": "ellipse", "x": 25,
+                                       "y": 75, "w": 50, "h": 20, "feather": 10}})
+    inv = fx_mod.mask_filter({"mask": {"on": True, "shape": "rect", "x": 50,
+                                       "y": 50, "w": 50, "h": 50, "invert": True}})
+    assert "0.250000" in rect and "0.750000" in rect
+    assert "sqrt(" in ell and "sqrt(" not in rect
+    assert "1-" in inv and "(1-" in inv.replace(" ", "")
+    assert fx_mod.mask_filter({"mask": {"on": False}}) == ""
+    assert fx_mod.mask_filter(None) == ""

@@ -25,6 +25,7 @@ const STAGE = {
   audios: new Map(),     // audio item id -> <audio>
   freeAudios: [],
   syncing: false,
+  rate: 1,               // monitor shuttle rate (set by the monitor before sync)
 };
 
 // A layer is hard-seeked once it drifts further than this. Small enough that
@@ -45,6 +46,10 @@ function stageContainer() {
     const shade = $("gapShade");
     stage.insertBefore(box, shade || stage.firstChild);
   }
+  // #player is only kept as the frame-size reference; the composite layers
+  // are the picture. Without this it would show the raw frame underneath.
+  const ref = $("player");
+  if (ref) ref.classList.add("player-reference");
   STAGE.box = box;
   return box;
 }
@@ -143,12 +148,54 @@ function stageLayout(rec, fx) {
   rec.media.style.left = `${(-100 * cl / fw).toFixed(4)}%`;
   rec.media.style.top = `${(-100 * ct / fh).toFixed(4)}%`;
   rec.media.style.objectFit = fx.fit === "contain" ? "contain" : fx.fit === "cover" ? "cover" : "fill";
+
+  // Rotate the crop window (the box) around its centre, then mask what is
+  // inside it - same order as vts/edl.py (fit -> rotate -> mask -> overlay).
+  const rot = Number(fx.rot) || 0;
+  const m = fx.mask && fx.mask.on ? fx.mask : null;
+  rec.box.style.transform = Math.abs(rot) > 0.001 ? `rotate(${rot.toFixed(3)}deg)` : "";
+  stageMask(rec.box, m);
+}
+
+/** CSS mask that mirrors vts/fx.py's mask_filter().
+ *  An SVG data URI gives shapes with a real blur, which clip-path cannot do. */
+function stageMask(box, m) {
+  const sig = m
+    ? `${m.shape}|${m.x}|${m.y}|${m.w}|${m.h}|${m.feather}|${m.invert}`
+    : "";
+  if (box.dataset.maskSig === sig) return;
+  box.dataset.maskSig = sig;
+  if (!m) {
+    box.style.maskImage = box.style.webkitMaskImage = "";
+    box.style.maskSize = box.style.webkitMaskSize = "";
+    box.style.maskMode = box.style.webkitMaskMode = "";
+    return;
+  }
+  const x = m.x - m.w / 2, y = m.y - m.h / 2;
+  const blur = Math.max(0, Number(m.feather) || 0) / 100 * Math.min(m.w, m.h) / 2;
+  const shape = m.shape === "ellipse"
+    ? `<ellipse cx="${m.x}" cy="${m.y}" rx="${m.w / 2}" ry="${m.h / 2}" fill="${m.invert ? "#000" : "#fff"}"/>`
+    : `<rect x="${x}" y="${y}" width="${m.w}" height="${m.h}" fill="${m.invert ? "#000" : "#fff"}"/>`;
+  const bg = m.invert ? `<rect width="100" height="100" fill="#fff"/>` : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" preserveAspectRatio="none">` +
+    `<defs><filter id="b" x="-50%" y="-50%" width="200%" height="200%">` +
+    `<feGaussianBlur stdDeviation="${blur.toFixed(3)}"/></filter></defs>` +
+    `<g filter="url(#b)">${bg}${shape}</g></svg>`;
+  const url = `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
+  box.style.webkitMaskImage = box.style.maskImage = url;
+  box.style.webkitMaskSize = box.style.maskSize = "100% 100%";
+  box.style.webkitMaskMode = box.style.maskMode = "luminance";
 }
 
 function stageDriveMedia(el, want, playing, force) {
   if (el.tagName !== "VIDEO" && el.tagName !== "AUDIO") return;
+  // Fast shuttle: the element follows at its own playbackRate (capped at 4x,
+  // which is as far as browsers keep audio intelligible) and we tolerate a
+  // proportionally larger drift before hard-seeking it again.
+  const rate = Math.min(4, Math.max(0.0625, Math.abs(Number(STAGE.rate) || 1)));
+  if (el.playbackRate !== rate) { try { el.playbackRate = rate; } catch (_) {} }
   const drift = Math.abs((el.currentTime || 0) - want);
-  const tol = playing ? STAGE_DRIFT_PLAY : STAGE_DRIFT_PAUSE;
+  const tol = (playing ? STAGE_DRIFT_PLAY : STAGE_DRIFT_PAUSE) * Math.max(1, rate);
   if (force || drift > tol) {
     if (el.readyState >= 1 || el.seekable === undefined) {
       try { el.currentTime = want; } catch (_) { /* metadata not loaded yet */ }
@@ -259,11 +306,14 @@ function stageSync(t, playing, force) {
     }
   } finally {
     STAGE.syncing = false;
+    // Keep the on-picture handles glued to the clip as the playhead moves.
+    if (typeof gizRefresh === "function") gizRefresh();
   }
 }
 
 /** Drop every layer (new project, or the panel was hidden). */
 function stageReset() {
+  if (typeof gizReset === "function") gizReset();
   for (const id of [...STAGE.layers.keys()]) stageRelease(id);
   for (const id of [...STAGE.audios.keys()]) stageReleaseAudio(id);
   if (STAGE.box) STAGE.box.textContent = "";

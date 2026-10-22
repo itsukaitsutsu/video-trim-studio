@@ -34,7 +34,9 @@ const S = {
   get capCues() { return this.tl.caps; },
 };
 
-const PREVIEW_ZOOM_LEVELS = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3, 4];
+// Premiere's Program Monitor zoom goes from 10% to 800% in named steps; we
+// keep the same list so the dropdown and the +/- buttons agree.
+const PREVIEW_ZOOM_LEVELS = [0.1, 0.125, 0.25, 0.33, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
 const PREVIEW_VIEW = {
   zoom: 1, panX: 0, panY: 0, baseW: 0, baseH: 0,
   viewW: 0, viewH: 0, viewportHeight: null, initialized: false, drag: null,
@@ -1699,7 +1701,7 @@ function syncQualityRows() {
 
 // "open" picks the project's main video, "import" adds files to the media bin.
 let BROWSE_MODE = "open";
-const MEDIA_IMPORT_RE = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob|mp3|wav|flac|aac|m4a|ogg|oga|opus|aiff|aif|wma|mka|png|jpe?g|bmp|gif|webp|tiff?|svg|avif)$/i;
+const MEDIA_IMPORT_RE = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob|mp3|wav|flac|aac|m4a|ogg|oga|opus|aiff|aif|wma|mka|ac3|dts|caf|amr|png|jpe?g|bmp|gif|webp|avif|tiff?|ppm|pgm|pnm|tga|jp2)$/i;
 
 function openBrowserFor(mode) {
   BROWSE_MODE = mode === "import" ? "import" : "open";
@@ -1734,7 +1736,7 @@ async function browseTo(path) {
   for (const d of data.dirs) add(`📁 ${d.name}`, () => browseTo(d.path));
   for (const f of data.files) {
     const isVideo = /\.(mp4|mov|m4v|mkv|webm|avi|ts|mts|m2ts|mpg|mpeg|flv|wmv|3gp|vob)$/i.test(f.name);
-    const isImage = /\.(png|jpe?g|bmp|gif|webp|tiff?|svg|avif)$/i.test(f.name);
+    const isImage = /\.(png|jpe?g|bmp|gif|webp|avif|tiff?|ppm|pgm|pnm|tga|jp2)$/i.test(f.name);
     const isMedia = MEDIA_IMPORT_RE.test(f.name);
     const icon = isVideo ? "🎬" : isImage ? "🖼" : isMedia ? "🎵" : "📄";
     add(`${icon} ${f.name}`, () => {
@@ -1744,6 +1746,16 @@ async function browseTo(path) {
         return;
       }
       if (isVideo) { $("pathInput").value = f.path; $("browserModal").hidden = true; openPath(f.path); }
+      else if (isImage) {
+        // A still is bin material, not a project source. Say so instead of
+        // putting a path in the box that the server will only reject.
+        $("browserModal").hidden = true;
+        if (S.project) {
+          if (typeof mediaImportPaths === "function") mediaImportPaths([f.path]);
+        } else {
+          status(`${f.name} is a still image — open a video first, then add it from the Media bin.`);
+        }
+      }
       else if (/\.(srt|vtt)$/i.test(f.name)) {
         $("dSubPath").value = f.path; $("browserModal").hidden = true;
         $("subInfo").textContent = f.path;
@@ -1786,7 +1798,10 @@ function layoutPreviewZoom() {
   const viewW = viewport.clientWidth || viewBox.width;
   if (!viewW) return;
   const sourceW = video.videoWidth || 16, sourceH = video.videoHeight || 9;
-  const maxH = Math.max(120, window.innerHeight * 0.46);
+  // Fullscreen is a real monitor: let the frame use the whole screen.
+  const maxH = document.fullscreenElement
+    ? Math.max(120, window.innerHeight)
+    : Math.max(120, window.innerHeight * 0.46);
   const fitScale = Math.min(viewW / sourceW, maxH / sourceH);
   const baseW = Math.max(1, sourceW * fitScale);
   const baseH = Math.max(1, sourceH * fitScale);
@@ -1954,8 +1969,56 @@ function ensureCueCaptionStyle(cue) {
   return cue.style;
 }
 
+const CAP_APPLY_STORE = "vts.captionApplyAll";
+
 function capApplyToAll() {
   return !!$("capApplyAll")?.checked;
+}
+
+// The switch lives twice - at the top of the Text pane and in the Timeline
+// toolbar beside + caption - and both places mirror the one checkbox.
+function syncCapApplyUI() {
+  const on = capApplyToAll();
+  const btn = $("btnApplyAll");
+  if (btn) {
+    btn.classList.toggle("on", on);
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.title = on
+      ? "Every style edit lands on every caption, on every lane - click to edit only the caption at the playhead"
+      : "Style edits change only the caption at the playhead - click to apply them to every caption, on every lane";
+  }
+  const badge = $("capApplyScope");
+  if (badge) {
+    const caps = S.capCues || [];
+    const lanes = caps.length ? new Set(caps.map((c) => TLM.capTrackOf(c))).size : 0;
+    badge.textContent = !caps.length ? "no captions yet"
+      : on ? `all ${caps.length} caption${caps.length === 1 ? "" : "s"} · ${lanes} lane${lanes === 1 ? "" : "s"}`
+        : "this caption only";
+  }
+}
+
+function setCapApplyAll(on, announce = false) {
+  const box = $("capApplyAll");
+  if (!box) return;
+  box.checked = !!on;
+  try { localStorage.setItem(CAP_APPLY_STORE, on ? "1" : "0"); } catch (_) { /* private mode */ }
+  syncCapApplyUI();
+  if (announce) {
+    status(on
+      ? "Style edits now apply to every caption, on every lane."
+      : "Style edits now change only the caption at the playhead.");
+  }
+}
+
+function bindCapApplyAll() {
+  const box = $("capApplyAll");
+  try {
+    const stored = localStorage.getItem(CAP_APPLY_STORE);
+    if (stored !== null && box) box.checked = stored === "1";
+  } catch (_) { /* private mode: keep the markup default (on) */ }
+  box?.addEventListener("change", () => setCapApplyAll(capApplyToAll(), true));
+  $("btnApplyAll")?.addEventListener("click", () => setCapApplyAll(!capApplyToAll(), true));
+  syncCapApplyUI();
 }
 
 // Get the active cue's style (or the document default when the playhead is
@@ -2094,6 +2157,8 @@ function layoutCapOverlay() {
       syncCaptionShadow(d, text, cueStyle, r);
     }
   }
+
+  syncCapApplyUI();
 
   const box = $("capBox");
   box.hidden = !!S.capCues.length && !active;
@@ -2377,6 +2442,7 @@ function bindCaptionResize() {
 
 function bindCaptionOverlay() {
   const box = $("capBox"), overlay = $("capOverlay");
+  bindCapApplyAll();
   const SNAP_PX = 8;
   const SNAP_X = [1 / 3, 0.5, 2 / 3], SNAP_Y = [1 / 3, 0.5, 2 / 3];
 

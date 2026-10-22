@@ -38,18 +38,47 @@
   const EPS = 1e-6;
   const MAX_VTRACKS = 64;   // lanes grow on demand, like captions
   const MAX_ATRACKS = 64;
-  const KF_KEYS = ["x", "y", "scale", "opacity"];
+  // Animatable properties: position, size, opacity and rotation. Everything
+  // else (crop, mask, fit, colour, audio) is one value for the whole clip.
+  const KF_KEYS = ["x", "y", "scale", "opacity", "rot"];
   let seq = 0;
 
   const DEFAULT_FX = {
-    x: 0, y: 0, scale: 100, opacity: 100,
+    x: 0, y: 0, scale: 100, opacity: 100, rot: 0,
     crop_l: 0, crop_t: 0, crop_r: 0, crop_b: 0,
     volume: 100, mute: false,
     fade_in: 0, fade_out: 0, vfade_in: 0, vfade_out: 0,
     brightness: 0, contrast: 0, saturation: 0,
     fit: "fill",
+    // Rotation in degrees, clockwise, about the picture's centre. Animatable
+    // through the keyframes, like x/y/scale/opacity.
+    rot: 0,
+    // Shape mask (see defaultMask); null means "no mask".
+    mask: null,
   };
+
+  // A mask is a rectangle or ellipse, in percentages of the clip's own
+  // picture: x/y is the centre, w/h the size, feather softens the edge.
+  // Mirrored by vts/fx.py so the export cuts the same shape.
+  function defaultMask(raw) {
+    const s = (raw && typeof raw === "object") ? raw : {};
+    const shape = String(s.shape || "rect").toLowerCase();
+    return {
+      on: s.on !== false,
+      shape: maskShape(shape),
+      x: r3(clamp(num(s.x, 50), 0, 100)),
+      y: r3(clamp(num(s.y, 50), 0, 100)),
+      w: r3(clamp(num(s.w, 70), 1, 100)),
+      h: r3(clamp(num(s.h, 70), 1, 100)),
+      feather: r3(clamp(num(s.feather, 8), 0, 100)),
+      invert: !!s.invert,
+    };
+  }
   const FIT_MODES = ["fill", "contain", "cover"];
+  const MASK_SHAPES = ["rect", "ellipse"];
+  const maskShape = (v) => (MASK_SHAPES.includes(String(v || "").toLowerCase())
+    ? String(v).toLowerCase() : "rect");
+
 
   function newId(prefix) {
     seq += 1;
@@ -210,6 +239,10 @@
     for (const k of ["brightness", "contrast", "saturation"]) {
       fx[k] = r3(clamp(num(s[k], 0), -100, 100));
     }
+    fx.rot = r3(clamp(num(s.rot, 0), -180, 180));
+    // A mask switched off keeps its geometry so toggling it back on restores
+    // the shape; the exporter skips the alpha pass while on === false.
+    fx.mask = (s.mask && typeof s.mask === "object") ? defaultMask(s.mask) : null;
     // fill = stretch to the box, contain = letterbox inside it, cover = crop.
     const fit = String(s.fit || "fill").toLowerCase();
     fx.fit = FIT_MODES.includes(fit) ? fit : "fill";
@@ -230,15 +263,59 @@
       if (!item || typeof item !== "object") continue;
       const t = r3(clamp(num(item.t, -1), 0, len));
       if (!(t >= 0)) continue;
-      seen.set(t, {
+      const key = {
         t,
         x: r3(clamp(num(item.x, DEFAULT_FX.x), -100, 100)),
         y: r3(clamp(num(item.y, DEFAULT_FX.y), -100, 100)),
         scale: r3(clamp(num(item.scale, DEFAULT_FX.scale), 1, 400)),
         opacity: r3(clamp(num(item.opacity, DEFAULT_FX.opacity), 0, 100)),
-      });
+      };
+      // Older keyframes carry no rotation; they inherit the clip's own value
+      // instead of silently snapping the picture upright.
+      if (item.rot !== undefined && item.rot !== null) {
+        key.rot = r3(clamp(num(item.rot, DEFAULT_FX.rot), -180, 180));
+      }
+      seen.set(t, key);
     }
     return [...seen.keys()].sort((a, b) => a - b).map((t) => seen.get(t));
+  }
+
+  // How close (in seconds) an edit has to be to an existing marker to count
+  // as "on" it instead of creating a new one.
+  const KF_SNAP = 0.05;
+
+  /** Record an edit made at `tAbs` into the keyframe track.
+   *
+   *  This is the piece Premiere and CapCut have and we were missing: while a
+   *  clip is animated, moving/scaling/rotating the picture at the playhead has
+   *  to *write a keyframe*, not the clip-wide value. evalFxAt() reads x/y/
+   *  scale/opacity/rot from the keyframes, so anything written straight into
+   *  clip.fx is invisible the moment one ◆ exists.
+   *
+   *  Returns true when the clip is animated and the patch was recorded (the
+   *  caller must then leave clip.fx alone for those keys); false when the clip
+   *  has no keyframes, in which case the caller writes the base fx as usual.
+   */
+  function kfWrite(clip, tAbs, patch) {
+    if (!clip || !patch) return false;
+    const len = Math.max(0, (clip.end - clip.start) || 0);
+    let keys = cleanKf(clip.kf, len);
+    if (!keys.length) return false;
+    const t = clamp(num(tAbs, 0) - clip.start, 0, len);
+    // Values for the keys we are not touching come from what is on screen
+    // right now, so inserting a keyframe never makes the picture jump.
+    const here = evalFxAt(clip, tAbs);
+    let at = keys.find((k) => Math.abs(k.t - t) <= KF_SNAP);
+    if (!at) {
+      at = { t: r3(t) };
+      for (const k of KF_KEYS) at[k] = here[k];
+      keys.push(at);
+    }
+    for (const k of KF_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(patch, k)) at[k] = patch[k];
+    }
+    clip.kf = cleanKf(keys, len);
+    return true;
   }
 
   // Effective transform at an absolute timeline time: base fx with x/y/scale/
@@ -1211,7 +1288,8 @@
     MAIN_SRC, MIN_LEN, MAX_VTRACKS, MAX_ATRACKS, DEFAULT_FX, FIT_MODES, newId, clone,
     isClip, isAudioItem, bucketOf, prefixOf, trackOf, atrackOf,
     vtracksOf, atracksOf, normalise,
-    defaultFx, cleanFx, fxIsDefault, cleanKf, evalFxAt, fadeEnv,
+    defaultFx, defaultMask, cleanMask: defaultMask, cleanFx, fxIsDefault, cleanKf, KF_KEYS,
+    KF_SNAP, kfWrite, evalFxAt, fadeEnv,
     emptyTimeline, clipsFromSource, clipsFromSections,
     capsFromCues, assignLanes, splitSelection, splitCaption, splitClip, deleteItems, moveItems, trimItem,
     copyItems, pasteItems, duplicateItems, addCaption, addCaptionOnTrack, setClipText, setCaptionText,

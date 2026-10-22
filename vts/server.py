@@ -593,6 +593,11 @@ def bin_build_proxy(asset_id: str):
     return proj.media.proxy_status(asset_id)
 
 
+def _is_still(path: str) -> bool:
+    """True for image files (ffprobe reports a PNG as a one-frame video stream)."""
+    return os.path.splitext(path)[1].lower() in medialib_mod.IMAGE_EXTS
+
+
 @app.post("/api/open")
 def open_video(req: OpenRequest):
     path = os.path.abspath(os.path.expanduser(req.path.strip().strip('"')))
@@ -605,6 +610,10 @@ def open_video(req: OpenRequest):
         raise HTTPException(400, str(exc))
     if not info.get("video"):
         raise HTTPException(400, "That file has no video stream.")
+    if _is_still(path):
+        raise HTTPException(
+            400, f"{os.path.basename(path)} is a still image. Open a video first, then "
+                 "add the image from the Media bin (Import...) and drop it on the timeline.")
     return open_project(info).to_dict()
 
 
@@ -623,6 +632,10 @@ async def upload_video(file: UploadFile = File(...)):
         raise HTTPException(400, str(exc))
     if not info.get("video"):
         raise HTTPException(400, "That file has no video stream.")
+    if _is_still(str(dest)):
+        raise HTTPException(
+            400, f"{os.path.basename(dest)} is a still image. Open a video first, then "
+                 "add the image from the Media bin (Import...) and drop it on the timeline.")
     return open_project(info, uploaded=True).to_dict()
 
 

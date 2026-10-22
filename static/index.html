@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=47">
+<link rel="stylesheet" href="/static/style.css?v=53">
 </head>
 <body>
 <header id="menubar">
@@ -217,40 +217,88 @@
       </div>
       <div class="ws-body">
         <div class="player-wrap">
-      <div class="preview-viewport-wrap">
-        <div id="previewViewport" class="preview-viewport" aria-label="Video preview; Ctrl+wheel zooms around the pointer; drag the hand cursor to pan">
-          <div id="previewStage" class="preview-stage">
-            <video id="player" preload="metadata" disableremoteplayback></video>
-            <div id="gapShade" hidden></div>
-            <div id="capOverlay" hidden>
-              <div id="guideV" class="cap-guide v" hidden></div>
-              <div id="guideH" class="cap-guide h" hidden></div>
-              <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
-                <div id="capBoxText" class="cap-text">Caption preview</div>
-                <div class="cap-handle w" title="Drag to resize the box"></div>
-                <div class="cap-handle e" title="Drag to resize the box"></div>
+          <div class="preview-viewport-wrap">
+            <div id="previewViewport" class="preview-viewport" aria-label="Video preview; Ctrl+wheel zooms around the pointer; drag the hand cursor to pan">
+              <div id="previewStage" class="preview-stage">
+                <video id="player" preload="metadata" disableremoteplayback></video>
+                <div id="gapShade" hidden></div>
+                <canvas id="monCanvas" class="mon-canvas" hidden aria-hidden="true"></canvas>
+                <div id="capOverlay" hidden>
+                  <div id="guideV" class="cap-guide v" hidden></div>
+                  <div id="guideH" class="cap-guide h" hidden></div>
+                  <div id="capBox" title="Drag to reposition &mdash; snaps to the guide lines &middot; double-click to edit the text">
+                    <div id="capBoxText" class="cap-text">Caption preview</div>
+                    <div class="cap-handle w" title="Drag to resize the box"></div>
+                    <div class="cap-handle e" title="Drag to resize the box"></div>
+                  </div>
+                </div>
+                <div id="monGuides" class="mon-guides" hidden aria-hidden="true"></div>
+                <div id="monGizmo" class="mon-gizmo" hidden></div>
               </div>
+              <div id="monBadge" class="mon-badge" hidden></div>
+            </div>
+            <div id="previewViewportResize" class="preview-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize video preview viewing area" title="Drag up or down to resize the video viewing area"></div>
+          </div>
+          <div id="previewInfo" class="dim small" hidden></div>
+          <div class="mon-bar" id="monBar" role="toolbar" aria-label="Program Monitor transport">
+            <div class="mon-transport" role="group" aria-label="Transport">
+            <button type="button" id="mnStart" class="mon-btn" data-mon-act="mnStart" title="Go to start (Home)" aria-label="Go to start (Home)"></button>
+            <button type="button" id="mnPrevMark" class="mon-btn" data-mon-act="mnPrevMark" title="Previous marker (,)" aria-label="Previous marker (,)"></button>
+            <button type="button" id="mnMarkIn" class="mon-btn" data-mon-act="mnMarkIn" title="Mark In (I)" aria-label="Mark In (I)"></button>
+            <button type="button" id="mnMarkOut" class="mon-btn" data-mon-act="mnMarkOut" title="Mark Out (O)" aria-label="Mark Out (O)"></button>
+            <button type="button" id="mnPlayInOut" class="mon-btn" data-mon-act="mnPlayInOut" title="Play In to Out (Shift+Space)" aria-label="Play In to Out (Shift+Space)"></button>
+            <button type="button" id="frameBack" class="mon-btn" data-mon-act="frameBack" title="Previous frame (Left arrow)" aria-label="Previous frame (Left arrow)"></button>
+            <button type="button" id="playBtn" class="mon-btn play-main" data-mon-act="playBtn" title="Play / pause (Space)" aria-label="Play / pause (Space)"></button>
+            <button type="button" id="frameFwd" class="mon-btn" data-mon-act="frameFwd" title="Next frame (Right arrow)" aria-label="Next frame (Right arrow)"></button>
+            <button type="button" id="mnNextMark" class="mon-btn" data-mon-act="mnNextMark" title="Next marker (.)" aria-label="Next marker (.)"></button>
+            <button type="button" id="mnEnd" class="mon-btn" data-mon-act="mnEnd" title="Go to end (End)" aria-label="Go to end (End)"></button>
+            <button type="button" id="mnMarker" class="mon-btn" data-mon-act="mnMarker" title="Add marker (M)" aria-label="Add marker (M)"></button>
+            <button type="button" id="mnLoop" class="mon-btn" data-mon-act="mnLoop" title="Loop playback" aria-label="Loop playback"></button>
+            <button type="button" id="mnMute" class="mon-btn" data-mon-act="mnMute" title="Mute the monitor" aria-label="Mute the monitor"></button>
+            <button type="button" id="mnScopes" class="mon-btn" data-mon-act="mnScopes" title="Show scopes" aria-label="Show scopes"></button>
+            </div>
+            <select id="mnSpeed" class="mon-speed" title="Playback speed — J/K/L shuttle through these"
+                    aria-label="Playback speed"></select>
+            <button type="button" id="timecode" class="mon-tc"
+                    title="Click to type a timecode · right-click for the display mode"
+                    aria-label="Current timecode"></button>
+            <span id="playInfo" class="mon-playinfo" aria-live="off"></span>
+            <div class="mon-meters" id="monMeters" aria-label="Audio level meters">
+              <div class="mon-meter" title="Left channel level"><span class="mon-meter-fill" data-ch="l"></span><span class="mon-meter-peak" data-ch="l"></span></div>
+              <div class="mon-meter" title="Right channel level"><span class="mon-meter-fill" data-ch="r"></span><span class="mon-meter-peak" data-ch="r"></span></div>
+              <span class="mon-meter-scale" aria-hidden="true"><i>0</i><i>-12</i><i>-24</i><i>-48</i></span>
+            </div>
+            <span class="spacer"></span>
+            <div class="preview-zoom-controls" aria-label="Preview zoom controls">
+              <button id="videoZoomOut" class="mini" title="Zoom out of the video preview" aria-label="Zoom out">&minus;</button>
+              <button id="videoZoomFit" class="mini" title="Fit video to preview" aria-label="Fit video">fit</button>
+              <button id="videoZoomIn" class="mini" title="Zoom in to the video preview" aria-label="Zoom in">+</button>
+              <span id="videoZoomLevel" class="mon-zoom" role="button" tabindex="0"
+                    title="100% · click for the full zoom list (10%–800%)">100%</span>
+            </div>
+            <button type="button" id="mnFrame" class="mon-btn" data-mon-act="mnFrame" title="Export frame as PNG (Ctrl+Shift+E)" aria-label="Export frame as PNG (Ctrl+Shift+E)"></button>
+            <button type="button" id="mnFull" class="mon-btn" data-mon-act="mnFull" title="Fullscreen monitor (Ctrl+`)" aria-label="Fullscreen monitor (Ctrl+`)"></button>
+            <button type="button" id="mnGear" class="mon-btn" data-mon-act="mnGear" title="Program Monitor settings" aria-label="Program Monitor settings"></button>
+          </div>
+          <div class="mon-info" id="monInfo" title="Frame size, frame rate, playback resolution and dropped frames"></div>
+          <div class="mon-scopes" id="monScopes" hidden>
+            <div class="mon-scope-head">
+              <strong>Scopes</strong>
+              <span class="dim small">sampled from the program frame</span>
+              <span class="spacer"></span>
+              <label class="mon-scope-knob" title="Brightness of the scope traces">gain
+                <input id="monScopeGain" type="range" min="1" max="3" step="0.1" value="1.4">
+              </label>
+              <button id="monScopesClose" class="mini" title="Hide the scopes">×</button>
+            </div>
+            <div class="mon-scope-grid">
+              <figure class="mon-scope"><figcaption>Waveform (luma)</figcaption><canvas id="scopeWave" width="256" height="144"></canvas></figure>
+              <figure class="mon-scope"><figcaption>RGB parade</figcaption><canvas id="scopeParade" width="256" height="144"></canvas></figure>
+              <figure class="mon-scope"><figcaption>Vectorscope</figcaption><canvas id="scopeVector" width="256" height="144"></canvas></figure>
+              <figure class="mon-scope"><figcaption>Histogram</figcaption><canvas id="scopeHist" width="256" height="144"></canvas></figure>
             </div>
           </div>
-        </div>
-        <div id="previewViewportResize" class="preview-viewport-resize" role="separator" aria-orientation="horizontal" aria-label="Resize video preview viewing area" title="Drag up or down to resize the video viewing area"></div>
-      </div>
-      <div id="previewInfo" class="dim small" hidden></div>
-      <div class="player-tools">
-        <button id="frameBack" class="mini" title="Previous frame (Left arrow)">&#9664; frame</button>
-        <button id="playBtn" class="mini primary-mini" title="Play / pause (Space)">&#9654; play</button>
-        <button id="frameFwd" class="mini" title="Next frame (Right arrow)">frame &#9654;</button>
-        <span id="timecode" style="font-family:ui-monospace,monospace"></span>
-        <span class="dim small" title="Press Space to play or pause when focus is not in a form control">Space: play/pause</span>
-        <span id="playInfo" class="dim"></span>
-        <span class="spacer"></span>
-        <div class="preview-zoom-controls" aria-label="Preview zoom controls">
-          <button id="videoZoomOut" class="mini" title="Zoom out of the video preview" aria-label="Zoom out">&minus;</button>
-          <button id="videoZoomFit" class="mini" title="Fit video to preview" aria-label="Fit video">fit</button>
-          <button id="videoZoomIn" class="mini" title="Zoom in to the video preview" aria-label="Zoom in">+</button>
-          <span id="videoZoomLevel" class="dim small" title="Ctrl+wheel to zoom; drag the video to pan when zoomed">100%</span>
-        </div>
-      </div>
+          <div class="mon-menu" id="monMenu" hidden role="dialog" aria-label="Program Monitor settings"></div>
         </div>
       </div>
     </section>
@@ -333,6 +381,10 @@
                   <div class="ins-slider-top"><span>Opacity</span><span class="dim small">%</span><input id="txOn" type="number" min="0" max="100" step="1" value="100" aria-label="Opacity"></div>
                   <input id="txO" type="range" min="0" max="100" step="1" value="100" aria-label="Opacity slider">
                 </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Rotation</span><span class="dim small">&deg;</span><input id="txRn" type="number" min="-180" max="180" step="1" value="0" aria-label="Rotation"></div>
+                  <input id="txR" type="range" min="-180" max="180" step="1" value="0" aria-label="Rotation slider">
+                </div>
                 <div class="ins-row"><button id="txReset" class="mini">Reset transform</button></div>
               </div>
             </details>
@@ -347,6 +399,37 @@
                   <label>Bottom<input id="tcB" type="number" min="0" max="45" step="1" value="0"></label>
                 </div>
                 <div class="ins-row"><button id="tcReset" class="mini">Reset crop</button></div>
+              </div>
+            </details>
+
+            <details class="insp-sect">
+              <summary>Mask</summary>
+              <div class="ins-body">
+                <div class="ins-row">
+                  <span class="ins-lab">Shape</span>
+                  <select id="tmShape" title="Mask shape">
+                    <option value="rect">rectangle</option>
+                    <option value="ellipse">ellipse</option>
+                  </select>
+                  <label class="ins-check" title="Only show what is inside the shape"><input id="tmOn" type="checkbox"> on</label>
+                  <label class="ins-check" title="Hide what is inside the shape instead"><input id="tmInv" type="checkbox"> invert</label>
+                </div>
+                <div class="ins-quad">
+                  <label>X %<input id="tmX" type="number" min="0" max="100" step="1" value="50"></label>
+                  <label>Y %<input id="tmY" type="number" min="0" max="100" step="1" value="50"></label>
+                  <label>W %<input id="tmW" type="number" min="1" max="100" step="1" value="70"></label>
+                  <label>H %<input id="tmH" type="number" min="1" max="100" step="1" value="70"></label>
+                </div>
+                <div class="ins-slider">
+                  <div class="ins-slider-top"><span>Feather</span><span class="dim small">%</span><input id="tmFn" type="number" min="0" max="100" step="1" value="8" aria-label="Mask feather"></div>
+                  <input id="tmF" type="range" min="0" max="100" step="1" value="8" aria-label="Mask feather slider">
+                </div>
+                <div class="ins-row">
+                  <button id="tmFit" class="mini" title="Mask the whole frame">full frame</button>
+                  <button id="tmReset" class="mini">Reset mask</button>
+                  <button id="tmEdit" class="mini" title="Edit the mask directly on the Program Monitor">edit on monitor</button>
+                </div>
+                <p class="ins-note">The shape follows the clip in the Program Monitor: drag it, its corners or the feather dot. Export bakes it into the alpha channel.</p>
               </div>
             </details>
 
@@ -367,7 +450,7 @@
                 <div id="tkInfo" class="dim small"></div>
                 <div class="ins-row"><button id="tkAdd" class="mini">◆ Add at playhead</button><button id="tkClear" class="mini">Clear all</button></div>
                 <div id="tkList"></div>
-                <p class="ins-note">Keyframes animate position, size and opacity between ◆ marks. Export bakes them into the video.</p>
+                <p class="ins-note">Keyframes animate position, size, rotation and opacity between ◆ marks. While a clip has keyframes, dragging the picture on the Program Monitor or changing X/Y/Scale/Rotation records a keyframe at the playhead — no extra button needed. Export bakes them into the video.</p>
               </div>
             </details>
           </div>
@@ -446,6 +529,12 @@
           <b id="insCapName">No caption at the playhead</b>
           <span id="insCapMeta" class="dim small"></span>
         </div>
+        <div class="ins-capapply">
+          <label class="chk ins-chk" title="Font, size, colour, stroke, shadow, background, layout, position and animation edits then change every caption on every caption lane - not just the one under the playhead.">
+            <input type="checkbox" id="capApplyAll" checked> Apply to all captions
+          </label>
+          <span id="capApplyScope" class="dim small"></span>
+        </div>
 
         <details open class="insp-sect">
           <summary>Content</summary>
@@ -488,7 +577,7 @@
             <div class="ins-row"><span class="ins-lab">Highlight</span>
               <span class="grow ins-color"><input id="insHighlight" type="color" value="#ffd400" aria-label="Spoken-word highlight colour"><span class="dim small">spoken word</span></span>
             </div>
-            <label class="chk ins-chk"><input type="checkbox" id="capApplyAll"> Apply style edits to every caption</label>
+            <p class="ins-note">Fonts, colours and layout follow the <b>Apply to all captions</b> switch at the top of this panel.</p>
             <div class="ins-row"><b class="ins-sub">Drop shadow</b></div>
             <div class="ins-row"><span class="ins-lab">Shadow</span>
               <span class="grow ins-color"><label class="appearance-color"><input id="capShadowEnabled" type="checkbox"><input id="capShadow" type="color" value="#000000"></label>
@@ -729,6 +818,7 @@
     <button class="tb" id="btnMagnet" title="Magnetic: deletes and trims close the gap"></button>
     <span class="tdiv"></span>
     <button class="tb" id="btnAddCap" title="Add a caption at the playhead, on the topmost video track (T)"></button>
+    <button class="pill" id="btnApplyAll" aria-pressed="false" title="Style edits apply to every caption, on every lane">apply to all</button>
     <span class="tdiv"></span>
     <button class="pill on p-cap" data-pill="caption" title="Show caption sections"><span class="dot" style="background:#cf5a99"></span>caption</button>
     <button class="pill on p-sil" data-pill="silence" title="Show silence sections"><span class="dot" style="background:#f97316"></span>silence</button>
@@ -854,12 +944,14 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=10"></script>
+<script src="/static/timeline-model.js?v=12"></script>
 <script src="/static/media.js?v=1"></script>
-<script src="/static/stage.js?v=4"></script>
-<script src="/static/timeline.js?v=23"></script>
-<script src="/static/clip.js?v=3"></script>
-<script src="/static/app.js?v=50"></script>
+<script src="/static/stage.js?v=7"></script>
+<script src="/static/timeline.js?v=26"></script>
+<script src="/static/clip.js?v=7"></script>
+<script src="/static/app.js?v=53"></script>
+<script src="/static/monitor.js?v=2"></script>
+<script src="/static/gizmo.js?v=2"></script>
 <script src="/static/inspector.js?v=2"></script>
 <script src="/static/font-picker.js?v=1"></script>
 <script src="/static/fonts.js?v=1"></script>

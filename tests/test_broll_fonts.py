@@ -31,13 +31,16 @@ def test_shadow_scaled_offsets_and_disabled(tmp_path):
 
 
 def test_shadow_spread_does_not_multiply_opacity(tmp_path):
+    """Spread grows one silhouette; it must not stack copies that darken it."""
     path = tmp_path / 'cap.ass'
     captionmap.write_ass([dict(start=0, end=1, text='Hi')], path, 1920, 1080,
                         dict(shadow_opacity=50, shadow_size=6))
     shadows = [s for s in path.read_text().splitlines() if s.startswith('Dialogue: 0')]
-    assert len(shadows) == 9
-    # Per-pass alpha is ~236, not 128 on each of nine overlapping passes.
-    assert all(r'\alpha&HEC&'.lower() in s.lower() for s in shadows)
+    assert len(shadows) == 1
+    # 50% opacity is written once, as alpha 0x80, on one pass.
+    assert r'\1a&H80&' in shadows[0] and r'\3a&H80&' in shadows[0]
+    # The spread widens the outline instead (design pixels at 1080p).
+    assert r'\bord6.00' in shadows[0]
 
 
 def installed_font():

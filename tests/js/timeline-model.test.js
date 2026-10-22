@@ -477,3 +477,47 @@ test("removing the only word drops the empty caption", () => {
   assert.equal(r.removed, 1);
   assert.deepEqual(r.tl.caps.map((c) => c.text), ["keep"]);
 });
+
+/* ------------------------------------------- rotation + mask (on-picture) */
+
+test("rotation and mask survive cleanFx and clamp to their ranges", () => {
+  const fx = TLM.cleanFx({ rot: 400, mask: { on: true, shape: "ellipse", x: 120, y: -20, w: 0, h: 300, feather: 150, invert: true } });
+  assert.equal(fx.rot, 180);
+  assert.equal(fx.mask.on, true);
+  assert.equal(fx.mask.shape, "ellipse");
+  assert.equal(fx.mask.x, 100);
+  assert.equal(fx.mask.y, 0);
+  assert.equal(fx.mask.w, 1);
+  assert.equal(fx.mask.h, 100);
+  assert.equal(fx.mask.feather, 100);
+  assert.equal(fx.mask.invert, true);
+  // Unknown shape falls back to a rectangle; junk means "no mask".
+  assert.equal(TLM.cleanFx({ mask: { shape: "star" } }).mask.shape, "rect");
+  assert.equal(TLM.cleanFx({ mask: "no" }).mask, null);
+  assert.equal(TLM.cleanFx({}).mask, null);
+  assert.equal(TLM.defaultFx().rot, 0);
+  assert.equal(TLM.defaultFx().mask, null);
+});
+
+test("the mask is a copy, not the caller's object", () => {
+  const src = { on: true, shape: "rect", x: 10, y: 10, w: 20, h: 20 };
+  const fx = TLM.cleanFx({ mask: src });
+  fx.mask.x = 90;
+  assert.equal(src.x, 10);
+  assert.equal(TLM.defaultMask().w, 70);
+});
+
+test("evalFxAt keeps rot and mask while animating x/y/scale/opacity", () => {
+  const kfClip = {
+    ...clip("m1", 0, 4, 0),
+    fx: TLM.cleanFx({ rot: 25, mask: { on: true, shape: "ellipse", x: 30, y: 30, w: 40, h: 40 } }),
+    kf: [{ t: 0, x: -10, y: 0, scale: 50, opacity: 100 },
+         { t: 2, x: 10, y: 0, scale: 150, opacity: 50 }],
+  };
+  const mid = TLM.evalFxAt(kfClip, 1);
+  assert.equal(mid.x, 0);            // interpolated
+  assert.equal(mid.scale, 100);
+  assert.equal(mid.rot, 25);         // held, not animated
+  assert.equal(mid.mask.shape, "ellipse");
+  assert.equal(mid.mask.x, 30);
+});

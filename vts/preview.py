@@ -51,7 +51,46 @@ MIME_BY_EXT = {
     ".ts": "video/mp2t", ".mts": "video/mp2t", ".m2ts": "video/mp2t",
     ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".vob": "video/dvd",
     ".flv": "video/x-flv", ".wmv": "video/x-ms-wmv", ".3gp": "video/3gpp",
+    # Images: a still is served as an image, never as octet-stream.
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".jpe": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+    ".bmp": "image/bmp", ".avif": "image/avif", ".tif": "image/tiff",
+    ".tiff": "image/tiff",
+    # Audio, for music beds and voice-over in the bin.
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".flac": "audio/flac",
+    ".aac": "audio/aac", ".m4a": "audio/mp4", ".ogg": "audio/ogg",
+    ".oga": "audio/ogg", ".opus": "audio/opus", ".aiff": "audio/aiff",
+    ".aif": "audio/aiff", ".wma": "audio/x-ms-wma", ".mka": "audio/x-matroska",
 }
+
+# Audio containers browsers play without help (an <audio> tag reads them as-is).
+WEB_AUDIO_CONTAINERS = {
+    ".mp3", ".wav", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus",
+}
+
+# Images the browser can paint from the file as it is.
+WEB_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".jpe", ".gif", ".webp", ".bmp", ".avif"}
+# Images only ffmpeg can read: converted once to a PNG copy for the preview,
+# while the export keeps using the original file.
+# SVG needs librsvg inside ffmpeg; when the build has it the import succeeds
+# through the same PNG copy, otherwise the import says so instead of failing later.
+CONVERTIBLE_IMAGE_EXTS = {".tif", ".tiff", ".ppm", ".pgm", ".pnm", ".tga", ".jp2", ".svg"}
+
+
+def image_support(ext: str) -> tuple[str, str]:
+    """Classify an image extension: ``direct``, ``convert`` or ``unsupported``.
+
+    Still images are never "proxy" clips: a PNG shown in an <img> must not be
+    transcoded to a video, and a format the browser cannot paint gets a PNG
+    sidecar instead of a broken layer.
+    """
+    ext = (ext or "").lower()
+    if ext in WEB_IMAGE_EXTS:
+        return "direct", ""
+    if ext in CONVERTIBLE_IMAGE_EXTS:
+        return "convert", f"{ext} is not a browser image format, so the preview uses a PNG copy"
+    return "unsupported", (f"browsers cannot display {ext or 'that image'} and there is no "
+                           "PNG fallback for it")
 
 
 def mime_for(path: str) -> str:
@@ -72,6 +111,16 @@ def browser_support(info: dict) -> tuple[str, str]:
     a = info.get("audio") or {}
     vcodec = (v.get("codec") or "").lower()
     acodec = (a.get("codec") or "").lower()
+
+    if ext in WEB_IMAGE_EXTS or ext in CONVERTIBLE_IMAGE_EXTS:
+        return image_support(ext)
+
+    # Sound-only files are judged by their audio, not by a "container" they do
+    # not have: an MP3 or WAV plays in an <audio> tag, so it needs no proxy.
+    if not v and a:
+        if ext in WEB_AUDIO_CONTAINERS:
+            return "direct", ""
+        return "proxy", f"browsers cannot decode {acodec or ext} audio"
 
     if ext not in WEB_CONTAINERS:
         return "proxy", f"browsers cannot play the {ext or 'unknown'} container"

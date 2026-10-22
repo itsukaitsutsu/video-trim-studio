@@ -4,6 +4,23 @@ A small, local-first video editor built around the FFmpeg silence detection and 
 
 > **Your choice in this version:** captions can come from an existing `.srt` / `.vtt`, **or** be generated in-app from the video's audio with faster-whisper (the **Auto-caption** card, plus a matching `auto_caption.py` CLI). Silence detection is built in.
 
+## Supported media
+
+The full list of accepted file types - source video, Media bin video, still
+images, audio, captions, fonts and export containers - is in
+[SUPPORTED-MEDIA.md](SUPPORTED-MEDIA.md). Short version:
+
+| What | Extensions |
+|------|------------|
+| Video (source or bin) | mp4, mov, m4v, mkv, webm, avi, ts, mts, m2ts, mpg, mpeg, flv, wmv, 3gp, vob |
+| Images (bin) | png, jpg, jpeg, jpe, gif, webp, bmp, avif - plus tif, tiff, ppm, pgm, pnm, tga, jp2, svg through a one-time PNG copy |
+| Audio (bin) | mp3, wav, flac, aac, m4a, ogg, oga, opus, aiff, aif, wma, mka, ac3, dts, amr, caf |
+| Captions | srt, vtt (ass is written when burning) |
+| Fonts | ttf, otf |
+
+Anything the browser cannot decode is converted once for the preview only;
+cutting and export always read your original file.
+
 ## Text tools
 
 See [TEXT-AND-FONTS.md](TEXT-AND-FONTS.md) for text-shadow controls,
@@ -21,18 +38,20 @@ After updating, run `python -m pip install -r requirements.txt` (adds FontTools)
 - **Lane lock / eye:** every V/T label has a lock (blocks timeline move/trim/razor/split/delete/cut/mute on that lane — the Clip panel and text edits still work) and an eye (hides the lane's blocks on the timeline to declutter; preview and export are unaffected).
 - Zoom the video preview from **50% to 400%** with the **− / +** controls or **Ctrl+wheel** over the preview. Ctrl+wheel zooms around the pointer position, like timeline zoom; the hand cursor indicates the image can be dragged to pan. Press **fit** to return to the full-frame zoom. Preview zoom is display-only and does not change the source or exported video.
 - Opens the original video by entering its path or using **Browse** (the existing optional Upload control remains). The last successfully opened video path is remembered in `work/last_project.txt` and reopened after a server restart; if the source was moved or deleted, its path stays available to correct.
-- **Program monitor:** the preview composites every video track that is visible at the playhead, each as its own layer with its own scale, position, opacity, crop and fades — so overlapping B-roll looks the same in the preview as it does in the export.
+- **Program monitor:** the preview composites every video track that is visible at the playhead, each as its own layer with its own scale, position, rotation, opacity, crop, shape mask and fades — so overlapping B-roll looks the same in the preview as it does in the export.
+- **Edit the picture on the monitor:** double-click a clip in the Program monitor (or select it and press **V**) and it grows an on-picture transform box — drag the body to reposition, the eight handles to scale, the round knob above the box to rotate (**Shift** snaps to 15°). **C** switches the same box to crop (drag an edge or corner inwards; the frame outside it is dimmed), **P** to the shape mask (drag to draw, drag the box to move, the edge dot to feather; **Shift** keeps a mask corner square). Moving snaps to the frame centre and the safe edges — hold **Alt** to place it freely. **Alt+arrows** nudge by 1 % (**Shift** 5 %), **Ctrl+Z** undoes a whole drag at a time, and **Esc** leaves. The box reads out live numbers, and everything it does is written to the same `x/y/scale/rot/crop_*/mask` values the Inspector and the FFmpeg export use.
+- **Program Monitor (Premiere-style):** a transport bar under the picture — J/K/L shuttle (1×/2×/4×/8× both ways, K pauses), playback-speed menu, loop, Mark In/Out (I/O) with Play In→Out, Home/End and markers on **M** (`,` / `.` to jump; lane mute moved to **Shift+M**). The timecode is click-to-type and can read timecode, frames or seconds, elapsed or remaining; the info line shows frame size, fps, playback/paused resolution, dropped frames, the In/Out points and the marker count. The gear menu collects playback and paused resolution (Full → 1/16), High Quality Playback, safe margins (action 10 %, title 20 %, 4:3 box, custom %), centre and thirds guides, alpha view, timecode mode, meters, volume/mute, scopes, Export Frame, fullscreen and a button editor that can hide any transport button. Scopes (waveform, RGB parade, vectorscope, histogram) sample the real composited frame, the stereo meters run off a WebAudio analyser on the program mix, and **Export Frame** (Ctrl+Shift+E) writes a PNG at project resolution. Zoom runs 10 %–800 %.
 - Detects silence with FFmpeg `silencedetect`; splits the timeline into `caption`, `silence`, and `other audio` sections.
 - Imports `.srt` / `.vtt` by file path or upload and places the cues on the timeline, so they follow the cuts. Edit a caption on the timeline by double-clicking it, or edit a V1 section or individual caption cue in the timeline list; matching text stays synchronized.
 - **Auto-caption**: transcribes the open video with faster-whisper (99 languages, optional translation to English, optional word-level timestamps and burned-in copy) and feeds the result straight into detection. Optional dependency; the card shows the install command when it is missing. Results are fully **editable** in-app (text + timings, add/delete cues), and you can also start from a blank set or an existing `.srt`/`.vtt` without faster-whisper.
 - Selects timeline items by click, Shift/Ctrl-click, rubber band, or the timeline-list checkboxes, and edits them with split, move, trim, cut, copy, paste, ripple delete, and undo/redo (see Typical workflow).
 - **Tools toolbar:** the vertical icon bar beside the timeline picks the mouse mode — **Select** (V), **Razor** (R, click a clip or caption to split it), **Caption** (T, click to add one), **Hand** (H, drag to pan), **Zoom** (Z, drag a range or click; Alt = out) and **Mute** (M, click a clip to mute/unmute it). **Esc** returns to Select.
-- **Media bin:** import video, audio and still images from disk (referenced in place, never copied) or upload them into the project folder. Anything a browser cannot decode gets its own H.264/AAC proxy for playback, while export always reads the original.
+- **Media bin:** import video, audio and still images from disk (referenced in place, never copied) or upload them into the project folder. Stills are real images: the program monitor paints them in an `<img>` layer, they get a default 5 s on the timeline (adjustable) and they are drawn as `image` blocks - TIFF/SVG/PPM are rasterised once to a PNG copy for the preview while the export keeps the original. Bin audio (mp3, wav, m4a, flac, ogg, opus...) plays as is; only formats the browser cannot read get a preview conversion. Anything a browser cannot decode gets its own H.264/AAC proxy for playback, while export always reads the original.
 - **Multi-track picture:** clips live on tracks V1..Vn. Dropping a clip on an occupied track **overlays** it instead of pushing it aside, so B-roll sits on top of the shot below. The program monitor composites every visible track live, and the export is built from the same layout.
 - **Audio lanes A1..An:** a clip's sound starts linked to its picture (V1→A1) and can be **unlinked** onto its own lane and moved anywhere. Music, voice-over and narration dropped from the bin live on their own lanes, and lanes **mix** — overlapping sounds play together.
 - **Inspector panel — Clip side (Video / Audio / Effect):** select a video clip or an audio item and pick a mode. **Video** = Transform (position X/Y, scale, opacity, **Fit**), Crop % per edge, Video fade in/out and ◆ keyframes; **Audio** = volume, mute, fade in/out and **Unlink audio**; **Effect** = Look sliders (brightness / contrast / saturation, baked into the export), a live effect *chain* listing everything the clip actually carries (crop, fit, scale, position, opacity, look, fades, volume, mute, keyframes — each row removable with ×), and a 10-card library (Corner PiP, Zoom punch, Letterbox, Fill the box, Fade from/to black, Half opacity, Mute, Duck, Boost). Everything previews live and exports through the same ffmpeg graph.
 - **Inspector panel — Text side:** the caption editor, laid out like kconcat's text panel: **Content** (the caption at the playhead: text, + caption, Delete, Duplicate, word count), **Typography** (font with search/import/device fonts, weight, italic, size, fill + opacity, spoken-word highlight colour, drop shadow, background), **Text animation** (None / Fade In / Pop In / Bounce / Slide Up / Typewriter / Karaoke / Word reveal + duration, word stagger and pop scale, with Preview and Reset), **Filler words** (scans every caption for strong fillers — eee, anu, ehm, um … — and weak ones — kayak, gitu, terus, apa ya — tick the ones you want and **Remove from captions** strips just those words), **Stroke**, **Layout** (align, width/height, line height, tracking) and **Position** (3×3 zone, X/Y, reset). Picking a caption flips the panel to Text automatically; picking a clip flips it back to Clip.
-- **Keyframes:** animate position, size and opacity with ◆ keyframes (diamonds on the clip). **◆ Add at playhead** captures the current look; export bakes the motion into short spans. Audio/video fades also preview live during playback.
+- **Keyframes:** animate position, size, rotation and opacity with ◆ keyframes (diamonds on the clip). **◆ Add at playhead** captures the current look and turns the clip's animation on; from then on, moving the picture on the Program Monitor or typing into X / Y / Scale / Rotation / Opacity records a keyframe at the playhead (within 50 ms of an existing ◆ it updates that one) — Premiere's stopwatch and CapCut's diamond behave the same way, and the first ◆ tells you so. With no keyframes the sliders are the clip-wide value, as before. Export bakes the motion into short spans, precession and rotation included. Audio/video fades also preview live during playback.
 - Press **Space** to play/pause the video preview (except while typing or when a
   checkbox/control has keyboard focus).
 - Exports with source-informed defaults: same container extension, resolution, frame rate when constant, pixel format, video codec family, target video bitrate, colour tags, audio codec where supported, audio bitrate, sample rate and channel count.
@@ -256,12 +275,16 @@ lanes below them (like CapCut / Kdenlive):
   selection at the playhead, **delete** (Delete) removes it and leaves a gap, and
   **ripple delete** (Shift+Delete) also closes the gap. **snap** sticks drags to
   the playhead and neighbouring edges.
-- Caption layout controls are in the export card when **burn captions** is
-  enabled; the **Apply to all captions** checkbox is in the Timeline toolbar
-  beside **+ caption**. It is on by default: moving/resizing the preview box, changing
-  size/alignment, or resetting copies the active caption's full layout to every
-  timeline caption across T1, T2, and other tracks; new captions use that layout
-  too. Turn it off to edit only the caption at the playhead. The preview shows
+- **Apply to all captions** is the switch at the top of the Inspector's Text
+  pane, and the `apply to all` pill in the Timeline toolbar beside **+ caption**
+  is the same switch. It is **on by default** and remembered per browser:
+  every style edit - moving/resizing the preview box, font, size, colour,
+  stroke, shadow, background, layout, position, text animation - then lands on
+  **every caption on every caption track** (V2, V3, V4, ...), including
+  captions on lanes you are not looking at, and new captions start from that
+  layout. You never have to click into a lane first. The line under the switch
+  says what it will do (`all 12 captions · 3 lanes` or `this caption only`).
+  Turn it off to edit only the caption at the playhead. The preview shows
   overlapping captions together, and the export burns the saved per-caption
   styles (one positioned ASS Dialogue per caption).
 - The block, the preview boxes, the timeline list and the burn all update together
@@ -536,8 +559,15 @@ static/timeline.js         timeline canvas (V1..Vn + A1..An + caption lanes),
 static/app.js              menu bar, workspace zones/panel grouping, source
                            panel, caption card, caption box, export options
 static/stage.js            program monitor compositor: one <video> layer per track
+static/monitor.js          program monitor: transport (J/K/L, loop, in/out, markers),
+                           timecode entry, playback/paused resolution, safe margins,
+                           guides, alpha view, scopes, audio meters, Export Frame,
+                           fullscreen, gear menu + button editor
+static/gizmo.js            on-picture transform box: move, scale, rotate, crop and
+                           mask the selected clip straight on the Program monitor
 static/media.js            media bin: import, upload, proxies, waveforms, thumbnails
-static/clip.js             Inspector, clip side: transform, fit, crop, audio, fades, keyframes
+static/clip.js             Inspector, clip side: transform, fit, rotation, crop, mask,
+                           audio, fades, keyframes
 static/inspector.js        Inspector shell: Clip|Text scope, Video|Audio|Effect modes,
                            effect chain + library, caption content, filler scan
 static/                    index.html and style.css (plain HTML/CSS/JS; no build step)

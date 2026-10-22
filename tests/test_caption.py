@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 
 def _frontend_js(root: str) -> str:
     """All browser scripts: the timeline editor lives in its own files now."""
-    names = ("timeline-model.js", "timeline.js", "app.js")
+    names = ("timeline-model.js", "timeline.js", "monitor.js", "app.js")
     return "\n".join(open(os.path.join(root, "static", n), encoding="utf-8").read()
                      for n in names)
 
@@ -1184,7 +1184,14 @@ def test_caption_overlay_is_wired_between_html_and_js():
     # The font controls and the two controls the old Text panel promised live
     # in the Text pane, not in the Export tab.
     assert marks[0] < html.index('id="capFontSize"') < marks[2]
-    assert marks[0] < html.index('id="capApplyAll"') < marks[2]
+    # Apply to all captions sits at the top of the Text pane (above Content)
+    # and is mirrored by a pill in the Timeline toolbar; on by default.
+    apply_pos = html.index('id="capApplyAll"')
+    assert tab_inspector_page < apply_pos < marks[0]
+    assert 'id="capApplyAll" checked' in html
+    assert html.index('id="btnAddCap"') < html.index('id="btnApplyAll"')
+    assert 'id="capApplyScope"' in html
+    assert "setCapApplyAll" in js and "syncCapApplyUI" in js and "bindCapApplyAll" in js
     assert tab_inspector_page < html.index('id="capAdd"') < tab_export_page
     settings_card = html.index('data-export-card="settings"')
     export_card = html.index('data-export-card="export"')

@@ -880,7 +880,9 @@ body.workspace-drag-active .wszone.zone-empty { display: flex; min-height: 72px;
 
 /* --- table --- */
 .sections-panel .list-scroll {
-  max-height: none; flex: 1 1 auto; min-height: 116px;
+  /* The table scrolls inside the panel: a long detection run must not stretch
+     the whole workspace column. Capped against the viewport, floor 116px. */
+  max-height: min(46vh, 420px); flex: 1 1 auto; min-height: 116px;
   border: 1px solid var(--line); border-radius: 6px; background: #0b1017;
 }
 .sections-panel #secTable { font-size: 11.5px; }
@@ -1144,3 +1146,274 @@ button.mini.warn:hover:not(:disabled) { background: #b62324; border-color: #f851
    panel once the panel is resized smaller, so controls never spill out of the
    panel's box and under the zone below it. */
 #tab-inspector { overflow: auto; min-height: 0; }
+
+/* ===========================================================================
+ * Program Monitor — transport bar, timecode, meters, scopes, overlays
+ * ======================================================================== */
+
+/* --- transport bar ------------------------------------------------------- */
+.mon-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line);
+}
+.mon-transport { display: flex; align-items: center; gap: 2px; }
+.mon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0; border-radius: 5px;
+  background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  cursor: pointer; flex: none;
+}
+.mon-btn svg { width: 13px; height: 13px; }
+.mon-btn:hover:not(:disabled) { background: #2a3340; border-color: #3d4a5c; }
+.mon-btn.on { background: #1c2f4d; border-color: #58a6ff66; color: #9ecbff; }
+.mon-btn.playing { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+.mon-btn.playing svg { width: 14px; height: 14px; }
+#playBtn { width: 30px; height: 30px; }
+#playBtn svg { width: 15px; height: 15px; }
+
+.mon-speed {
+  height: 26px; padding: 0 4px; font-size: 11.5px; border-radius: 5px;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+.mon-tc {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px; letter-spacing: .2px; font-variant-numeric: tabular-nums;
+  padding: 4px 8px; border-radius: 5px; cursor: text;
+  background: #0b0f14; border: 1px solid var(--line); color: #cfe3ff;
+  min-width: 196px; text-align: center;
+}
+.mon-tc:hover { border-color: #3d4a5c; background: #0e141b; }
+.mon-tc-input {
+  width: 100%; background: #05070a; color: #fff; border: 1px solid var(--accent-2);
+  border-radius: 3px; font: inherit; font-size: 12.5px; padding: 0 4px; outline: none;
+}
+.mon-playinfo {
+  font-size: 11.5px; color: var(--dim); font-variant-numeric: tabular-nums;
+  white-space: nowrap; min-height: 1em;
+}
+.mon-zoom {
+  min-width: 46px; text-align: center; font-variant-numeric: tabular-nums;
+  font-size: 11.5px; color: var(--dim); cursor: pointer; border-radius: 4px;
+  padding: 2px 4px; border: 1px solid transparent;
+}
+.mon-zoom:hover { color: var(--text); border-color: var(--line); }
+.mon-info {
+  margin-top: 5px; font-size: 11px; color: var(--dim);
+  font-variant-numeric: tabular-nums; letter-spacing: .1px;
+}
+.mon-info:empty { display: none; }
+
+/* --- audio meters -------------------------------------------------------- */
+.mon-meters { display: flex; align-items: flex-end; gap: 3px; height: 46px; }
+.mon-meter {
+  position: relative; width: 10px; height: 44px; border-radius: 2px;
+  background: #0a0e13; border: 1px solid var(--line); overflow: hidden;
+}
+.mon-meter-fill {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 0;
+  background: linear-gradient(to top, #2ea043 0%, #3fb950 55%, #d29922 82%, #f85149 100%);
+  transition: height .05s linear;
+}
+.mon-meter-fill.hot { box-shadow: inset 0 0 0 1px #ffb4a8; }
+.mon-meter-peak {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 1px;
+  background: #fff; opacity: .8;
+}
+.mon-meter-scale {
+  display: flex; flex-direction: column; justify-content: space-between;
+  height: 44px; font-size: 8.5px; color: #5b6675; font-style: normal;
+  font-variant-numeric: tabular-nums; padding-bottom: 1px;
+}
+.mon-meter-scale i { font-style: normal; line-height: 1; }
+
+/* --- scopes -------------------------------------------------------------- */
+/* Floating card so opening the scopes never reflows the workspace. */
+.mon-scopes {
+  position: absolute; right: 8px; top: 8px; z-index: 30;
+  width: min(430px, 94%); max-height: min(58vh, 440px); overflow: auto;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: rgba(11,14,19,.97); padding: 7px 8px 8px;
+  box-shadow: 0 18px 44px rgba(0,0,0,.6);
+}
+.mon-scope-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.mon-scope-head strong { font-size: 12px; }
+.mon-scope-knob { font-size: 10.5px; color: var(--dim); display: flex; align-items: center; gap: 4px; }
+.mon-scope-knob input { width: 64px; }
+.mon-scope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.mon-scope { margin: 0; border: 1px solid #1a212b; border-radius: 5px; overflow: hidden; background: #07080b; }
+.mon-scope figcaption {
+  font-size: 10px; color: var(--dim); padding: 2px 5px;
+  border-bottom: 1px solid #1a212b; background: #0d1117;
+}
+.mon-scope canvas { display: block; width: 100%; height: 104px; }
+
+/* --- overlays inside the frame ------------------------------------------ */
+.mon-canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; z-index: 1;
+  pointer-events: none;
+}
+.preview-stage.mon-mq .stage-layers { visibility: hidden; }
+.mon-guides { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.mon-guides .mg { position: absolute; pointer-events: none; filter: drop-shadow(0 0 1px rgba(0,0,0,.9)); }
+.mon-guides .mg-action { border: 1px solid rgba(255,255,255,.78); }
+.mon-guides .mg-title { border: 1px dashed rgba(255,255,255,.62); }
+.mon-guides .mg-four3 { border: 1px solid rgba(90,170,255,.85); }
+.mon-guides .mg-custom { border: 1px solid rgba(255,196,80,.85); }
+.mon-guides .mg-center i { position: absolute; background: rgba(255,255,255,.85); }
+.mon-guides .mg-center i.v { left: 50%; top: 42%; bottom: 42%; width: 1px; }
+.mon-guides .mg-center i.h { top: 50%; left: 42%; right: 42%; height: 1px; }
+.mon-guides .mg-thirds i { position: absolute; background: rgba(255,255,255,.45); }
+.mon-guides .mg-thirds i.v { top: 0; bottom: 0; width: 1px; }
+.mon-guides .mg-thirds i.h { left: 0; right: 0; height: 1px; }
+.mon-badge {
+  position: absolute; top: 6px; right: 6px; z-index: 6; pointer-events: none;
+  font-size: 10px; font-weight: 600; letter-spacing: .5px;
+  padding: 1px 6px; border-radius: 3px;
+  background: rgba(88,166,255,.85); color: #04121f;
+}
+.preview-viewport:fullscreen { background: #000; border-radius: 0; height: 100% !important; width: 100%; }
+
+/* --- popovers ------------------------------------------------------------ */
+.mon-menu {
+  position: absolute; right: 8px; bottom: 54px; z-index: 40;
+  width: min(340px, 92%); max-height: min(70vh, 520px); overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 18px 44px rgba(0,0,0,.6); font-size: 12px;
+}
+.mon-menu-head {
+  position: sticky; top: 0; z-index: 1; display: flex; align-items: center;
+  gap: 8px; padding: 7px 9px; background: #222b36; border-bottom: 1px solid var(--line);
+}
+.mon-menu-body { padding: 4px 9px 10px; }
+.mon-menu-body section { padding: 6px 0; border-bottom: 1px solid #232c37; }
+.mon-menu-body section:last-child { border-bottom: 0; }
+.mon-menu-body h4 {
+  margin: 2px 0 5px; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .09em; color: #7d8b9c; font-weight: 600;
+}
+.mon-row { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin: 3px 0; }
+.mon-row > span { color: var(--text); }
+.mon-row select { flex: 0 0 96px; }
+.mon-row input[type="number"] { width: 58px; }
+.mon-row input[type="range"] { flex: 1 1 auto; }
+.mon-menu-chk { display: flex; align-items: center; gap: 6px; margin: 3px 0; cursor: pointer; }
+.mon-menu-chk input { margin: 0; }
+.mon-menu-chk em { color: #6f7d8e; font-style: normal; font-size: 10.5px; }
+.mon-menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 8px; }
+.mon-menu-note { color: #6f7d8e; font-size: 10.5px; line-height: 1.35; margin-top: 5px; }
+.mon-mark-list { max-height: 118px; overflow: auto; }
+.mon-mark-row { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+.mon-mark-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.mon-pop {
+  position: fixed; z-index: 90; min-width: 118px; padding: 5px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+  box-shadow: 0 14px 34px rgba(0,0,0,.55); font-size: 12px;
+}
+.mon-pop-head { font-size: 10.5px; color: #7d8b9c; text-transform: uppercase; letter-spacing: .08em; padding: 2px 4px 5px; }
+.mon-zoom-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+.mon-zoom-list button {
+  text-align: left; padding: 3px 6px; border-radius: 4px; border: 0;
+  background: transparent; color: var(--text); font-size: 12px; cursor: pointer;
+}
+.mon-zoom-list button:hover { background: #2a3340; }
+
+/* --- in/out + markers on the timeline ruler ------------------------------ */
+.mon-marks { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+.mon-io { position: absolute; top: 0; bottom: 0; background: rgba(88,166,255,.10); }
+.mon-ioflag { position: absolute; top: 0; width: 2px; height: 100%; background: var(--accent-2); opacity: .85; }
+.mon-ioflag.o { background: #d29922; }
+.mon-mark {
+  position: absolute; top: 0; width: 9px; height: 11px; margin-left: -1px; padding: 0;
+  border: 0; background: transparent; color: #d29922; cursor: pointer; pointer-events: auto;
+}
+.mon-mark svg { width: 9px; height: 11px; fill: currentColor; display: block; }
+.mon-mark:hover { color: #ffd166; }
+
+/* ---------------------------------------------- Program Monitor: on-picture gizmo
+ * #monGizmo (and the #gizSvg the module builds inside it) floats over the
+ * picture. The root never eats pointer events: the handles opt in one by one,
+ * and everything else falls through to the stage's own hit-testing. */
+.mon-gizmo {
+  position: absolute; inset: 0; z-index: 6;
+  pointer-events: none;
+}
+.giz-svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  overflow: visible; pointer-events: none;
+}
+.giz-svg .giz-outline {
+  fill: none; stroke: var(--accent-2); stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.giz-svg .giz-dim { stroke: rgba(88,166,255,.45); stroke-dasharray: 4 4; }
+.giz-svg .giz-crop-window { stroke: var(--accent); }
+.giz-svg .giz-ghost {
+  fill: none; stroke: rgba(230,237,243,.35); stroke-dasharray: 3 5;
+  stroke-width: 1; vector-effect: non-scaling-stroke;
+}
+.giz-svg .giz-body { fill: transparent; pointer-events: auto; cursor: move; }
+.giz-svg .giz-mask {
+  fill: rgba(88,166,255,.10); stroke: var(--accent-2); stroke-width: 1.5;
+  stroke-dasharray: 6 3; pointer-events: none;
+}
+.giz-svg .giz-mask.giz-inv { fill: rgba(248,81,73,.10); stroke: var(--cut); }
+.giz-svg .giz-h {
+  fill: var(--accent-2); stroke: #0b0f14; stroke-width: 1;
+  pointer-events: auto;
+}
+.giz-svg .giz-bar { fill: var(--accent); stroke: #0b0f14; }
+.giz-svg .giz-rot { fill: #fff; stroke: var(--accent-2); cursor: grab; }
+.giz-svg .giz-feather { fill: var(--accent); stroke: #0b0f14; cursor: ew-resize; }
+.giz-svg .giz-stem {
+  stroke: var(--accent-2); stroke-width: 1; vector-effect: non-scaling-stroke;
+  pointer-events: none;
+}
+.giz-svg .giz-label {
+  fill: #cfe3ff; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  paint-order: stroke; stroke: rgba(6,10,15,.85); stroke-width: 3;
+  pointer-events: none;
+}
+.preview-stage.giz-on { cursor: default; }
+
+.giz-hud {
+  position: absolute; left: 8px; bottom: 8px; z-index: 7;
+  display: flex; align-items: center; gap: 4px;
+  padding: 4px 6px; border-radius: 7px;
+  background: rgba(12,17,23,.88); border: 1px solid var(--line);
+  box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  font-size: 11px; color: var(--text);
+}
+.giz-hud[hidden] { display: none; }
+.giz-hud .giz-tool {
+  all: unset; cursor: pointer; padding: 3px 7px; border-radius: 5px;
+  color: var(--dim); font-size: 11px; border: 1px solid transparent;
+}
+.giz-hud .giz-tool:hover { color: var(--text); background: var(--panel-2); }
+.giz-hud .giz-tool.on {
+  color: #0b0f14; background: var(--accent-2); border-color: var(--accent-2);
+  font-weight: 600;
+}
+.giz-hud .giz-x { padding: 3px 6px; font-size: 13px; line-height: 1; }
+.giz-hud .giz-read {
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--dim); padding: 0 4px; min-width: 40px;
+}
+.ins-check {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--dim); cursor: pointer;
+}
+.ins-check input { margin: 0; }
+
+/* Keyframe diamonds along the foot of an animated clip block. */
+.clip .kfstrip {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 9px;
+  pointer-events: none; z-index: 3;
+}
+.clip .kfdot {
+  position: absolute; top: 2px; width: 6px; height: 6px; margin-left: -3px;
+  background: #ffd166; border: 1px solid rgba(6,10,15,.75);
+  transform: rotate(45deg); border-radius: 1px;
+}
+.clip.selected .kfdot { background: #fff0b8; }
