@@ -204,3 +204,86 @@ def test_copy_request_that_cannot_stream_copy_says_why(tmp_path):
     done = export(clips, tmp_path / "note.mp4", mode="copy")
     assert done["kind"] == "reencode"
     assert "re-encoded" in (done.get("note") or "")
+
+
+# ------------------------------------------------ exporting with no trim at all
+#
+# The bug this guards: opening a video and pressing Export without cutting
+# anything died in the stream-copy fast path (it unpacked two values from the
+# bin resolver, which answers three), so the only way to get a file out was to
+# make a cut first. Nobody should have to trim to burn captions.
+
+def test_the_bin_resolver_three_tuple_does_not_break_the_copy_path(tmp_path):
+    info = probe(str(DEMO))
+    clips = [{"id": "c", "src": "src", "start": 0.0, "end": 6.0, "in": 0.0}]
+    opts = {**source_match_profile(info), "mode": "copy"}
+    job = edl_mod.export_timeline(
+        str(DEMO), info, clips, opts, str(tmp_path / "x.mp4"),
+        media=lambda asset_id: (str(DEMO), "video", True))
+    assert job["kind"] == "copy"
+    assert wait_job(job["id"])["state"] == "done"
+
+
+def test_an_untouched_clip_exports_the_whole_video(tmp_path):
+    info = probe(str(DEMO))
+    whole = [{"id": "c", "src": "src", "start": 0.0,
+              "end": float(info["duration"]), "in": 0.0}]
+    opts = {**source_match_profile(info), "mode": "copy"}
+    job = edl_mod.export_timeline(
+        str(DEMO), info, whole, opts, str(tmp_path / "whole.mp4"),
+        media=lambda asset_id: (str(DEMO), "video", True))
+    done = wait_job(job["id"])
+    assert done["state"] == "done", done.get("error")
+    assert done["kind"] == "copy"
+    assert abs(duration_of(tmp_path / "whole.mp4") - info["duration"]) < 0.2
+
+
+def test_the_note_names_captions_when_they_force_a_re_encode(tmp_path):
+    clips = [{"start": 0.0, "end": 4.0, "in": 0.0}]
+    srt = tmp_path / "burn.srt"
+    srt.write_text("1\n00:00:00,500 --> 00:00:02,000\nhalo\n\n", encoding="utf-8")
+    info = probe(str(DEMO))
+    opts = {**source_match_profile(info), "mode": "copy", "burn_srt": str(srt)}
+    job = edl_mod.export_timeline(str(DEMO), info, clips, opts,
+                                  str(tmp_path / "burn.mp4"),
+                                  media=lambda asset_id: (str(DEMO), "video", True))
+    assert job["kind"] == "reencode"
+    assert "burned-in captions" in (job.get("note") or "")
+    assert wait_job(job["id"])["state"] == "done"
+
+
+def test_api_exports_an_untrimmed_timeline(client, tmp_path):
+    client.post("/api/open", json={"path": str(DEMO)})
+    dur = float(probe(str(DEMO))["duration"])
+    out = tmp_path / "api_whole.mp4"
+    r = client.post("/api/export/timeline", json={
+        "output": str(out), "opts": {"mode": "copy"},
+        "timeline": {"clips": [{"id": "c", "start": 0, "end": dur, "in": 0}],
+                     "caps": []}})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["kind"] == "copy"
+    assert wait_job(job["id"])["state"] == "done"
+    assert abs(duration_of(out) - dur) < 0.2
+
+
+def test_api_burns_captions_on_an_untrimmed_timeline(client, tmp_path):
+    client.post("/api/open", json={"path": str(DEMO)})
+    dur = float(probe(str(DEMO))["duration"])
+    out = tmp_path / "api_burn.mp4"
+    r = client.post("/api/export/timeline", json={
+        "output": str(out), "opts": {"mode": "copy"}, "caption_mode": "burn",
+        "caption_style": {"font_size": 6},
+        "timeline": {"clips": [{"id": "c", "start": 0, "end": dur, "in": 0}],
+                     "caps": [{"id": "k", "start": 1, "end": 4, "lane": 0,
+                               "text": "TANPA TRIM", "style": {}}]}})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["kind"] == "reencode"
+    assert "burned-in captions" in (job.get("note") or "")
+    assert job["captions"]["burned"] is True
+    assert wait_job(job["id"])["state"] == "done"
+    assert abs(duration_of(out) - dur) < 0.3
+    # The sidecar proves the cue went through the remap; the pixels of a burn
+    # are checked in tests/test_caption.py.
+    assert (tmp_path / "api_burn.srt").read_text(encoding="utf-8").find("TANPA TRIM") >= 0

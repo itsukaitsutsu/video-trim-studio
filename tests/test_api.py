@@ -453,3 +453,47 @@ def test_browse_skips_unreadable_entries_instead_of_failing(client, tmp_path, mo
     monkeypatch.setattr(server.Path, "is_dir", flaky)
     body = client.get("/api/browse", params={"path": str(tmp_path)}).json()
     assert [f["name"] for f in body["files"]] == ["good.mp4"]
+
+
+def test_export_keeps_the_whole_video_when_nothing_is_cut(client, source, tmp_path):
+    """No deletions is a valid job: burning captions on the full take."""
+    assert client.post("/api/open", json={"path": source}).status_code == 200
+    out = tmp_path / "whole.mp4"
+    r = client.post("/api/export", json={"output": str(out), "deletions": [],
+                                         "opts": {"mode": "copy"}})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = client.get(f"/api/job/{job['id']}").json()
+        if state["state"] != "running":
+            break
+        time.sleep(0.2)
+    assert state["state"] == "done", state.get("error")
+    assert abs(float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True,
+        check=True).stdout) - DUR) < 0.3
+
+
+def test_export_burns_captions_with_nothing_cut(client, source, tmp_path):
+    assert client.post("/api/open", json={"path": source}).status_code == 200
+    srt = tmp_path / "cues.srt"
+    srt.write_text(SRT, encoding="utf-8")
+    out = tmp_path / "burn.mp4"
+    r = client.post("/api/export", json={
+        "output": str(out), "deletions": [], "opts": {"mode": "copy"},
+        "caption_mode": "burn", "caption_style": {"font_size": 5},
+        "subtitles_path": str(srt)})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["kind"] == "reencode"
+    assert "burned" in (job.get("note") or "").lower()
+    assert job["captions"]["cues_out"] == 2
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = client.get(f"/api/job/{job['id']}").json()
+        if state["state"] != "running":
+            break
+        time.sleep(0.2)
+    assert state["state"] == "done", state.get("error")

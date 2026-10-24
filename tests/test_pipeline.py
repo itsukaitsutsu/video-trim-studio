@@ -153,11 +153,26 @@ def test_export_matches_source_profile(source, tmp_path):
     assert out_kbps > src_kbps * 0.25, f"video bitrate collapsed: {out_kbps} vs {src_kbps}"
 
 
-def test_export_rejects_empty_and_total_selection(source, tmp_path):
+def test_export_keeps_everything_but_still_rejects_cutting_it_all(source, tmp_path):
     info = probe(source)
     prof = source_match_profile(info)
-    with pytest.raises(export.JobError):
-        export.export(source, info, [], prof, str(tmp_path / "x.mp4"))
+    # An empty cut list means "keep the whole video" - the job that burns
+    # captions on an untouched take. It must run, not raise.
+    out = tmp_path / "whole.mp4"
+    job = export.export(source, info, [], prof, str(out))
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        state = export.get_job(job["id"])
+        if state["state"] in ("done", "error"):
+            break
+        time.sleep(0.25)
+    state = export.get_job(job["id"])
+    assert state["state"] == "done", state.get("error")
+    assert abs(float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(out)], capture_output=True, text=True,
+        check=True).stdout) - DUR) < 0.3
+    # Cutting the whole thing is still a mistake.
     with pytest.raises(export.JobError):
         export.export(source, info, [[0.0, DUR]], prof, str(tmp_path / "x.mp4"))
 

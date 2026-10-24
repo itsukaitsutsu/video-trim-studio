@@ -110,6 +110,33 @@ def _ass_alpha(opacity: float) -> str:
     return f"&H{alpha:02X}&"
 
 
+def marker_path(w: float, h: float, radius: float) -> str:
+    """An ASS drawing path for the word marker: a rounded rectangle.
+
+    Coordinates are script pixels (a drawing is not scaled by \fs), so the
+    rectangle is exactly the size asked for. `b` is a cubic bezier, which is
+    how the corners round; a radius of 0 falls back to four straight sides.
+    """
+    w = max(1.0, float(w))
+    h = max(1.0, float(h))
+    r = max(0.0, min(float(radius), w / 2.0, h / 2.0))
+    if r < 0.75:
+        return (f"m 0 0 l {w:.1f} 0 l {w:.1f} {h:.1f} "
+                f"l 0 {h:.1f} l 0 0")
+    c = 0.5523 * r          # the control offset that makes a circle
+    return (
+        f"m {r:.1f} 0 "
+        f"l {w - r:.1f} 0 "
+        f"b {w - r + c:.1f} 0 {w:.1f} {r - c:.1f} {w:.1f} {r:.1f} "
+        f"l {w:.1f} {h - r:.1f} "
+        f"b {w:.1f} {h - r + c:.1f} {w - r + c:.1f} {h:.1f} {w - r:.1f} {h:.1f} "
+        f"l {r:.1f} {h:.1f} "
+        f"b {r - c:.1f} {h:.1f} 0 {h - r + c:.1f} 0 {h - r:.1f} "
+        f"l 0 {r:.1f} "
+        f"b 0 {r - c:.1f} {r - c:.1f} 0 {r:.1f} 0"
+    )
+
+
 def ass_time(seconds: float) -> str:
     """ASS timestamp: H:MM:SS.cc (centiseconds)."""
     seconds = max(0.0, float(seconds))
@@ -124,6 +151,24 @@ def ass_time(seconds: float) -> str:
 # with these, which is what makes the preview match the burn.
 CHAR_FACTOR = 0.55
 LINE_H_FACTOR = 1.25
+# How far one glyph advances, as a fraction of the font size - the number the
+# word marker's boxes are laid out with. A monospaced face (the default) has a
+# fixed advance; a proportional one averages a little less. Only highlight
+# geometry uses this; wrapping keeps CHAR_FACTOR so no line breaks move.
+MONO_FONTS = ("lucida console", "consolas", "courier", "mono", "menlo",
+              "monaco", "inconsolata", "fira code", "source code", "roboto mono",
+              "jetbrains mono", "ibm plex mono", "space mono")
+# Measured off the burn itself (libass, 0.588 of \fs for both the mono and
+# the proportional fallback here). The marker's padding takes up the few
+# percent a different face is off by, so the box still hugs the word.
+ADVANCE_MONO = 0.588
+ADVANCE_PROP = 0.588
+
+
+def advance_factor(font: str) -> float:
+    """The per-glyph advance of `font`, as a fraction of its size."""
+    name = str(font or "").lower()
+    return ADVANCE_MONO if any(m in name for m in MONO_FONTS) else ADVANCE_PROP
 
 
 def wrap_lines(text: str, max_chars: int) -> list[str]:
@@ -161,7 +206,14 @@ DEFAULT_STYLE = {"x": 0.5, "y": 0.92, "size_pct": 4.5,
                  "shadow_blur": 12, "box_h": 0,
                  # Text animation (Inspector > Text animation).
                  "anim_in": "none", "anim_ms": 400, "anim_words": "none",
-                 "anim_stagger": 120, "anim_pop": 130, "highlight": "#ffd400"}
+                 "anim_stagger": 120, "anim_pop": 130, "highlight": "#ffd400",
+                 # Word highlight (Inspector > Typography > Word highlight):
+                 # what marks the spoken word and how. "color" is the plain
+                 # accent the karaoke mode always had; "bg" paints a marker
+                 # behind the word, "both" does the two together.
+                 "hl_mark": "color", "hl_span": "word",
+                 "hl_bg": "#101418", "hl_bg_opacity": 85,
+                 "hl_pad": 12, "hl_radius": 22}
 
 
 def _cue_events(cue: dict, st: dict, width: int, height: int,
@@ -240,6 +292,8 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
     # every Dialogue exactly as it was before this feature existed.
     anim_in = str(st.get("anim_in") or "none")
     anim_words = str(st.get("anim_words") or "none")
+    if anim_words == "karaoke":     # the name before it became configurable
+        anim_words = "word"
     try:
         anim_ms = max(0, min(4000, int(float(st.get("anim_ms") or 0))))
     except (TypeError, ValueError):
@@ -252,7 +306,31 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
         stagger = max(0.0, min(4.0, float(st.get("anim_stagger") or 0))) / 1000.0
     except (TypeError, ValueError):
         stagger = 0.12
-    highlight = _ass_colour(st.get("highlight") or "#ffd400")
+    highlight_hex = str(st.get("highlight") or "#ffd400")
+    highlight = _ass_colour(highlight_hex)
+    # Word highlight (Inspector > Typography): what marks the spoken word.
+    hl_mark = str(st.get("hl_mark") or "color")
+    if hl_mark not in ("color", "bg", "both"):
+        hl_mark = "color"
+    hl_span = str(st.get("hl_span") or "word")
+    if hl_span not in ("word", "spoken"):
+        hl_span = "word"
+    hl_bg = _ass_colour(st.get("hl_bg") or "#101418")
+    try:
+        hl_bg_opacity = min(100.0, max(0.0, float(st.get("hl_bg_opacity", 85) or 0)))
+    except (TypeError, ValueError):
+        hl_bg_opacity = 85.0
+    try:
+        hl_pad_pct = min(40.0, max(0.0, float(st.get("hl_pad", 12) or 0)))
+    except (TypeError, ValueError):
+        hl_pad_pct = 12.0
+    try:
+        hl_radius_pct = min(50.0, max(0.0, float(st.get("hl_radius", 22) or 0)))
+    except (TypeError, ValueError):
+        hl_radius_pct = 22.0
+    # The marker is laid out with the font's own advance (see advance_factor),
+    # not the wrapping estimate, so its boxes sit under the glyphs.
+    mark_w = font_size * (advance_factor(font) + tracking)
     cue_start = float(cue["start"])
     cue_end = float(cue["end"])
     start, end = ass_time(cue_start), ass_time(cue_end)
@@ -282,7 +360,8 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
 
     def emit_line(text: str, an: int, px: float, py: float,
                   t0: str | None = None, t1: str | None = None,
-                  extra: str = "") -> list[str]:
+                  extra: str = "", shadow_text: str | None = None,
+                  entry: bool = True) -> list[str]:
         out: list[str] = []
         a = start if t0 is None else t0
         b = end if t1 is None else t1
@@ -295,8 +374,10 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
                            f"\\1a{alpha}\\3a{alpha}\\4a&HFF&\\shad0"
                            f"\\bord{shadow_size:.2f}\\blur{shadow_blur:.2f}"
                            f"{pos_tag(an, px + shadow_x, py + shadow_y)}")
-            out.append(f"Dialogue: 0,{a},{b},{shadow_name},,0,0,0,,{{{shadow_tags}}}{text}")
-        main_tags = f"{common_tags}\\shad0\\blur0{entry_tags(an, px, py)}{extra}"
+            out.append(f"Dialogue: 0,{a},{b},{shadow_name},,0,0,0,,"
+                       f"{{{shadow_tags}}}{text if shadow_text is None else shadow_text}")
+        tags = entry_tags(an, px, py) if entry else pos_tag(an, px, py)
+        main_tags = f"{common_tags}\\shad0\\blur0{tags}{extra}"
         out.append(f"Dialogue: 1,{a},{b},{style_name},,0,0,0,,{{{main_tags}}}{text}")
         return out
 
@@ -376,35 +457,101 @@ def _cue_events(cue: dict, st: dict, width: int, height: int,
                 events.extend(emit_line(part, an, px, py, ass_time(t0), ass_time(t1)))
         return events
 
-    if anim_words == "karaoke" and tokens:
-        # ASS's \k clock: each word switches from the secondary colour (not yet
-        # spoken) to the primary one (spoken). The highlight colour rides on
-        # \1c, the caption fill on \2c.
-        idx = 0
-        for line, an, px, py in placed:
-            parts = line.split()
-            if not parts:
+    if anim_words == "word" and tokens:
+        # One picture per word window, the way the program monitor paints
+        # it: the caption's own lines with the marked words in the accent
+        # and/or over a marker box, plus a rounded rectangle behind each
+        # marked word. A \k clock cannot do this - it only ever swaps the
+        # text's two colours - so the windows are emitted explicitly.
+        anim_end = cue_start + (anim_ms / 1000.0 if anim_in != "none" else 0.0)
+        anim_end = min(cue_end, max(cue_start, anim_end))
+        pad_px = font_size * hl_pad_pct / 100.0
+        radius_px = font_size * hl_radius_pct / 100.0
+        box_h_px = font_size * 1.16 + 2 * pad_px
+        want_bg = hl_mark in ("bg", "both") and hl_bg_opacity > 0
+        want_ink = hl_mark in ("color", "both")
+        bg_alpha = _ass_alpha(hl_bg_opacity)
+
+        def word_rows() -> list[tuple[list[str], list[float], float, int]]:
+            """(words, each word's centre x, line baseline, index of the
+            row's first word) for every wrapped line.
+
+            A marked word is drawn on its own, at the centre given here, so
+            the text and its marker box cannot drift apart: both use this
+            one number. The advance is the font's own (advance_factor), not
+            the wrapping estimate, which is why the boxes land under the
+            glyphs. Justify spreads the row to the box, as it does in the
+            static path.
+            """
+            rows = []
+            first = 0
+            for line, an, px, py in placed:
+                parts = line.split()
+                if not parts:
+                    continue
+                if align == "justify" and box_px and len(parts) > 1:
+                    widths = [len(w) * mark_w for w in parts]
+                    gap = (box_px - sum(widths)) / max(1, len(parts) - 1)
+                    xs, xc = [], left_x
+                    for wd in widths:
+                        xs.append(xc + wd / 2.0)
+                        xc += wd + gap
+                else:
+                    total = len(line) * mark_w
+                    x0 = px if an == 4 else (px - total if an == 6 else px - total / 2.0)
+                    xs, off = [], 0
+                    for w in parts:
+                        xs.append(x0 + (off + len(w) / 2.0) * mark_w)
+                        off += len(w) + 1
+                rows.append((parts, xs, py, first))
+                first += len(parts)
+            return rows
+
+        rows = word_rows()
+        events = []
+        # The entrance plays unmarked first: the caption arrives, then the
+        # words begin lighting up under it.
+        if anim_end > cue_start + 1e-4:
+            for line, an, px, py in placed:
+                events.extend(emit_line(line, an, px, py,
+                                        ass_time(cue_start), ass_time(anim_end)))
+        for k in range(len(times)):
+            t0 = max(times[k][0], anim_end)
+            t1 = min(cue_end, times[k + 1][0] if k + 1 < len(times) else cue_end)
+            if t1 <= t0 + 1e-4:
                 continue
-            body = ""
-            cursor = cue_start
-            for word in parts:
-                if idx >= len(times):
-                    break
-                ws, we = times[idx]
-                idx += 1
-                gap = max(0, int(round((ws - cursor) * 100)))
-                dur = max(1, int(round((we - ws) * 100)))
-                if gap:
-                    body += f"{{\\k{gap}}}"
-                body += f"{{\\k{dur}}}{word} "
-                cursor = we
-            if not body:
-                continue
-            extra = f"\\1c{highlight}\\2c{fill}"
-            events.extend(emit_line(body.rstrip(), an, px, py, extra=extra))
+            marked = set(range(k + 1)) if hl_span == "spoken" else {k}
+            a, b = ass_time(t0), ass_time(t1)
+            for parts, xs, py, first in rows:
+                for j, word in enumerate(parts):
+                    if (first + j) not in marked:
+                        continue
+                    if want_bg:
+                        wpx = len(word) * mark_w + 2 * pad_px
+                        path = marker_path(wpx, box_h_px, radius_px)
+                        bx = xs[j] - wpx / 2.0
+                        by = py - box_h_px / 2.0
+                        tags = (f"\\an7\\pos({bx:.1f},{by:.1f})\\p1\\bord0"
+                                f"\\shad0\\blur0\\1c{hl_bg}\\1a{bg_alpha}")
+                        events.append(f"Dialogue: 0,{a},{b},{style_name},,0,0,0,,"
+                                      f"{{{tags}}}{path}{{\\p0}}")
+                    ink = (f"{{\\1c{highlight}}}{word}{{\\1c{fill}}}"
+                           if want_ink else word)
+                    events.extend(emit_line(ink, 5, xs[j], py, a, b,
+                                            shadow_text=word, entry=False))
+            # Words nobody marked still have to stay on screen while this
+            # window plays: draw them, without the accent, over the marker.
+            for parts, xs, py, first in rows:
+                for j, word in enumerate(parts):
+                    if (first + j) in marked:
+                        continue
+                    events.extend(emit_line(word, 5, xs[j], py, a, b,
+                                            shadow_text=word, entry=False))
         if events:
             return events
-        # nothing could be timed (no tokens) - fall through to the static path
+
+        # Nothing could be timed (no words, or every window collapsed) -
+        # fall through to the static path, which draws the whole line.
 
     # ---- static layout (the default) ------------------------------------
     for li, (line, an, px, py) in enumerate(placed):

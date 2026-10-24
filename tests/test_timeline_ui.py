@@ -655,10 +655,10 @@ def test_workspace_units_tabs_hide_and_persist(browser_page):
     assert inspector.evaluate(zone_of) == "right"
     assert timeline.evaluate(zone_of) == "bottom"
 
-    # Tabbed units: inspector (Inspector/Sections/Export) and bottom (Timeline).
-    # Clip and Text are no longer tabs of their own - they are the two halves
-    # of the one Inspector panel.
-    assert page.locator("#inspTabs [role=tab]").count() == 3
+    # Tabbed units: inspector (Inspector/Sections/Export/Keyframes) and bottom
+    # (Timeline). Clip and Text are no longer tabs of their own - they are the
+    # two halves of the one Inspector panel.
+    assert page.locator("#inspTabs [role=tab]").count() == 4
     assert page.locator("#botTabs [role=tab]").count() == 1
     assert page.locator("#tab-list").is_visible()
     assert page.locator("#tab-inspector").is_visible() is False
@@ -891,10 +891,10 @@ def test_units_group_by_drop_and_ungroup(browser_page):
     page.click("#workspaceReset")
     # A reset puts the tabbed panels back in their hosts and nothing else
     # is grouped; Project returns to the left zone.
-    assert page.locator("[data-dyn-tab]").count() == 4
+    assert page.locator("[data-dyn-tab]").count() == 5
     assert page.evaluate("JSON.stringify(WS.host)") == (
         '{"clip":"inspector","list":"inspector",'
-        '"export":"inspector","tl":"timeline"}')
+        '"export":"inspector","keys":"inspector","tl":"timeline"}')
     assert project.evaluate("el => el.parentElement.dataset.workspaceColumn") == "left"
     assert not page_errors, page_errors
 
@@ -1342,8 +1342,9 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
           return out;
         }""")
 
-    # Default layout: List is tabbed in the Inspector, not the Timeline group.
-    assert tabs("inspTabs") == ["clip", "list", "export"], tabs("inspTabs")
+    # Default layout: List is tabbed in the Inspector, not the Timeline group,
+    # and the Keyframes panel sits beside it.
+    assert tabs("inspTabs") == ["clip", "list", "export", "keys"], tabs("inspTabs")
     assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
@@ -1353,7 +1354,7 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     # 1. Pull List out of the Inspector group, into the left zone.
     _drag_panel(page, page.locator("#inspTabs [data-tab='list']"),
                 page.locator("[data-workspace-column='left']"), to_bottom_edge=True)
-    assert tabs("inspTabs") == ["clip", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["clip", "export", "keys"], tabs("inspTabs")
     assert zones()["left"] == ["project", "list"], zones()
     assert page.evaluate("WS.host.list") in (None, "")
     # The panel moved intact: its own content came with it.
@@ -1362,7 +1363,7 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     # 2. Pull Clip out of the Inspector and group it into the Program Monitor.
     _drag_panel(page, page.locator("#inspTabs [data-tab='clip']"),
                 page.locator("[data-workspace-panel='program']"))
-    assert tabs("inspTabs") == ["export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["export", "keys"], tabs("inspTabs")
     assert page.evaluate("WS.host.clip") == "program"
     assert page.evaluate("JSON.stringify(UNIT_TABS.program)") == '["program","clip"]'
     assert page.locator("[data-workspace-panel='program'] [data-wintab='clip']").count() == 1
@@ -1375,11 +1376,11 @@ def test_every_panel_can_be_pulled_out_of_its_group_and_regrouped(browser_page):
     page.wait_for_timeout(500)
     assert page.evaluate("WS.host.clip") == "program"
     assert page.evaluate("WS.host.list") in (None, "")
-    assert tabs("inspTabs") == ["export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["export", "keys"], tabs("inspTabs")
 
     page.evaluate("resetWorkspace()")
     page.wait_for_timeout(400)
-    assert tabs("inspTabs") == ["clip", "list", "export"], tabs("inspTabs")
+    assert tabs("inspTabs") == ["clip", "list", "export", "keys"], tabs("inspTabs")
     assert tabs("botTabs") == ["tl"], tabs("botTabs")
     assert zones() == {"left": ["project"], "center": ["program"],
                        "right": ["inspector"], "bottom": ["timeline"]}
@@ -1525,7 +1526,7 @@ def test_inspector_panel_holds_clip_and_text_together(browser_page):
     page.click('#inspTabs [data-tab="clip"]')
 
     assert page.locator("#inspTabs [role=tab]").all_inner_texts() == [
-        "Inspector", "Sections", "Export"]
+        "Inspector", "Sections", "Export", "Keyframes"]
     assert page.locator('[data-workspace-panel="clip"] .ws-title').inner_text() == "Inspector"
     assert page.locator("#inspScope [data-insp-scope='clip']").get_attribute(
         "aria-selected") == "true"
@@ -1585,9 +1586,9 @@ def test_inspector_panel_holds_clip_and_text_together(browser_page):
 
     # Text animation is stored on the caption style (and burned on export).
     page.select_option("#insAnimIn", "pop")
-    page.select_option("#insAnimWords", "karaoke")
+    page.select_option("#insAnimWords", "word")
     assert page.evaluate("S.tl.caps[0].style.anim_in") == "pop"
-    assert page.evaluate("S.tl.caps[0].style.anim_words") == "karaoke"
+    assert page.evaluate("S.tl.caps[0].style.anim_words") == "word"
     assert page.evaluate("S.tl.caps[0].style.anim_ms") > 0
     assert not page_errors, page_errors
 

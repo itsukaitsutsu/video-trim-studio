@@ -1436,18 +1436,34 @@ def test_typewriter_reveals_characters():
     assert texts == ["a", "ab", "abc"]
 
 
-def test_karaoke_and_word_reveal_use_word_timings():
+def test_word_highlight_and_word_reveal_use_word_timings():
     from vts.captionmap import DEFAULT_STYLE
     words = [{"w": "one", "s": 0.0, "e": 0.4},
              {"w": "two", "s": 0.4, "e": 0.8},
              {"w": "three", "s": 0.8, "e": 1.2}]
     kara = _ass_for([{"start": 0, "end": 1.2, "text": "one two three",
                       "words": words,
-                      "style": dict(DEFAULT_STYLE, anim_words="karaoke",
+                      "style": dict(DEFAULT_STYLE, anim_words="word",
                                     highlight="#ffd400", shadow_opacity=0)}])
-    body = kara[0].split("}", 1)[1]
-    assert body.count("\\k") >= 3            # one \k clock entry per word
-    assert "\\1c&H00d4ff&" in kara[0]        # #ffd400 as ASS BGR
+    # One picture per word window: every word stays on screen (each drawn at
+    # its own spot) and only the one being spoken carries the accent.
+    assert len(kara) == 9, kara
+    times = [e.split(",")[1] for e in kara]
+    assert times == ["0:00:00.00"] * 3 + ["0:00:00.40"] * 3 + ["0:00:00.80"] * 3
+    accents = [e for e in kara if "\\1c&H00d4ff&" in e]   # #ffd400 as ASS BGR
+    assert len(accents) == 3
+    def glowing(line):
+        """The word drawn in the accent colour."""
+        import re as _re
+        m = _re.search(r"\\1c&H00d4ff&\}([^\\{]*)", line)
+        return (m.group(1) if m else "").strip()
+    assert [glowing(e) for e in accents] == ["one", "two", "three"]
+    # Older documents call it "karaoke" and burn the same way.
+    legacy = _ass_for([{"start": 0, "end": 1.2, "text": "one two three",
+                        "words": words,
+                        "style": dict(DEFAULT_STYLE, anim_words="karaoke",
+                                      shadow_opacity=0)}])
+    assert len(legacy) == 9
     reveal = _ass_for([{"start": 0, "end": 1.2, "text": "one two three",
                         "words": words,
                         "style": dict(DEFAULT_STYLE, anim_words="reveal",
@@ -1461,10 +1477,124 @@ def test_animation_keys_survive_the_caption_style_cleaner():
                       "anim_stagger": -5, "anim_pop": 900, "highlight": "red"})
     assert st["anim_in"] == "bounce"
     assert st["anim_ms"] == 4000
-    assert st["anim_words"] == "karaoke"
+    assert st["anim_words"] == "word"        # the old name for the same thing
     assert st["anim_stagger"] == 0
     assert st["anim_pop"] == 220.0
     assert st["highlight"] == "#ffd400"     # invalid colour falls back
     junk = clean_style({"anim_in": "spin", "anim_words": "teleport"})
     assert junk["anim_in"] == "none"
     assert junk["anim_words"] == "none"
+
+
+# ---------------------------------------------------- word highlight (marker)
+
+def _hl_cue(**style):
+    from vts.captionmap import DEFAULT_STYLE
+    words = [{"w": "KARAOKE", "s": 0.0, "e": 0.6},
+             {"w": "NOW", "s": 0.6, "e": 1.2},
+             {"w": "USES", "s": 1.2, "e": 1.8},
+             {"w": "A", "s": 1.8, "e": 2.2},
+             {"w": "MARKER", "s": 2.2, "e": 3.0}]
+    return {"start": 0, "end": 3.0, "text": "KARAOKE NOW USES A MARKER",
+            "words": words,
+            "style": dict(DEFAULT_STYLE, anim_words="word", shadow_opacity=0,
+                          **style)}
+
+
+def test_marker_mode_paints_a_rounded_box_behind_the_word():
+    from vts.captionmap import DEFAULT_STYLE
+    import re
+    cue = _hl_cue(hl_mark="bg", hl_bg="#ffd400", hl_bg_opacity=100,
+                  hl_pad=12, hl_radius=30)
+    lines = _ass_for([cue])
+    boxes = [l for l in lines if "\\p1" in l]
+    ink = [l for l in lines if "\\p1" not in l]
+    # One box per word window, and no word recoloured: the marker does that.
+    assert len(boxes) == 5, boxes
+    assert all("\\1c&H00d4ff&" in b for b in boxes)          # #ffd400 as BGR
+    assert not any("\\1c&H00d4ff&" in l for l in ink)
+    # The path is a closed rounded rectangle (unit-tested on its own below).
+    path = boxes[0].split("}", 1)[1].rsplit("{\\p0}", 1)[0]
+    assert path.startswith("m ") and path.rstrip().endswith("0")
+    assert path.count(" b ") == 4                     # four rounded corners
+    # Every glyph is still drawn - the words nobody is saying included.
+    assert len([l for l in ink if l.endswith("USES") or "USES" in l]) >= 1
+
+
+def test_marker_can_carry_every_spoken_word_and_the_colour_too():
+    cue = _hl_cue(hl_mark="both", hl_bg="#39ff88", hl_span="spoken",
+                  hl_bg_opacity=60)
+    lines = _ass_for([cue])
+    boxes = [l for l in lines if "\\p1" in l]
+    # 1 box in the first window, 2 in the second ... 5 in the last.
+    assert len(boxes) == 1 + 2 + 3 + 4 + 5
+    assert all("\\1a&H66&" in b for b in boxes)             # 60 % opaque
+    assert all("\\1c&H88ff39&" in b for b in boxes)         # #39ff88 as BGR
+    assert any("\\1c&H00d4ff&" in l for l in lines if "\\p1" not in l)
+
+
+def test_marker_colour_and_opacity_survive_the_style_cleaner():
+    from vts.captions import clean_style
+    st = clean_style({"anim_words": "karaoke", "hl_mark": "bg", "hl_span": "spoken",
+                      "hl_bg": "#00ff00", "hl_bg_opacity": 40, "hl_pad": 99,
+                      "hl_radius": 99})
+    assert st["anim_words"] == "word"
+    assert (st["hl_mark"], st["hl_span"]) == ("bg", "spoken")
+    assert st["hl_bg"] == "#00ff00"
+    assert st["hl_bg_opacity"] == 40.0
+    assert st["hl_pad"] == 40.0 and st["hl_radius"] == 50.0   # clamped
+    junk = clean_style({"hl_mark": "sparkle", "hl_span": "all", "hl_bg": "red"})
+    assert (junk["hl_mark"], junk["hl_span"]) == ("color", "word")
+    assert junk["hl_bg"] == "#101418"
+
+
+def test_the_marker_is_burned_where_the_word_is(tmp_path):
+    """Render the caption and look at the pixels: the box sits on the word."""
+    import subprocess
+    import pytest as _pytest
+    from PIL import Image
+    from vts.captionmap import write_ass
+    if not (_which("ffmpeg")):
+        _pytest.skip("ffmpeg not installed")
+    cue = _hl_cue(hl_mark="bg", hl_bg="#ffe000", hl_bg_opacity=100,
+                  hl_pad=10, hl_radius=25, size_pct=9, align="center")
+    ass = tmp_path / "hl.ass"
+    write_ass([cue], ass, 640, 360, cue["style"])
+    png = tmp_path / "hl.png"
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi",
+                    "-i", "color=c=0x101820:s=640x360:d=4",
+                    "-vf", f"subtitles={ass}", "-ss", "1.5", "-frames:v", "1",
+                    "-y", str(png)], check=True)
+    im = Image.open(png).convert("RGB")
+    yellow = [(x, y) for y in range(im.height) for x in range(im.width)
+              if im.getpixel((x, y))[0] > 180 and im.getpixel((x, y))[2] < 90]
+    assert yellow, "no marker painted"
+    xs = [p[0] for p in yellow]
+    # "USES" is the third of five words, so the box is in the middle third of
+    # the line, not at an edge.
+    assert 0.2 < (sum(xs) / len(xs)) / im.width < 0.8
+    # The box is a filled slab, not a hairlines: at least 10 rows tall.
+    ys = [p[1] for p in yellow]
+    assert max(ys) - min(ys) >= 10
+
+
+def _which(name):
+    import shutil
+    return shutil.which(name)
+
+
+def test_the_marker_path_is_a_box_of_the_size_asked_for():
+    import re
+    from vts.captionmap import marker_path
+    sharp = marker_path(120, 48, 0)
+    assert " b " not in sharp                          # square corners
+    assert sharp == "m 0 0 l 120.0 0 l 120.0 48.0 l 0 48.0 l 0 0"
+    round_ = marker_path(120, 48, 10)
+    assert round_.count(" b ") == 4
+    nums = [float(v) for v in re.findall(r"-?\d+\.?\d*", round_)]
+    # Every coordinate stays inside the box; the corners pull it in by the
+    # radius, never past it.
+    assert min(nums) >= 0 and max(nums) <= 120
+    # A radius larger than the box is clamped to a pill, not a bow tie.
+    pill = marker_path(40, 48, 999)
+    assert " b " in pill

@@ -113,7 +113,9 @@ def build_filter_complex(segments: list[tuple[float, float]], fade_ms: int,
 
 def build_encoder_args(opts: dict) -> list[str]:
     """`opts` comes from source_match_profile(), possibly edited by the user."""
-    codec = opts["codec"]
+    # An empty picker (or a profile that found no hardware encoder) must not
+    # reach ffmpeg as -c:v "" - fall back to the software H.264 encoder.
+    codec = str(opts.get("codec") or "").strip() or "libx264"
     preset = resolve_preset(codec, opts.get("preset") or "medium")
     args = ["-c:v", codec]
 
@@ -400,9 +402,9 @@ def export(source: str, info: dict, deletions: list[tuple[float, float]],
            opts: dict, output: str) -> dict:
     """Kick off an export in a worker thread; returns the job dict."""
     duration = float(info["duration"])
-    if not deletions:
-        raise JobError("Nothing selected to delete.")
-
+    # An empty cut list is a real job, not a mistake: keep the whole video
+    # (burn captions on it, re-wrap it, change its bitrate). Requiring at
+    # least one deletion forced a trim on everyone who only wanted captions.
     merged = _merge([(max(0.0, float(s)), min(duration, float(e))) for s, e in deletions])
     if sum(e - s for s, e in merged) >= duration - 0.2:
         raise JobError("The selection covers the whole video; nothing would be left.")

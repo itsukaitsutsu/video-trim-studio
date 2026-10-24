@@ -498,11 +498,6 @@ details.adv summary:hover { color: var(--text); }
 .tool-grid.crop { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; }
 .tool-grid.crop label { justify-content: space-between; }
 .tool-grid.crop input[type=number] { width: 56px; }
-.kf-row { display: flex; align-items: center; gap: 4px; margin: 3px 0; flex-wrap: wrap; }
-.kf-row label { display: flex; align-items: center; gap: 2px; font-size: 11px; }
-.kf-row input[type=number] { width: 48px; font-size: 11px; padding: 1px 2px; }
-.kf-goto { font-variant-numeric: tabular-nums; }
-#tkInfo { margin: 2px 0 4px; }
 
 /* Premiere-style movable units + tabs (workspace v3): one attached panel per
    unit, like the mockup — the head/tab bar sticks to the body, no gap. */
@@ -1109,11 +1104,23 @@ button.mini.warn:hover:not(:disabled) { background: #b62324; border-color: #f851
   .ins-quad { grid-template-columns: 1fr; }
 }
 
-/* Karaoke / word-reveal words in the program monitor. The colour is the
-   Inspector's Highlight swatch, so preview and burn agree. */
-.cap-word { color: inherit; }
+/* Word highlight in the program monitor: the spoken word in the accent
+   colour, over a marker box, or both. The colour and the box's size come
+   from the Inspector and match what vts/captionmap.py burns. */
+.cap-word { color: inherit; position: relative; isolation: isolate; }
 .cap-word.hl { color: var(--cap-hl, #ffd400); }
-.cap-word.now { text-shadow: 0 0 12px var(--cap-hl, #ffd400); }
+/* No glow: the marker (or the accent colour) is the whole mark, so the word
+   carries no halo the burn does not draw. */
+.cap-word .cap-word-bg {
+  position: absolute; left: calc(-1 * var(--cap-hl-pad, .12em));
+  right: calc(-1 * var(--cap-hl-pad, .12em));
+  top: 50%; height: calc(1.16em + 2 * var(--cap-hl-pad, .12em));
+  transform: translateY(-50%);
+  background: var(--cap-hl-bg, rgba(16, 20, 24, .85));
+  border-radius: var(--cap-hl-radius, .22em);
+  z-index: -1;
+}
+.cap-word .cap-word-tx { position: relative; }
 
 /* Inputs inside the Inspector: the rest of the app styles its fields per
    card, so plain number/text/select needs a base here. */
@@ -1407,13 +1414,104 @@ button.mini.warn:hover:not(:disabled) { background: #b62324; border-color: #f851
 .ins-check input { margin: 0; }
 
 /* Keyframe diamonds along the foot of an animated clip block. */
-.clip .kfstrip {
-  position: absolute; left: 0; right: 0; bottom: 0; height: 9px;
-  pointer-events: none; z-index: 3;
+
+/* ------------------------------------------------------------ Keyframes panel
+ * kconcat's Keyframes pane in the web app: a knob column on the left, the
+ * clip's own length on the right as a dopesheet or as curves. */
+.kfp { display: flex; flex-direction: column; gap: 6px; height: 100%; min-height: 0; }
+.kfp-tools {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-bottom: 6px; border-bottom: 1px solid var(--line);
 }
-.clip .kfdot {
-  position: absolute; top: 2px; width: 6px; height: 6px; margin-left: -3px;
-  background: #ffd166; border: 1px solid rgba(6,10,15,.75);
-  transform: rotate(45deg); border-radius: 1px;
+.kfp-view button { padding: 3px 8px; font-size: 11px; }
+.kfp-cluster { display: inline-flex; align-items: center; gap: 2px; }
+.kfp-mini { padding: 2px 5px; font-size: 10px; line-height: 1; }
+.kfp-ease { font-size: 11px; max-width: 132px; }
+.kfp-ease:disabled { opacity: .5; }
+
+.kfp-body { display: flex; gap: 0; flex: 1; min-height: 0; }
+.kfp-rows {
+  width: 186px; flex: 0 0 186px; display: flex; flex-direction: column;
+  padding-top: 22px; /* the ruler's height */ border-right: 1px solid var(--line);
 }
-.clip.selected .kfdot { background: #fff0b8; }
+.kfp-row {
+  display: flex; align-items: center; gap: 4px; height: 34px; padding: 0 6px 0 8px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+}
+.kfp-row.on { background: rgba(88,166,255,.08); }
+.kfp-lab {
+  flex: 1; font-size: 11px; color: var(--text); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.kfp-val {
+  width: 54px; font-size: 11px; padding: 2px 4px; text-align: right;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  color: var(--text); font-variant-numeric: tabular-nums;
+}
+.kfp-cl { display: inline-flex; align-items: center; gap: 1px; }
+.kfp-dia { color: var(--dim); }
+.kfp-dia.keyed { color: var(--accent-2); }
+.kfp-dia.here { color: var(--accent); text-shadow: 0 0 6px rgba(63,185,80,.45); }
+.kfp-keybtn { font-size: 13px; }
+
+.kfp-plot { position: relative; flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
+.kfp-ruler {
+  position: relative; height: 22px; flex: 0 0 22px;
+  border-bottom: 1px solid var(--line); cursor: crosshair;
+  background: var(--panel-2);
+}
+.kfp-tick {
+  position: absolute; top: 3px; font-size: 10px; color: var(--dim);
+  transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+}
+.kfp-tick:first-child { transform: none; }
+.kfp-svg { flex: 1; min-height: 0; display: block; touch-action: none; }
+.kfp-svg .kfp-band { fill: rgba(88,166,255,.05); }
+.kfp-svg .kfp-lane { stroke: var(--line); stroke-width: 2; }
+.kfp-svg .kfp-lane.keyed { stroke: var(--line-strong, #3a4a5c); }
+.kfp-svg .kfp-rowline { stroke: rgba(255,255,255,.04); stroke-width: 1; }
+.kfp-svg .kfp-hit { fill: transparent; }
+.kfp-svg .kfp-dia-shape { fill: var(--panel); stroke: var(--accent-2); stroke-width: 1.5; }
+.kfp-svg .kfp-diamond.keyed .kfp-dia-shape,
+.kfp-svg .kfp-diamond.on .kfp-dia-shape { fill: rgba(88,166,255,.25); }
+.kfp-svg .kfp-diamond.here .kfp-dia-shape { fill: var(--accent-2); stroke: #fff; }
+.kfp-svg .kfp-dia-hit { fill: transparent; cursor: pointer; }
+.kfp-svg .kfp-grid { stroke: var(--line); stroke-width: 1; opacity: .55; }
+.kfp-svg .kfp-axis { fill: var(--dim); font: 10px ui-monospace, Menlo, monospace; }
+.kfp-svg .kfp-curve {
+  fill: none; stroke: var(--accent-2); stroke-width: 1; opacity: .22;
+  /* The path lives in clip coordinates and is scaled to the plot; without
+     this the stroke would be scaled up with it. */
+  vector-effect: non-scaling-stroke;
+}
+.kfp-svg .kfp-curve.on { stroke-width: 2; opacity: 1; }
+.kfp-svg .kfp-stalk { stroke: var(--dim); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.kfp-svg .kfp-ease { fill: var(--panel-2); stroke: var(--dim); stroke-width: 1; cursor: grab; }
+.kfp-svg .kfp-ease:hover { stroke: var(--accent-2); }
+.kfp-svg .kfp-key-hit { fill: transparent; cursor: move; }
+.kfp-svg .kfp-key-dot { fill: var(--panel); stroke: var(--accent-2); stroke-width: 1.5; }
+.kfp-svg .kfp-key.here .kfp-key-dot { fill: var(--accent-2); stroke: #fff; }
+.kfp-svg .kfp-playhead { stroke: var(--accent); stroke-width: 1; opacity: .9; }
+
+/* The Keyframes page is a panel, not a list: it takes a fixed slice of the
+ * host so the dopesheet has room, and the plot fills whatever is left. */
+#tab-keys.active { display: flex; flex-direction: column; min-height: 0; height: 420px; }
+#tab-keys .kfp { flex: 1 1 auto; min-height: 0; }
+
+/* Narrow column: the knobs go above the plot instead of beside it, so the
+ * dopesheet and the curves keep the full width of the panel. */
+.kfp-narrow .kfp-body { flex-direction: column; }
+.kfp-narrow .kfp-rows {
+  width: auto; flex: 0 0 auto; padding-top: 0; border-right: 0;
+  border-bottom: 1px solid var(--line);
+}
+.kfp-narrow .kfp-row { height: 26px; padding: 0 2px; border-bottom-color: rgba(255,255,255,.03); }
+.kfp-narrow .kfp-lab { font-size: 11px; }
+.kfp-narrow .kfp-val { width: 52px; }
+.kfp-narrow .kfp-mini { padding: 1px 4px; }
+.kfp-narrow .kfp-plot { min-height: 220px; flex: 1 1 auto; }
+.kfp-narrow .kfp-tools { gap: 4px; }
+.kfp-narrow .kfp-ease { flex: 1 1 96px; max-width: none; }
+.kfp-svg { width: 100%; }
+.kfp-tick.first { transform: none; }
+.kfp-tick.last { transform: translateX(-100%); }

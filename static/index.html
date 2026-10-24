@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Video Trim Studio</title>
-<link rel="stylesheet" href="/static/style.css?v=53">
+<link rel="stylesheet" href="/static/style.css?v=56">
 </head>
 <body>
 <header id="menubar">
@@ -444,15 +444,6 @@
               </div>
             </details>
 
-            <details open class="insp-sect">
-              <summary>Keyframes <span id="tkCount" class="dim small"></span></summary>
-              <div class="ins-body">
-                <div id="tkInfo" class="dim small"></div>
-                <div class="ins-row"><button id="tkAdd" class="mini">◆ Add at playhead</button><button id="tkClear" class="mini">Clear all</button></div>
-                <div id="tkList"></div>
-                <p class="ins-note">Keyframes animate position, size, rotation and opacity between ◆ marks. While a clip has keyframes, dragging the picture on the Program Monitor or changing X/Y/Scale/Rotation records a keyframe at the playhead — no extra button needed. Export bakes them into the video.</p>
-              </div>
-            </details>
           </div>
 
           <div class="insp-tab" data-insp-tab="audio" hidden>
@@ -574,8 +565,33 @@
             <div class="ins-row"><span class="ins-lab">Fill</span>
               <span class="grow ins-color"><label class="appearance-color"><input id="capFillEnabled" type="checkbox" checked><input id="capFill" type="color" value="#ffffff"></label><input id="capFillOpacity" type="range" min="0" max="100" value="100" aria-label="Fill opacity"><output id="capFillOpacityValue">100</output></span>
             </div>
-            <div class="ins-row"><span class="ins-lab">Highlight</span>
-              <span class="grow ins-color"><input id="insHighlight" type="color" value="#ffd400" aria-label="Spoken-word highlight colour"><span class="dim small">spoken word</span></span>
+            <div class="ins-row"><b class="ins-sub">Word highlight</b></div>
+            <div class="ins-row"><span class="ins-lab">Mark</span>
+              <select id="insHlMark" aria-label="What marks the spoken word" title="Colour the word, paint a marker behind it, or both">
+                <option value="color">Colour the word</option>
+                <option value="bg">Background marker</option>
+                <option value="both">Colour + marker</option>
+              </select>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Span</span>
+              <select id="insHlSpan" aria-label="Which words the highlight covers" title="Just the word being spoken, or every word already spoken">
+                <option value="word">Current word</option>
+                <option value="spoken">All spoken words</option>
+              </select>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Colour</span>
+              <span class="grow ins-color"><input id="insHighlight" type="color" value="#ffd400" aria-label="Spoken-word colour"><span class="dim small">spoken word</span></span>
+            </div>
+            <div class="ins-row"><span class="ins-lab">Marker</span>
+              <span class="grow ins-color"><input id="insHlBg" type="color" value="#101418" aria-label="Word marker colour"><input id="insHlBgOpacity" type="range" min="0" max="100" value="85" aria-label="Word marker opacity"><output id="insHlBgOpacityValue">85</output></span>
+            </div>
+            <div class="ins-slider">
+              <div class="ins-slider-top"><span>Marker padding</span><span class="dim small">% of text</span><output id="insHlPadValue">12</output></div>
+              <input id="insHlPad" type="range" min="0" max="40" step="1" value="12" aria-label="Word marker padding">
+            </div>
+            <div class="ins-slider">
+              <div class="ins-slider-top"><span>Marker roundness</span><span class="dim small">% of text</span><output id="insHlRadiusValue">22</output></div>
+              <input id="insHlRadius" type="range" min="0" max="50" step="1" value="22" aria-label="Word marker roundness">
             </div>
             <p class="ins-note">Fonts, colours and layout follow the <b>Apply to all captions</b> switch at the top of this panel.</p>
             <div class="ins-row"><b class="ins-sub">Drop shadow</b></div>
@@ -617,7 +633,7 @@
               <select id="insAnimWords" aria-label="Word animation">
                 <option value="none">Show all at once</option>
                 <option value="reveal">Word reveal</option>
-                <option value="karaoke">Karaoke highlight</option>
+                <option value="word">Word highlight</option>
               </select>
             </div>
             <div class="ins-row"><span class="ins-lab">Word stagger</span>
@@ -630,7 +646,7 @@
               <button id="insAnimTry" class="mini" title="Jump to this caption and play the entrance">▶ Preview</button>
               <button id="insAnimReset" class="mini">Reset animation</button>
             </div>
-            <p class="ins-note">Fade, pop, bounce, slide and typewriter also burn into the export; karaoke and word reveal follow each word's own timing.</p>
+            <p class="ins-note">Fade, pop, bounce, slide and typewriter also burn into the export; word highlight and word reveal follow each word's own timing. What the highlight looks like — colour, marker box, or both — is set in <b>Typography → Word highlight</b>.</p>
           </div>
         </details>
 
@@ -777,6 +793,45 @@
       <div id="exportInfo" class="dim small"></div>
       <pre id="jobError" class="error" hidden></pre>
           </div>
+          </div>
+        </section>
+        <section class="moveunit" data-workspace-panel="keys" data-default-column="right" data-unit="keys" aria-label="Keyframes panel">
+          <div class="ws-head">
+            <span class="ws-title">Keyframes</span>
+            <span class="ws-head-spacer"></span>
+            <button type="button" class="workspace-drag-handle" draggable="true" aria-label="Move Keyframes panel" title="Drag to move panel">⠿</button>
+          </div>
+          <div class="ws-body" id="tab-keys">
+            <div class="kfp">
+              <div class="kfp-tools">
+                <div class="ins-seg kfp-view" id="kfpView" role="tablist" aria-label="Keyframes view">
+                  <button type="button" role="tab" data-kfp-view="dopesheet" aria-selected="true" class="on" title="Dopesheet — one lane per knob">&#9670; Dopesheet</button>
+                  <button type="button" role="tab" data-kfp-view="curves" aria-selected="false" title="Curves — each knob's value over the clip">&#8767; Curves</button>
+                </div>
+                <span class="kfp-cluster">
+                  <button type="button" id="kfpPrev" class="mini" title="Previous key">◀</button>
+                  <button type="button" id="kfpKey" class="mini kfp-dia kfp-keybtn" title="Add or remove a key at the playhead">◆</button>
+                  <button type="button" id="kfpNext" class="mini" title="Next key">▶</button>
+                </span>
+                <select id="kfpEase" class="kfp-ease" title="Ease into the key">
+                  <option value="Linear">Linear</option>
+                  <option value="Ease In">Ease In</option>
+                  <option value="Ease Out">Ease Out</option>
+                  <option value="Ease In and Out">Ease In and Out</option>
+                  <option value="custom" hidden disabled>Custom</option>
+                </select>
+                <span class="grow"></span>
+                <button type="button" id="kfpClear" class="mini" title="Remove every keyframe from this clip">Clear all</button>
+              </div>
+              <div id="kfpEmpty" class="dim small ins-empty">Select a clip to edit its keyframes.</div>
+              <div id="kfpBody" class="kfp-body" hidden>
+                <div class="kfp-rows" id="kfpRows"></div>
+                <div class="kfp-plot" id="kfpPlot">
+                  <div class="kfp-ruler" id="kfpRuler"></div>
+                  <svg id="kfpSvg" class="kfp-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -944,14 +999,15 @@
   </div>
 </div>
 
-<script src="/static/timeline-model.js?v=12"></script>
+<script src="/static/timeline-model.js?v=13"></script>
 <script src="/static/media.js?v=1"></script>
 <script src="/static/stage.js?v=7"></script>
-<script src="/static/timeline.js?v=26"></script>
-<script src="/static/clip.js?v=7"></script>
-<script src="/static/app.js?v=53"></script>
+<script src="/static/timeline.js?v=27"></script>
+<script src="/static/clip.js?v=8"></script>
+<script src="/static/app.js?v=55"></script>
 <script src="/static/monitor.js?v=2"></script>
 <script src="/static/gizmo.js?v=2"></script>
+<script src="/static/keyframes.js?v=1"></script>
 <script src="/static/inspector.js?v=2"></script>
 <script src="/static/font-picker.js?v=1"></script>
 <script src="/static/fonts.js?v=1"></script>

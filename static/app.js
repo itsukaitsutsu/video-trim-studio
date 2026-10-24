@@ -78,7 +78,7 @@ const WORKSPACE_LAYOUT_REV = 3;
 // grouped inside a host, which is what makes them tabs on a fresh workspace;
 // drag one out and it becomes a panel in its own right.
 const DEFAULT_UNIT_HOST = {
-  clip: "inspector", list: "inspector", export: "inspector",
+  clip: "inspector", list: "inspector", export: "inspector", keys: "inspector",
   tl: "timeline",
 };
 // Panels whose header is already a tab strip in the markup. Grouping a panel
@@ -90,11 +90,12 @@ let UNIT_TABS = {};
 let TAB_UNIT = {};
 const TAB_TITLES = {
   clip: "Inspector", export: "Export", tl: "Timeline", list: "Sections",
+  keys: "Keyframes",
 };
 const UNIT_TITLES = {
   project: "Project", program: "Program Monitor",
   inspector: "Inspector", timeline: "Timeline",
-  clip: "Inspector", export: "Export",
+  clip: "Inspector", export: "Export", keys: "Keyframes",
   tl: "Timeline 01", list: "Sections",
 };
 // Where a panel lands when it is dragged out of a group, and the order tabs
@@ -103,7 +104,7 @@ const UNIT_TITLES = {
 // Key order is also the tab order inside a group: Clip, Text, List, Export.
 const DEFAULT_UNIT_ZONE = {
   project: "left", program: "center", inspector: "right", timeline: "bottom",
-  clip: "right", list: "bottom", export: "right", tl: "bottom",
+  clip: "right", list: "bottom", export: "right", keys: "right", tl: "bottom",
 };
 const UNIT_ORDER = Object.keys(DEFAULT_UNIT_ZONE);
 const DEFAULT_WORKSPACE_LAYOUT = {
@@ -115,7 +116,7 @@ const DEFAULT_WORKSPACE_LAYOUT = {
   },
   win: {
     project: true, program: true, inspector: true, timeline: true,
-    clip: true, export: true,
+    clip: true, export: true, keys: true,
     tl: true, list: true,
   },
   activeTab: { inspector: "list", timeline: "tl" },
@@ -130,6 +131,7 @@ const WINDOW_MENU = [
   "sep",
   ["clip", "Inspector"],
   ["export", "Export"],
+  ["keys", "Keyframes"],
   "sep",
   ["tl", "Timeline"],
   ["list", "Sections"],
@@ -506,7 +508,7 @@ function migrateWorkspaceV2toV3(v2) {
   const hidden = new Set(Array.isArray(v2.hidden) ? v2.hidden : []);
   const win = {
     project: true, program: true, inspector: true, timeline: true,
-    clip: true, text: true, export: true,
+    clip: true, text: true, export: true, keys: true,
     tl: true, list: true,
   };
   if (hidden.has("source") && hidden.has("detect") && hidden.has("caption")) win.project = false;
@@ -2203,6 +2205,9 @@ function layoutCapOverlay() {
     insAnimIn: st.anim_in || "none", insAnimMs: st.anim_ms ?? 400,
     insAnimWords: st.anim_words || "none", insAnimStagger: st.anim_stagger ?? 120,
     insAnimPop: st.anim_pop ?? 130, insHighlight: st.highlight || "#ffd400",
+    insHlMark: st.hl_mark || "color", insHlSpan: st.hl_span || "word",
+    insHlBg: st.hl_bg || "#101418", insHlBgOpacity: st.hl_bg_opacity ?? 85,
+    insHlPad: st.hl_pad ?? 12, insHlRadius: st.hl_radius ?? 22,
   };
   for (const [id, value] of Object.entries(styleControlValues)) {
     const input = $(id);
@@ -2220,6 +2225,9 @@ function layoutCapOverlay() {
   if ($("capShadowDistanceValue")) $("capShadowDistanceValue").textContent = String(st.shadow_distance ?? 3);
   if ($("capShadowSizeValue")) $("capShadowSizeValue").textContent = String(st.shadow_size ?? 6);
   if ($("capShadowBlurValue")) $("capShadowBlurValue").textContent = String(st.shadow_blur ?? 12);
+  if ($("insHlBgOpacityValue")) $("insHlBgOpacityValue").textContent = String(Math.round(st.hl_bg_opacity ?? 85));
+  if ($("insHlPadValue")) $("insHlPadValue").textContent = String(Math.round(st.hl_pad ?? 12));
+  if ($("insHlRadiusValue")) $("insHlRadiusValue").textContent = String(Math.round(st.hl_radius ?? 22));
   document.querySelectorAll(".capZone").forEach((b) => b.classList.toggle("on",
     Math.abs(Number(b.dataset.x) - (st.x ?? .5)) < .06 && Math.abs(Number(b.dataset.y) - (st.y ?? .92)) < .06));
   const fs = st.bold !== false && st.italic ? "bold-italic" : st.bold !== false ? "bold" : st.italic ? "italic" : "regular";
@@ -2287,6 +2295,18 @@ function capRenderAnimated(cue, st, t, maxChars) {
   const words = capPreviewWords(cue);
   container.replaceChildren();
   container.style.setProperty("--cap-hl", st.highlight || "#ffd400");
+  // The marker is sized in em, like the burn's percentages of the font size.
+  const hlPad = Math.min(40, Math.max(0, Number(st.hl_pad ?? 12))) / 100;
+  const hlRadius = Math.min(50, Math.max(0, Number(st.hl_radius ?? 22))) / 100;
+  const hlBg = /^#[0-9a-f]{6}$/i.test(st.hl_bg || "") ? st.hl_bg : "#101418";
+  const hlBgA = Math.min(100, Math.max(0, Number(st.hl_bg_opacity ?? 85))) / 100;
+  const hlRgb = [1, 3, 5].map((i) => parseInt(hlBg.slice(i, i + 2), 16));
+  container.style.setProperty("--cap-hl-pad", `${hlPad}em`);
+  container.style.setProperty("--cap-hl-radius", `${hlRadius}em`);
+  container.style.setProperty("--cap-hl-bg",
+    `rgba(${hlRgb[0]},${hlRgb[1]},${hlRgb[2]},${hlBgA})`);
+  const hlMark = ["color", "bg", "both"].includes(st.hl_mark) ? st.hl_mark : "color";
+  const hlSpan = st.hl_span === "spoken" ? "spoken" : "word";
   const lineFor = (text) => {
     const row = document.createElement("div");
     row.className = "cap-line";
@@ -2312,17 +2332,38 @@ function capRenderAnimated(cue, st, t, maxChars) {
     ? words.filter((w, i) => t >= (w.s ?? (cue.start + i * stagger)) - 1e-6)
     : words;
   if (animWords === "reveal" && !visible.length) return true;   // nothing yet
+  // Which words the highlight is on: the one being spoken, or every word
+  // heard so far. `spoken` is the persistent "already read" look.
+  // One word is "current" at a time: the last one whose start has passed.
+  // The burn holds each word from its own start until the next word starts
+  // (the last one until the cue ends), so the preview must do the same or a
+  // boundary frame would light two words.
+  let cur = -1;
+  words.forEach((w, i) => { if (t >= (w.s ?? 0) - 1e-6) cur = i; });
   for (const line of wrapTokenLines(visible, Math.max(4, maxChars))) {
     const row = lineFor("");
     for (const w of line) {
       const span = document.createElement("span");
       span.className = "cap-word";
-      span.textContent = w.w + " ";
-      if (animWords === "karaoke") {
-        if (t >= w.s) span.classList.add("hl");
-        if (t >= w.s && t < w.e) span.classList.add("now");
+      if (animWords === "word" || animWords === "karaoke") {
+        const idx = words.indexOf(w);
+        const on = hlSpan === "spoken" ? idx <= cur && cur >= 0 : idx === cur;
+        if (on && hlMark !== "bg") span.classList.add("hl");      // accent ink
+        if (idx === cur) span.classList.add("now");
+        // The marker box is its own layer, so it never shifts the glyphs:
+        // the word keeps its own advance and the box hangs off it.
+        if (on && hlMark !== "color") {
+          const bg = document.createElement("span");
+          bg.className = "cap-word-bg";
+          span.appendChild(bg);
+        }
       }
+      const glyph = document.createElement("span");
+      glyph.className = "cap-word-tx";
+      glyph.textContent = w.w;
+      span.appendChild(glyph);
       row.appendChild(span);
+      row.appendChild(document.createTextNode(" "));
     }
     container.appendChild(row);
   }
@@ -2526,6 +2567,9 @@ function bindCaptionOverlay() {
     insAnimIn: ["anim_in", "text"], insAnimMs: ["anim_ms", "number"],
     insAnimWords: ["anim_words", "text"], insAnimStagger: ["anim_stagger", "number"],
     insAnimPop: ["anim_pop", "number"], insHighlight: ["highlight", "text"],
+    insHlMark: ["hl_mark", "text"], insHlSpan: ["hl_span", "text"],
+    insHlBg: ["hl_bg", "text"], insHlBgOpacity: ["hl_bg_opacity", "number"],
+    insHlPad: ["hl_pad", "number"], insHlRadius: ["hl_radius", "number"],
   };
   for (const [id, [key, type]] of Object.entries(styleInputs)) {
     const input = $(id); if (!input) continue;
@@ -2630,7 +2674,12 @@ const CAPPOS_DEFAULT = { x: 0.5, y: 0.92, size_pct: 4.5, align: "center", box_w:
   // Text animation (Inspector > Text animation). "none" everywhere keeps the
   // burn byte-identical for projects that never touch these controls.
   anim_in: "none", anim_ms: 400, anim_words: "none",
-  anim_stagger: 120, anim_pop: 130, highlight: "#ffd400" };
+  anim_stagger: 120, anim_pop: 130, highlight: "#ffd400",
+  // Word highlight (Inspector > Typography > Word highlight): what marks the
+  // spoken word - its colour, a marker box behind it, or both - and how.
+  // Mirrors DEFAULT_STYLE in vts/captionmap.py, which burns it.
+  hl_mark: "color", hl_span: "word", hl_bg: "#101418", hl_bg_opacity: 85,
+  hl_pad: 12, hl_radius: 22 };
 // Must match CHAR_FACTOR in vts/captionmap.py - both sides wrap text with
 // it, which is what keeps the preview and the burn in sync.
 const CHAR_FACTOR = 0.55;

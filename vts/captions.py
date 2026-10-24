@@ -51,8 +51,13 @@ def clean_style(st: dict | None) -> dict:
     anim_in = str(st.get("anim_in", out["anim_in"]))
     out["anim_in"] = anim_in if anim_in in (
         "none", "fade", "pop", "bounce", "slide", "typewriter") else "none"
+    # Word highlight was called "karaoke" while it could only paint the
+    # spoken word in an accent colour; it is now configurable (see hl_mark),
+    # so the value is "word". Older documents keep reading as the same thing.
     anim_words = str(st.get("anim_words", out["anim_words"]))
-    out["anim_words"] = anim_words if anim_words in ("none", "reveal", "karaoke") else "none"
+    if anim_words == "karaoke":
+        anim_words = "word"
+    out["anim_words"] = anim_words if anim_words in ("none", "reveal", "word") else "none"
     try:
         out["anim_ms"] = min(4000, max(0, int(float(st.get("anim_ms", out["anim_ms"])))))
     except (TypeError, ValueError):
@@ -68,6 +73,22 @@ def clean_style(st: dict | None) -> dict:
         pass
     hl = str(st.get("highlight", out["highlight"]) or "")
     out["highlight"] = hl if re.fullmatch(r"#[0-9a-fA-F]{6}", hl) else "#ffd400"
+    # Word highlight: what marks the word being spoken. "color" keeps the
+    # accent the karaoke mode always had; "bg" paints a marker behind the
+    # word; "both" does the two. The span chooses between the word being
+    # spoken and every word heard so far.
+    mark = str(st.get("hl_mark", out["hl_mark"]) or "")
+    out["hl_mark"] = mark if mark in ("color", "bg", "both") else "color"
+    span = str(st.get("hl_span", out["hl_span"]) or "")
+    out["hl_span"] = span if span in ("word", "spoken") else "word"
+    bg = str(st.get("hl_bg", out["hl_bg"]) or "")
+    out["hl_bg"] = bg if re.fullmatch(r"#[0-9a-fA-F]{6}", bg) else "#101418"
+    for key, lo, hi in (("hl_bg_opacity", 0.0, 100.0), ("hl_pad", 0.0, 40.0),
+                        ("hl_radius", 0.0, 50.0)):
+        try:
+            out[key] = min(hi, max(lo, float(st.get(key, out[key]))))
+        except (TypeError, ValueError):
+            pass
     return out
 
 

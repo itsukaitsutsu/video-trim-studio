@@ -1,353 +1,168 @@
-Video Trim Studio - Premiere-style Program Monitor + editing on the picture
+Video Trim Studio - Word highlight + export without trimming
 ==========================================================================
 
 Replace these files in your project folder (same paths):
 
-    static/gizmo.js           <- NEW FILE: grab the clip ON the monitor - move,
-                                 resize, rotate, crop and mask it in place
-    vts/fx.py                 <- rotation + shape mask in the clip model
-    vts/edl.py                <- rotate/mask stages in the export graph, and
-                                 layers may now hang past the frame edge
-    static/timeline-model.js   <- fx.rot + fx.mask (shape masks) in the model,
-                                 cleanFx clamps, evalFxAt keeps them in sync
-    static/stage.js            <- rotation + CSS mask on the preview layers
-    static/clip.js             <- Inspector: rotation slider, Mask section and
-                                 the mask values staying in step with the box
-    static/timeline.js         <- keyframe diamonds along the foot of an animated
-                                 clip block (v26)
-
-    static/monitor.js         <- NEW FILE: Program Monitor (transport, timecode,
-                                 markers, playback quality, overlays, scopes,
-                                 meters, Export Frame, gear menu, button editor)
-    static/index.html         <- Program Monitor markup (transport bar, meters,
-                                 scopes card, guide layers)
-    static/inspector.js       <- NEW FILE: Inspector shell, effect chain,
-                                 filler scan, caption content editor
-    static/style.css          <- Inspector layout + monitor bar, meters, scopes, guides
-    static/app.js             <- workspace units, zoom 10%-800%, fullscreen
-                                 layout, file browser routes images to the bin
-    vts/preview.py            <- image + audio MIME types, still classification
-    vts/medialib.py           <- image import (PNG copy), audio without proxy
-    server.py, vts/server.py  <- "that is a still" guard on Open
-    SUPPORTED-MEDIA.md        <- every accepted extension, by category
-    static/timeline.js        <- shuttle-aware pvTick, in/out + loop gate,
-                                 ruler markers, Shift+M, Shift+Space
-    static/clip.js            <- clip fields now render inside the Inspector
-    static/timeline-model.js  <- look, filler removal, caption rules
-    static/stage.js           <- look filter + STAGE.rate (shuttle speed)
-    static/font-picker.js     <- unchanged API, new call sites
-    vts/fx.py                 <- look (brightness/contrast/saturation) + clamps
-    vts/edl.py                <- eq stage in the export graph
-    vts/captionmap.py         <- text animations in the ASS burn
-    vts/captions.py           <- style defaults for the new keys
+    static/index.html         <- Inspector > Typography: the new "Word
+                                 highlight" group; the Text animation menu's
+                                 "Karaoke" entry is now "Word highlight"
+                                 (?v= bumped to 55)
+    static/app.js             <- the preview draws whatever the burn draws:
+                                 accent colour, background marker or both,
+                                 current word or all spoken words, marker
+                                 colour / opacity / padding / roundness (?v=55)
+    static/style.css          <- the marker layer (.cap-word-bg) and the
+                                 glyph layer (.cap-word-tx) (?v=55)
+    vts/captionmap.py         <- per-word ASS events: a rounded \p1 marker on
+                                 layer 0, the word on layer 1, both at the same
+                                 x, so the box never drifts off the word
+    vts/captions.py           <- the six new style keys, validated and clamped;
+                                 legacy anim_words "karaoke" is read as "word"
+    vts/edl.py                <- export fix: the stream-copy fast path accepts
+                                 the bin resolver's (path, kind, has_audio) and
+                                 the "why it re-encoded" note names the real
+                                 reason
+    vts/export.py             <- export fix: an empty cut list means "keep the
+                                 whole video" instead of "Nothing selected to
+                                 delete."; an empty encoder falls back to
+                                 libx264
     README.md                 <- docs
-    tests/…, tests/js/…       <- tests (optional)
+    tests/test_caption.py     <- burn tests: geometry, marker path, colour,
+                                 opacity, padding/radius clamps, legacy parity
+    tests/test_word_highlight_ui.py  <- NEW: the preview in a real browser
+    tests/test_timeline_ui.py <- one assertion: the menu now stores "word"
+    tests/test_timeline.py    <- NEW tests: untrimmed export, 3-tuple resolver,
+                                 the note naming burned captions
+    tests/test_api.py         <- NEW tests: /api/export with nothing cut
+    tests/test_pipeline.py    <- empty cut list is a job, cutting it all is not
     WHATS-CHANGED.txt         <- this file
 
-Then reload http://127.0.0.1:8765/ with Ctrl+F5. The ?v= numbers were bumped,
-so a plain reload should already pick the new files up. No server restart and
-no `pip install` are needed.
+Then reload http://127.0.0.1:8765/ with Ctrl+F5. No server restart and no
+`pip install` are needed.
 
 
-1) One Inspector panel instead of the old Clip and Text panels
---------------------------------------------------------------
-The right side is now a single panel named **Inspector** (tabs: Inspector |
-Sections | Export). Inside it a **Clip / Text** switch picks the target, and
-the panel follows your selection: click a caption and it flips to Text, click
-a clip and it flips back to Clip.
+1) What the old "Karaoke" did
+-----------------------------
+It recoloured the word being spoken - permanently. You could pick the colour,
+and that was it: every word in the caption ended up that colour as the take
+played, and there was no way to put a box behind the word instead.
 
-  CLIP side - three modes
-    Video    Track, Source, Fit (fill / contain / cover, plus the
-             "fill frame" and "corner PiP" shortcuts), Transform (X %, Y %,
-             Scale %, Opacity %) with one Reset, Crop per edge, video fades,
-             and the keyframe list (◆ Add at playhead, Clear all).
-    Audio    Unlink audio + lane, Level (volume, mute), Fades in/out,
-             Reset audio.
-    Effect   Look: brightness / contrast / saturation sliders, baked into
-             the export (ffmpeg `eq`) and mirrored by the preview.
-             Effect chain: every effect the clip actually carries, top to
-             bottom in export order (crop, fit, scale, position, opacity,
-             look, video fade, volume, mute, audio fade, keyframes). The ×
-             on a row resets just that effect; "Reset all effects" clears
-             the picture/sound effects but leaves keyframes alone.
-             Add effect: 10 one-click presets - Corner PiP, Zoom punch,
-             Letterbox, Fill the box, Fade from black, Fade to black,
-             Half opacity, Mute sound, Duck audio, Boost audio.
-
-  TEXT side - the kconcat text panel, section for section
-    Apply to all   The switch at the top of the Text pane, on by default, and
-                   mirrored by the "apply to all" pill in the Timeline
-                   toolbar next to + caption. While it is on, a style edit
-                   (font, size, colour, stroke, shadow, background, layout,
-                   position, text animation, dragging the preview box, reset)
-                   changes EVERY caption on EVERY caption track - no clicking
-                   into a lane first - and new captions inherit the layout.
-                   The line under it reads "all N captions - N lanes" or
-                   "this caption only". The choice is remembered per browser.
-    Content        The caption at the playhead: its text in a textarea,
-                   + caption / Delete / Duplicate, word count and style
-                   source.
-    Typography     Font (searchable picker, Import fonts, Refresh,
-                   Device fonts…), weight, italic, size, Fill + opacity,
-                   spoken-word Highlight colour, Apply to every caption,
-                   Drop shadow (toggle, colour, opacity, angle, distance,
-                   spread, blur) and Background (toggle, colour, opacity).
-    Text animation In (None / Fade In / Pop In / Bounce / Slide Up /
-                   Typewriter / Karaoke / Word reveal), Duration, Words
-                   (all at once / word by word), Word stagger, Pop scale,
-                   ▶ Preview, Reset animation. All of it is written into
-                   the ASS burn, so the export matches the preview.
-    Filler words   Scans every caption for fillers and lists them with
-                   count and first time - strong (eee, ee, ehm, eh, emm,
-                   um, uh, erm, hmm, uhm, mmm) and weak (anu, ano, kayak,
-                   gitu, terus, apa ya, including the two-word "apa ya").
-                   Tick words -> Remove from captions strips only those
-                   words out of the caption text, undoably. Select all /
-                   Clear for the list.
-    Stroke         Toggle, colour, opacity, width, Outside/Inside.
-    Layout         Align left/centre/right, Width %, Height %, Line
-                   height, Tracking.
-    Position       3x3 zone picker, X %, Y %, Reset style.
-
-  Anything that is not available for the current selection says so in
-  place ("Select a video clip…", "No caption at the playhead") instead of
-  showing dead controls.
+"Karaoke" is now called **Word highlight** (Text animation > Words), and it is
+a small style of its own under Typography.
 
 
-2) Sections panel (carried over from the previous round)
---------------------------------------------------------
-The old List panel is the kconcat-style Sections panel: collapsible Detect
-block (threshold, min silence, min section, .srt/.vtt upload, Detect
-sections, one-line summary), the clip timeline strip with click-to-mark
-removal, caption/silence/other filter chips + min length + text search,
-the table (inline caption editing, Shift-click and paint-drag selection),
-and a footer with "N selected · mm:ss marked" and **Remove selected**.
-The Project panel's Detect card mirrors the settings read-only and has an
-**Open Sections panel** button.
-
-
-3) Workspace fixes (carried over)
----------------------------------
-- Column dividers slide freely in both directions, no maximum width:
-  Program's left/right edges, Project's right edge, Inspector's left edge.
-- Vertical (top/bottom) panel drags no longer freeze the width, and old
-  saved layouts that stored "width == column width" are repaired on load.
-- One grip per edge per panel; stale duplicate grips are removed.
-- Default workspace: Project | Program | Inspector (Inspector, Sections,
-  Export tabs - Sections active) and Timeline 01 alone in the bottom zone.
-  Reset workspace restores exactly that.
-- The Inspector body scrolls inside the panel when it is resized short, so
-  its controls can never spill out over the timeline.
-
-
-4) Images and audio in the Media bin
-------------------------------------
-Stills used to import and then fail to show: the server sent a PNG as
-application/octet-stream and queued an H.264 "preview proxy" for it (an <img>
-cannot play a video). Now:
-
-  - png, jpg/jpeg/jpe, gif, webp, bmp, avif are served as their own image type
-    and painted directly by the program monitor - no transcode at all.
-  - tif, tiff, ppm, pgm, pnm, tga, jp2 and svg get one PNG copy for the
-    preview (and the bin thumbnail) at import; the export still reads your
-    original file. Removing the asset removes the copy.
-  - A still gets 5 s on the timeline by default (the "still length" box next
-    to Import changes it), is drawn as an image block, and can be scaled /
-    positioned like any other overlay.
-  - Opening a picture as the *project source* now says what to do instead of
-    creating a one-frame project.
-  - MP3, WAV, FLAC, M4A, AAC, OGG and Opus no longer get a pointless preview
-    transcode; they play straight from the file. wma/ac3/dts/amr/caf still get
-    a preview conversion.
-  - Bin video that is not drawn as a still anymore: an imported MP4 overlay now
-    shows the video styling instead of the image styling.
-  - The full supported-extension list is the new SUPPORTED-MEDIA.md, also
-    summarised in README.md.
-
-5) The Program Monitor now works like Premiere's
+2) New: Inspector > Typography > Word highlight
 -----------------------------------------------
-The Program panel got a real transport bar and a settings menu. Nothing else in
-the workspace moved: the bar sits under the picture, the meters and the scopes
-are the same panel, and the gear menu holds every monitor setting in one place.
+    Mark      Colour the word | Background marker | Colour + marker
+    Span      Current word | All spoken words
+    Colour    the accent ink (the old highlight colour, #ffd400 by default)
+    Marker    the box colour (#101418) + its own opacity (85 %)
+    Marker padding     % of the text size, 0-40   (12)
+    Marker roundness   % of the text size, 0-50   (22)
 
-  Transport
-  - J / K / L shuttle: L = 1x, press again for 2x, 4x, 8x; J the same in
-    reverse (-1, -2, -4, -8); K pauses. Media follows the master clock up to
-    4x and is seek-driven beyond that and in reverse.
-  - Playback speed menu 0.1x ... 8x next to the transport.
-  - Loop playback (loops the In->Out range, or the whole sequence).
-  - Mark In / Mark Out with I and O; Play In->Out runs the range and stops on
-    the Out point (Shift+Space or the |>| button).
-  - Home / End jump to the start / end of the sequence.
-  - Markers: M adds one at the playhead (asks for a name), . and , jump to the
-    next / previous one, click a flag to go there, double-click to rename,
-    right-click to delete. Marker flags and the In/Out band are drawn on the
-    timeline ruler.
-  - Lane mute moved from M to Shift+M, as agreed; the monitor's own mute is the
-    speaker button.
+  Mark        "Background marker" paints only the box and leaves the glyphs in
+              the caption's own fill, so the word is marked without turning
+              yellow. "Colour + marker" does both. "Colour the word" is the
+              original karaoke look.
+  Span        "Current word" is the karaoke behaviour - one word lit at a time.
+              "All spoken words" keeps every word heard so far marked, like a
+              read-along line that fills in as it plays (and stays marked
+              through a pause between words, exactly like the burn).
+  Marker      The box hugs the word: padding grows it on all four sides,
+              roundness turns it from a square slab into a pill.
 
-  Timecode and read-outs
-  - Click the timecode and type 00:00:03:15, 3:15, 105f, 3.5 or +2 to seek.
-  - Right-click it (or use the gear menu) to show timecode / frames / seconds
-    and to switch between duration and time remaining.
-  - The line under the bar reads frame size, frame rate, playback and paused
-    resolution, HQ state, dropped frames, the In/Out points and the marker count.
-  - #playInfo shows the live rate, the render fps and dropped frames while
-    playing; dropped frames are counted from the real animation-frame delta,
-    not invented.
-
-  Image quality
-  - Playback resolution Full / 1/2 / 1/4 / 1/8 / 1/16 and a separate paused
-    resolution. Reduced resolutions really are redrawn on a smaller canvas and
-    scaled up (that is why they look soft), not just a label.
-  - High Quality Playback switch: with it off, the look filters are skipped
-    while playing.
-  - Zoom is now the full 10 % ... 800 % list: click the percentage for the list,
-    or keep using - / fit / + and Ctrl+wheel.
-
-  Overlays
-  - Action-safe (10 %), title-safe (20 %), optional 4:3 box and a custom margin
-    in percent, plus a centre crosshair and rule-of-thirds lines.
-  - Alpha view: draws the composite's alpha channel as a white-on-black matte.
-
-  Scopes
-  - Waveform (luma), RGB parade, vectorscope (with graticule) and histogram,
-    all computed from the frame the monitor is actually showing, refreshed a
-    few times a second. Floating card, so opening it never reflows the panel.
-
-  Audio
-  - Stereo level meters fed by a WebAudio analyser over the real program mix,
-    with peak hold, plus a monitor volume slider and a mute button.
-
-  Output and chrome
-  - Export Frame (camera button, or Ctrl+Shift+E) writes a PNG at project
-    resolution of exactly what the monitor shows; it waits for the decoder, so
-    clicking right after a seek does not write a black frame.
-  - Fullscreen monitor (button or Ctrl+`); zoom and pan keep working there.
-  - Gear menu: playback/paused resolution, HQ, loop, safe margins, guides,
-    alpha, timecode mode, meters, volume, mute, scopes, Export Frame,
-    fullscreen, the marker list, a button editor (untick any button to remove
-    it from the bar - remembered), and a reset.
-
-Notes
------
-* Scopes, Export Frame, alpha view and reduced-resolution playback all sample
-  the same composite the monitor shows (monDrawComposite); nothing is faked.
-  The browser still decodes the source at full size, so 1/2 res costs less
-  compositing work and looks softer but does not reduce decode work.
-* Monitor settings and markers are stored per browser (localStorage); markers
-  and In/Out points are kept per project path. They are not written into the
-  project file yet.
-* Three browser tests were already failing before this change because they
-  target markup that no longer exists (the old canvas timeline's .track-name
-  rail and the old lane rail): test_timeline_lane_lock_and_eye,
-  test_audio_lane_unlink_and_music_drop, test_workspace_units_tabs_hide_and_persist.
-  The new Program Monitor tests (test_monitor_*) pass.
-* Export graph unchanged except for the new Look (`eq`) stage: it runs after
-  crop/scale/position and before the alpha and fade stages, and is skipped
-  for still images (same as before for images).
-* Caption timing, detection and the timeline model are untouched; the
-  Inspector is presentation plus the new Look/animation/filler settings,
-  which are saved with the project like every other clip/caption value.
-* vts/static/* is an older bundled copy of this front end and is not served
-  by server.py at the project root; it was left untouched.
-* Verified in Chromium at 1280x720, 1400x1000, 1536x960, 1600x1200 and
-  390x720, with the Inspector tabbed in place, resized small, and pulled out
-  into its own zone: every mode, the effect chain and its × buttons, all ten
-  presets, the look sliders, every text section, the filler scan and removal,
-  and the animation settings through to the burned ASS.
+  Every one of the six values is written into the caption style, follows the
+  **Apply to all captions** switch like the rest of the Typography section,
+  is saved with the project and is used by the export.
 
 
-7) Editing the picture directly in the Program Monitor
------------------------------------------------------
-Click the picture to select the clip under the pointer; the outline follows what
-you actually see (crop, scale and rotation included). Double-click it - or press
-V - and handles appear on the picture itself:
+3) Preview and export are the same picture
+-------------------------------------------
+The burn no longer uses libass's \k karaoke tags (they cannot paint a rounded
+box). For each word the .ass gets two events:
 
-  * drag the picture            -> move it (fx.x / fx.y). Snaps to the centre,
-                                   the frame edges and 25/50/75 %. Hold Alt to
-                                   place it freely; x/y can go past the frame.
-  * drag a corner or edge square -> scale. The opposite corner stays anchored,
-                                   so it grows the way you expect.
-  * drag the knob on the stem    -> rotate (fx.rot, -180..180 deg). Shift = 15 deg
-                                   steps. The picture turns about its centre,
-                                   exactly like the exporter's rotate filter.
-  * C (crop tool)                -> drag any edge/corner inward to trim that side.
-                                   A dashed ghost shows what the crop removes.
-  * P (mask tool)                -> a rect/ellipse mask is switched on; drag on
-                                   the picture to draw a new one, drag the shape
-                                   to move it, its squares to resize, and the dot
-                                   on its right edge to soften (feather) it.
-                                   The Inspector's Mask section has invert,
-                                   shape, feather and exact numbers.
-  * V                          -> back to the transform handles.
-  * Esc / clicking the black    -> leave edit mode / deselect.
-  * Alt + arrows                -> nudge by 1 % (Shift = 5 %).
-  * Ctrl+Z                      -> one undo step per drag (not per mouse move).
+    layer 0   the marker:  {\an7\pos(...)\p1\1c&H101418&\1a&H26&}m ... l ...
+    layer 1   the word:    {\an5\pos(...)\1c&HFFD400&}terus{\1c&HFFFFFF&}
 
-Every drag writes the same fields the Inspector and the exporter read and goes
-through the same clamp (TLM.cleanFx / vts/fx.py clean_fx), so the monitor, the
-scopes, the exported frame and the rendered file agree.
+Both use the same x, computed once from the same font advance, so the box can
+never sit off-centre. The marker is a cubic-bezier rounded rectangle; a
+roundness that would exceed half the box is clamped to a pill, and padding 0
+gives square corners.
 
-What the exporter gained to keep that promise:
-
-  * fx.rot: format=rgba,rotate=a=<radians>:ow=rotw(iw):oh=roth(ih):c=none, then
-    the layer is centred on its own centre, so rotation never shifts the picture.
-  * fx.mask: format=yuva420p + geq alpha mask (rect or ellipse, feathered,
-    invertable) computed in the frame's own coordinates - the same percentages
-    the CSS mask uses in the monitor. Rect and ellipse are both checked against
-    real ffmpeg output in tests/test_mask_render.py (corners black, centre kept).
-  * Overlay placement: _clamp_pos used to pin a layer inside the frame; it now
-    only refuses absurd values, so moving a picture off the edge in the monitor
-    survives the export.
-
-Note: a masked export runs geq per pixel. On a 1080p clip that is noticeably
-slower than an unmasked one (roughly a few times real time); the mask is opt-in
-and everything else still uses the fast path.
-
-New tests: tests/test_gizmo_ui.py (real mouse on the real monitor: select, move,
-scale-around-the-corner, rotate, crop, draw+move a mask, deselect, Inspector
-wiring), tests/test_mask_render.py and six filter-graph cases in tests/test_fx.py,
-plus rotation/mask cases in tests/js/timeline-model.test.js.
+The preview uses the same numbers: padding and roundness are applied as em
+values (the burn's "% of font size"), the box is its own absolutely positioned
+layer behind the glyphs (so the word never shifts), and the marker colour is
+composited with its opacity. The old karaoke glow around the spoken word is
+gone as well - the mark is the colour and/or the box, with no halo the burn
+does not draw. The word that is "current" in the preview is
+picked the same way the burn picks it: the last word whose start has passed,
+holding until the next word starts.
 
 
-8) Keyframes now work the way Premiere / CapCut do
---------------------------------------------------
-The bug: a clip with keyframes reads x / y / scale / opacity from the ◆ track
-(TLM.evalFxAt), but moving the picture on the monitor or dragging a slider
-wrote clip.fx instead. That value is ignored the moment one keyframe exists, so
-"add a keyframe, move the object" looked like it did nothing - the picture
-snapped back to the keyframed position.
+4) Backwards compatibility
+--------------------------
+- Projects saved before this change store `anim_words: "karaoke"`. They still
+  open and burn identically: the loader and the style cleaner read "karaoke"
+  as "word", and the preview accepts both spellings.
+- The default look is unchanged: accent colour only, current word, #ffd400.
+  A caption that never touched the new controls burns the same frame it did
+  before - the tests check that parity directly (same events, same timings).
+- The six new keys are validated on the way in: unknown values fall back to
+  the defaults, padding is clamped to 0-40, roundness to 0-50, and a marker
+  colour that is not a #rrggbb hex falls back to #101418.
 
-What changed:
 
-  * static/timeline-model.js
-      - kfWrite(clip, tAbs, patch): records an edit at the playhead into the
-        keyframe track, creating a ◆ there (or updating the one within 50 ms).
-        Untouched channels are filled from what is on screen, so inserting a
-        keyframe never makes the picture jump.
-      - rot is now an animatable channel, so a clip can turn while it moves.
-      - Keyframes written before this change carry no "rot" and keep the
-        clip's own rotation instead of snapping upright.
+5) Tests
+--------
+    tests/test_caption.py             burn geometry, marker path, colour,
+                                      opacity, clamping, legacy parity
+    tests/test_word_highlight_ui.py   the preview: marker on the right word,
+                                      colour/opacity/padding/roundness reach
+                                      the DOM, colour + marker together
+    tests/test_timeline_ui.py         the Inspector still wires the menu
 
-  * static/gizmo.js
-      - the handles sit on the keyframed position (gizFxOf uses evalFxAt).
-      - a drag writes through kfWrite while the clip is animated; crop, mask,
-        fit and colour stay clip-wide, as before.
-      - editing is blocked while the playhead runs (no phantom keyframes).
+All of them pass here, and the burn tests render real frames with ffmpeg and
+check the pixels (the marker is where the word is, not one word to the left).
 
-  * static/clip.js
-      - every Transform slider goes through the same path (clipWriteProp), so
-        typing X / Y / Scale / Rotation / Opacity at the playhead also keys.
-      - the sliders show the value at the playhead when the clip is animated,
-        and the keyframe list gained a rotation column plus an "animation on"
-        hint; the first ◆ explains the next step.
 
-  * vts/fx.py - KF_KEYS gained "rot" (clamped +-180), so the export slices the
-    rotation per span exactly like it already sliced position and scale.
+6) Export without trimming (the "it forces me to trim" bug)
+-----------------------------------------------------------
+Two separate defects made a no-trim export impossible. Both are fixed.
 
-Workflow now: playhead somewhere on the clip -> Add at playhead (one ◆) ->
-move the playhead -> drag the picture / type a value. That writes the second ◆
-and the picture interpolates between them. Matches tests:
-tests/test_gizmo_ui.py::test_moving_an_animated_clip_writes_a_keyframe_at_the_playhead
-and ::test_rotation_is_animatable_and_old_keyframes_keep_the_clip_rotation.
+  a) Exporting an untouched clip died with HTTP 500.
+     The stream-copy fast path unpacks the media resolver as `paths, kind`,
+     but the resolver has answered `(path, kind, has_audio)` since the media
+     bin landed. Any export that needed no re-encode - one clip, no cuts, no
+     effects, no burned captions - raised
+         ValueError: too many values to unpack (expected 2)
+     and the UI only ever showed "Internal Server Error". Cutting the video
+     (or burning captions) forced the re-encode path, which handled the
+     three values correctly, so trimming *appeared* to be mandatory.
+     `_copy_fast_path` now reads the tuple by position and still accepts the
+     old two-value form.
+
+  b) The clean-cut exporter rejected an empty cut list.
+     `vts/export.py` refused to start when nothing was marked for deletion
+     ("Nothing selected to delete."). An empty list is now a normal job: it
+     keeps the whole video, which is exactly what "burn these captions on my
+     file" needs. Deleting *everything* is still refused.
+
+While in there:
+
+  - The "stream copy was upgraded" note used to blame "clip effects /
+    keyframes" whatever the cause. It now names the real one - "burned-in
+    captions", "a clip that does not start at 0", "a still image", "audio
+    items on their own lanes", ...
+  - An empty encoder picker no longer reaches ffmpeg as `-c:v ""`
+    ("Unknown encoder ''"); it falls back to libx264. On a machine with no
+    hardware encoder this is what a burn export uses.
+
+What this means in practice: open a video, type or import captions, set
+Export > burn, press Export - with no cut at all. A plain no-caption export of
+an untouched clip stays a stream copy (instant, no quality loss); burning
+captions re-encodes, and says so.
+
+Tests: tests/test_timeline.py (untrimmed export through the real resolver,
+burn note), tests/test_api.py (/api/export and /api/export/timeline with
+nothing cut) and tests/test_pipeline.py (empty list exports, total cut refused)
+all pass alongside the existing suites.

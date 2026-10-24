@@ -257,7 +257,18 @@ def _audio_graph(items: list[dict], inputs: dict[str, Input], total: float,
                  "asetpts=PTS-STARTPTS",
                  f"aformat=sample_fmts=fltp:sample_rates={sample_rate}:"
                  f"channel_layouts={layout}"]
-        if abs(vol - 1.0) > 1e-9:
+        # Level keys ride the sound too: a volume filter per span, gated to
+        # it, so a keyed duck exports exactly as the panel draws it. The span
+        # times are relative to this trimmed stream, whose t=0 is the clip's
+        # own start.
+        keys = fx_mod.clean_keyframes(item.get("kf"), d)
+        if keys:
+            for a, b, span_eff in fx_mod.slice_spans(eff, keys, d, min_step=0.1):
+                level = 0.0 if eff["mute"] else span_eff["volume"] / 100.0
+                if abs(level - 1.0) > 1e-9:
+                    chain.append(f"volume={_f(level)}:"
+                                 f"enable='between(t,{a:.6f},{b:.6f})'")
+        elif abs(vol - 1.0) > 1e-9:
             chain.append(f"volume={_f(vol)}")
         user = fx_mod.audio_chain(eff, d)
         if user:
@@ -346,7 +357,8 @@ def build_filter(clips: list[dict], auds: list[dict], total: float, fps: float,
         audible.append({"src": clip.get("src") or MAIN_ID,
                         "start": float(clip["start"]), "end": float(clip["end"]),
                         "in": float(clip["in"]),
-                        "fx": fx_mod.clean_fx(clip.get("fx"))})
+                        "fx": fx_mod.clean_fx(clip.get("fx")),
+                        "kf": clip.get("kf")})
     for item in auds:
         inp = inputs.get(item.get("src") or MAIN_ID)
         if inp is None or not inp.has_audio:
@@ -354,7 +366,8 @@ def build_filter(clips: list[dict], auds: list[dict], total: float, fps: float,
         audible.append({"src": item.get("src") or MAIN_ID,
                         "start": float(item["start"]), "end": float(item["end"]),
                         "in": float(item["in"]),
-                        "fx": fx_mod.clean_fx(item.get("fx"))})
+                        "fx": fx_mod.clean_fx(item.get("fx")),
+                        "kf": item.get("kf")})
     audible.sort(key=lambda a: (a["start"], a["end"]))
 
     has_audio = _audio_graph(audible, inputs, total, sample_rate, layout,
@@ -441,25 +454,38 @@ def flatten_clips(clips: list[dict]) -> list[dict]:
 
 
 def _copy_fast_path(clips: list[dict], auds: list[dict], opts: dict,
-                    info: dict, output: str, resolve) -> dict | None:
-    """True stream copy: one untouched clip from t=0 and nothing else."""
+                    info: dict, output: str, resolve) -> tuple[dict | None, str]:
+    """True stream copy: one untouched clip from t=0 and nothing else.
+
+    Returns ``(job, "")`` when the copy was started, or ``(None, why)`` with a
+    short reason for the caller's note - the reason is what the user reads in
+    the Export panel, so it has to name the thing that forced a re-encode.
+    """
     if auds:
-        return None
+        return None, "audio items on their own lanes"
     pieces = flatten_clips(clips)
     single = pieces[0] if len(pieces) == 1 else None
     if single is None or len(clips) != 1:
-        return None
+        return None, "several clips"
     clip = clips[0]
     if not fx_mod.fx_is_default(clip.get("fx")) or clip.get("kf"):
-        return None
+        return None, "clip effects or keyframes"
     if single["start"] > 1e-3 or single["in"] > 1e-3:
-        return None
-    if opts.get("burn_srt") or ex.has_display_transform(info):
-        return None
+        return None, "a clip that does not start at 0"
+    if opts.get("burn_srt"):
+        return None, "burned-in captions"
+    if ex.has_display_transform(info):
+        return None, "a rotated or flipped source"
     src_id = clip.get("src") or MAIN_ID
-    path, kind = resolve(src_id)
+    # The bin resolver answers (path, kind, has_audio); older callers pass
+    # (path, kind) and the no-bin fallback does too, so read by position.
+    got = resolve(src_id) or ()
+    path = got[0] if got else ""
+    kind = got[1] if len(got) > 1 else "video"
+    if not path:
+        return None, "a source file that could not be found"
     if kind != "video":
-        return None
+        return None, "a still image"
     dur = single["end"] - single["start"]
     fd, list_path = tempfile.mkstemp(suffix=".txt", prefix="vts_concat_")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -472,7 +498,7 @@ def _copy_fast_path(clips: list[dict], auds: list[dict], opts: dict,
     threading.Thread(target=ex._watch, args=(job, cmd, dur, False), daemon=True).start()
     snap = ex.get_job(job["id"])
     snap["segments"] = 1
-    return snap
+    return snap, ""
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +511,9 @@ def export_timeline(source: str, info: dict, clips: list[dict],
                     total: float | None = None) -> dict:
     """Render the edit list; returns the job dict.
 
-    `media` maps an asset id to ``(path, kind)``. Without it every clip is
-    trimmed from `source`, which is the pre-media-bin behaviour.
+    `media` maps an asset id to ``(path, kind, has_audio)``; ``(path, kind)``
+    is still accepted. Without it every clip is trimmed from `source`, which is
+    the pre-media-bin behaviour.
     """
     if not clips:
         raise ex.JobError("The timeline has no video clips left to export.")
@@ -518,16 +545,14 @@ def export_timeline(source: str, info: dict, clips: list[dict],
         fps = 30.0
 
     if opts.get("mode") == "copy":
-        fast = _copy_fast_path(clips, auds, opts, info, output, resolve)
+        fast, why = _copy_fast_path(clips, auds, opts, info, output, resolve)
         if fast:
             return fast
         if not opts.get("_mode_note"):
-            reason = ("several clips" if len(clips) > 1 else
-                      ("audio items" if auds else "clip effects / keyframes"))
             opts = {**opts, "_mode_note":
-                    "Stream copy needs one plain clip that starts at 0 with no "
-                    f"burned captions; {reason} need frame-accurate rendering, "
-                    "so this export was re-encoded."}
+                    "Stream copy needs one untrimmed clip with nothing drawn on "
+                    f"top of it; {why or 'this edit'} need frame-accurate "
+                    "rendering, so this export was re-encoded."}
 
     pix = opts.get("pix_fmt") or vinfo.get("pix_fmt") or "yuv420p"
     if pix not in PIX_FORMATS:
